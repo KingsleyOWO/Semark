@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <title>Synthetic Invoice Demo</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 40px; color: #111; }
+    h1 { font-size: 28px; margin-bottom: 4px; }
+    .meta { display: grid; grid-template-columns: 140px 1fr; gap: 6px 16px; margin: 24px 0; }
+    table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+    th, td { border: 1px solid #555; padding: 8px; text-align: left; }
+    th { background: #f1f5f9; }
+    .total { text-align: right; font-weight: 700; }
+    .note { margin-top: 24px; padding: 12px; border: 1px dashed #777; }
+  </style>
+</head>
+<body>
+  <h1>Demo Invoice INV-2026-001</h1>
+  <p>This synthetic document is for public demo and parser testing only.</p>
+
+  <section class="meta">
+    <strong>Issuer</strong><span>Example Data Studio</span>
+    <strong>Customer</strong><span>Demo Operations Team</span>
+    <strong>Invoice Date</strong><span>2026-06-08</span>
+    <strong>Due Date</strong><span>2026-06-30</span>
+  </section>
+
+  <table aria-label="invoice line items">
+    <thead>
+      <tr>
+        <th>Item</th>
+        <th>Description</th>
+        <th>Quantity</th>
+        <th>Unit Price</th>
+        <th>Amount</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td>A100</td><td>Document parsing baseline setup</td><td>1</td><td>1200</td><td>1200</td></tr>
+      <tr><td>B210</td><td>Structured table extraction validation</td><td>2</td><td>350</td><td>700</td></tr>
+      <tr><td>C330</td><td>RAG-ready markdown packaging</td><td>1</td><td>500</td><td>500</td></tr>
+      <tr><td colspan="4" class="total">Total</td><td>2400</td></tr>
+    </tbody>
+  </table>
+
+  <div class="note">
+    Payment terms: net 22 days. This document intentionally contains a table,
+    metadata fields, and a note block for parser output inspection.
+  </div>
+</body>
+</html>

@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <title>合成專案會議紀錄</title>
+  <style>
+    body { font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 40px; color: #111; line-height: 1.55; }
+    h1 { font-size: 28px; margin-bottom: 4px; }
+    h2 { margin-top: 28px; border-bottom: 1px solid #ccc; padding-bottom: 4px; }
+    .meta { display: grid; grid-template-columns: 120px 1fr; gap: 6px 14px; margin-top: 20px; }
+    .decision { border-left: 5px solid #2563eb; background: #eff6ff; padding: 12px 14px; margin: 16px 0; }
+    table { width: 100%; border-collapse: collapse; margin-top: 14px; }
+    th, td { border: 1px solid #555; padding: 8px; text-align: left; vertical-align: top; }
+    th { background: #f1f5f9; }
+  </style>
+</head>
+<body>
+  <h1>文件語意解析 Demo 會議紀錄</h1>
+  <p>公開合成範例，設計用來測試章節切分、決策摘要、待辦表格與責任歸屬。</p>
+
+  <section class="meta">
+    <strong>會議日期</strong><span>2026-06-16</span>
+    <strong>主持人</strong><span>陳品安</span>
+    <strong>與會者</strong><span>資料平台組、產品設計、後端工程、文件管理 PM</span>
+    <strong>會議目標</strong><span>確認開源 demo corpus、Docker 測試流程與 GitHub 發布前檢查項目。</span>
+  </section>
+
+  <h2>討論重點</h2>
+  <ol>
+    <li>Repo 內只放自製合成範例，避免授權、個資與客戶資料風險。</li>
+    <li>官方公開文件透過下載腳本取得，不直接 commit 到 GitHub。</li>
+    <li>Docker full compose 作為 MinerU baseline；VLM endpoint 由使用者自行設定。</li>
+    <li>README 需要明確說明 fast profile 與 accurate profile 的差異。</li>
+  </ol>
+
+  <div class="decision">
+    <strong>決議：</strong>發布前必須完成一次 clean clone 測試、Docker full health check、demo corpus 上傳與至少一筆 pipeline run 成功驗證。
+  </div>
+
+  <h2>待辦事項</h2>
+  <table aria-label="action items">
+    <thead><tr><th>項目</th><th>負責人</th><th>到期日</th><th>驗收條件</th></tr></thead>
+    <tbody>
+      <tr><td>補齊繁中與英文 demo samples</td><td>產品設計</td><td>2026-06-18</td><td>範例可直接上傳並產出 Markdown</td></tr>
+      <tr><td>建立公開文件下載腳本</td><td>後端工程</td><td>2026-06-19</td><td>IRS PDF 與 SEC 10-K 可下載到 workspace</td></tr>
+      <tr><td>撰寫 demo 執行腳本</td><td>資料平台組</td><td>2026-06-20</td><td>可批次 upload 並建立 pipeline runs</td></tr>
+      <tr><td>更新 GitHub README</td><td>文件管理 PM</td><td>2026-06-21</td><td>新使用者可照步驟重現 demo</td></tr>
+    </tbody>
+  </table>
+</body>
+</html>

@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <title>合成採購申請單</title>
+  <style>
+    body { font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 40px; color: #111; line-height: 1.5; }
+    h1 { font-size: 28px; margin-bottom: 4px; }
+    .muted { color: #555; }
+    .grid { display: grid; grid-template-columns: 150px 1fr 150px 1fr; border: 1px solid #444; margin-top: 24px; }
+    .label, .value { border: 1px solid #444; padding: 10px; min-height: 30px; }
+    .label { background: #eef2f7; font-weight: 700; }
+    .wide { grid-column: span 3; }
+    table { width: 100%; border-collapse: collapse; margin-top: 24px; }
+    th, td { border: 1px solid #555; padding: 8px; text-align: left; vertical-align: top; }
+    th { background: #f1f5f9; }
+    .note { margin-top: 24px; border: 1px dashed #777; padding: 12px; }
+  </style>
+</head>
+<body>
+  <h1>採購申請單 PR-2026-0616</h1>
+  <p class="muted">公開合成範例，僅用於文件解析、表單欄位抽取與 VLM 語意增強展示。</p>
+
+  <section class="grid" aria-label="採購基本資料">
+    <div class="label">申請單位</div><div class="value">資料平台組</div>
+    <div class="label">申請人</div><div class="value">林佳儀</div>
+    <div class="label">申請日期</div><div class="value">2026-06-16</div>
+    <div class="label">需求日期</div><div class="value">2026-07-05</div>
+    <div class="label">預算科目</div><div class="value">雲端與資料工具</div>
+    <div class="label">核准主管</div><div class="value">王明哲</div>
+    <div class="label">採購目的</div><div class="value wide">建立文件語意解析 demo corpus，驗證表格、欄位、核准流程與 RAG-ready 輸出。</div>
+  </section>
+
+  <h2>採購項目</h2>
+  <table aria-label="採購明細">
+    <thead>
+      <tr><th>項次</th><th>品項</th><th>規格說明</th><th>數量</th><th>預估單價</th><th>小計</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>1</td><td>文件解析測試資料整理</td><td>建立 HTML/PDF/影像樣本與驗收 checklist</td><td>1</td><td>18000</td><td>18000</td></tr>
+      <tr><td>2</td><td>VLM 表單欄位驗證</td><td>欄位抽取、填寫指南、風險標註</td><td>2</td><td>7500</td><td>15000</td></tr>
+      <tr><td>3</td><td>OpenWebUI 匯入測試</td><td>Markdown/TXT/DOCX 成品匯入與查詢驗證</td><td>1</td><td>12000</td><td>12000</td></tr>
+      <tr><td colspan="5" style="text-align:right;font-weight:700">總計</td><td>45000</td></tr>
+    </tbody>
+  </table>
+
+  <section class="note">
+    <strong>審核備註：</strong>請確認輸出包含主文、分檔文件、品質報告、source map 與語意 enrichment JSON。若使用遠端 VLM，請勿上傳含個資或客戶資料的文件。
+  </section>
+</body>
+</html>

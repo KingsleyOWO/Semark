@@ -1086,6 +1086,10 @@ def test_package_title_gate_rejects_page_numbers_and_long_sentences():
     )
     assert stage._is_unreliable_export_title("正，並自同日起施行）")
     assert stage._is_unreliable_export_title("壹總則")
+    assert stage._is_unreliable_export_title("(一)營運目標")
+    assert stage._is_unreliable_export_title("組織營運應有效率與效果。")
+    assert stage._is_unreliable_export_title("正，並自同日起施行） 第 2 頁 表格 1")
+    assert stage._is_unreliable_export_title("2021 12 d1 1587")
     assert not stage._is_unreliable_export_title("示範研究院個資事件處理報告單")
 
 

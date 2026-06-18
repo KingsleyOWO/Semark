@@ -2128,7 +2128,11 @@ def _looks_like_note_field_name(name: str) -> bool:
     if not text:
         return False
     if not re.match(r"^(?:註[:：]?|備註[:：]?|\d{1,2}[.．、]|[一二三四五六七八九十]+[.．、])", text):
-        return False
+        if not re.search(r"[。；;]", text):
+            return False
+        if text.startswith(("□", "☐", "☑")) or re.search(r"[:：]", text):
+            return False
+        return bool(re.search(r"依本院|應|不得|不受|辦理|報備|檢附|須經|規定|規範", text))
     return bool(re.search(r"[。；;]|辦理|填寫|檢附|不得|應於|核銷|報支", text))
 
 

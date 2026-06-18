@@ -793,7 +793,10 @@ class PackageStage:
 
         source_ext = Path(source_path).suffix.lower()
         for line in source_md.splitlines():
-            raw_title = line.strip().lstrip("#").strip()
+            stripped_line = line.strip()
+            if not stripped_line.startswith("#") and not stripped_line.startswith("TABLE:"):
+                continue
+            raw_title = stripped_line.lstrip("#").strip()
             if raw_title.startswith("TABLE:"):
                 raw_title = raw_title.removeprefix("TABLE:").strip()
             title = self._clean_export_title(raw_title)
@@ -836,13 +839,19 @@ class PackageStage:
             return True
         if re.fullmatch(r"[A-Za-z]*Figure\d*|Table\d*", compact, re.IGNORECASE):
             return True
+        if not re.search(r"[\u4e00-\u9fff]", compact) and len(re.findall(r"\d", compact)) >= 3:
+            return True
         if len(compact) <= 2:
             return True
         if re.search(r"(?:核定|修正|訂定).{0,16}(?:施行|生效)|(?:施行|生效)[）)]?$", compact):
             return True
-        if re.fullmatch(r"[壹貳參肆伍陸柒捌玖拾一二三四五六七八九十]+[、.．]?[\u4e00-\u9fff]{1,8}", compact):
+        if re.search(r"第\d+頁表格\d+", compact):
             return True
-        if len(compact) > 45 and re.search(r"[。；;，,]", compact):
+        if re.fullmatch(r"[（(]?[壹貳參肆伍陸柒捌玖拾一二三四五六七八九十]+[）)]?[、.．]?[\u4e00-\u9fff]{1,10}[:：]?", compact):
+            return True
+        if re.search(r"[。；;]", compact):
+            return True
+        if len(compact) > 45 and re.search(r"[，,]", compact):
             return True
         if re.search(r"事件編號|表單編號|申請日期|填表日期|xxx|xx\(|序號", compact, re.IGNORECASE):
             return True

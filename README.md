@@ -111,6 +111,8 @@ Full MinerU-capable Docker path:
 docker compose -f docker-compose.full.yml up --build
 ```
 
+On Linux, Docker bridge networking may not always reach a host Ollama service through `host.docker.internal`. If Settings -> VLM model probe times out, set `DOC_PARSER_VLM_BASE_URL` and `DOC_PARSER_REVIEW_VLM_BASE_URL` to a host address reachable from the container, or run the backend with host networking. The backend Docker images honor `DOC_PARSER_HOST` and `DOC_PARSER_PORT`, so host-network tests can bind an alternate port when 8585 is already in use.
+
 This installs the backend with `.[mineru]`, includes PyMuPDF, LibreOffice for HTML/Office conversion, Chinese CJK fonts, MinerU pipeline extras, constrained PyTorch 2.6/2.7 plus torchvision, and the small compatibility dependency `six` for the MinerU pipeline backend, provides the `mineru` CLI, and stores the MinerU/model cache in a Docker volume. It does not bundle model weights or API keys; first-time MinerU/model setup may download cache files according to MinerU's own behavior and license. The full image is intentionally larger than the baseline image because MinerU requires PyTorch at runtime.
 
 Set VLM configuration before starting if you want app-level VLM enrichment. `DOC_PARSER_VLM_*` drives extraction/enrichment. `DOC_PARSER_REVIEW_VLM_*` drives final audit/repair checks and can point to a stronger model; if omitted, it falls back to the enrichment model.

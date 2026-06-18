@@ -806,8 +806,26 @@ class PackageStage:
             if source_ext in {".xls", ".xlsx", ".ods"} and self._is_weak_spreadsheet_source_title(title):
                 continue
             return title[:120]
+        body_title = self._infer_source_title_from_body(source_md)
+        if body_title:
+            return body_title[:120]
         fallback = self._clean_export_title(Path(source_path).stem)
         return fallback[:120] or "來源文件"
+
+    def _infer_source_title_from_body(self, source_md: str) -> str:
+        text = re.sub(r"\s+", " ", source_md or "").strip()
+        if not text:
+            return ""
+        match = re.search(
+            r"(?P<org>(?:財團法人)?(?:台灣|臺灣)[\u4e00-\u9fff]{2,30}?)(?:（以下簡稱本院）|\(以下簡稱本院\))(?P<subject>[\u4e00-\u9fff]{2,20})[，,].{0,120}?特訂定本(?P<kind>制度|辦法|規程|要點|準則)",
+            text,
+        )
+        if match:
+            org = match.group("org")
+            subject = match.group("subject").replace("内部", "內部")
+            kind = match.group("kind")
+            return self._clean_export_title(f"{org}{subject}{kind}")
+        return ""
 
     @classmethod
     def _is_unreliable_export_title(cls, title: str) -> bool:
@@ -819,6 +837,10 @@ class PackageStage:
         if re.fullmatch(r"[A-Za-z]*Figure\d*|Table\d*", compact, re.IGNORECASE):
             return True
         if len(compact) <= 2:
+            return True
+        if re.search(r"(?:核定|修正|訂定).{0,16}(?:施行|生效)|(?:施行|生效)[）)]?$", compact):
+            return True
+        if re.fullmatch(r"[壹貳參肆伍陸柒捌玖拾一二三四五六七八九十]+[、.．]?[\u4e00-\u9fff]{1,8}", compact):
             return True
         if len(compact) > 45 and re.search(r"[。；;，,]", compact):
             return True

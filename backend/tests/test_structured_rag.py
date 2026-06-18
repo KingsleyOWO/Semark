@@ -1084,6 +1084,8 @@ def test_package_title_gate_rejects_page_numbers_and_long_sentences():
     assert stage._is_unreliable_export_title(
         "審查內容加以評核，並得同意申請人提出升等或駁回。申請駁回者，得於知悉結果翌日起七個工作日內申覆。"
     )
+    assert stage._is_unreliable_export_title("正，並自同日起施行）")
+    assert stage._is_unreliable_export_title("壹總則")
     assert not stage._is_unreliable_export_title("示範研究院個資事件處理報告單")
 
 
@@ -1091,6 +1093,19 @@ def test_package_source_title_falls_back_when_source_md_starts_with_page_number(
     stage = PackageStage()
     source_md = "# 1\n\nTABLE: 示範研究院人員薪酬管理辦法\nROW: 第一條 | 內容"
     assert stage._infer_source_title(source_md, "2-2.pdf") == "示範研究院人員薪酬管理辦法"
+
+def test_package_source_title_uses_body_policy_title_when_headings_are_noise():
+    stage = PackageStage()
+    source_md = (
+        "## 正，並自同日起施行）\n\n"
+        "## 壹總則\n\n"
+        "為落實財團法人示範研究院（以下簡稱本院）内部控制，考量本院整體營運活動、"
+        "組織業務、控制環境及管理需求，並為加強財務管理，以保障資產安全及經營成效，"
+        "防杜不法情事，有效達成組織目標，特訂定本制度。"
+    )
+    assert stage._infer_source_title(source_md, "10-3.pdf") == "財團法人示範研究院內部控制制度"
+
+
 
 
 def test_package_skips_empty_generic_figure_asset_documents():
@@ -1206,6 +1221,10 @@ def test_form_title_does_not_use_policy_sentence_with_checkbox_as_title():
     assert output.records
     assert "範，惟仍應事先" not in output.records[0]["form_name"]
     assert output.records[0]["form_name"] == "示範研究院人員訓練辦法"
+    field_names = [record.get("field_name", "") for record in output.records if record.get("content_type") == "form_field"]
+    assert all("範，惟仍應事先" not in field_name for field_name in field_names)
+    assert "欄位：範，惟仍應事先" not in output.rag_markdown
+    assert "範，惟仍應事先向所屬單位主管報備。(" not in output.rag_markdown
 
 
 def test_quality_gate_does_not_vlm_audit_short_semantic_outputs():

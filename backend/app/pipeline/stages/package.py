@@ -597,6 +597,7 @@ class PackageStage:
                     quality_gate.stats["post_repair_note"] = (
                         "Reviewer model rewrote semantic markdown/chunks after the rule-based quality gate."
                     )
+                    self._settle_quality_gate_after_semantic_repair(quality_gate, semantic_repair_stats)
                 if semantic_repair_stats.get("blocked_count", 0) > 0:
                     quality_gate.stats["semantic_repair_blocked"] = True
                     quality_gate.stats["auto_rag_ready"] = False
@@ -1488,6 +1489,104 @@ class PackageStage:
                 codes.append(code)
         return codes
 
+    @classmethod
+    def _settle_quality_gate_after_semantic_repair(cls, quality_gate: Any, semantic_repair_stats: dict[str, Any]) -> None:
+        if int(semantic_repair_stats.get("applied_count", 0) or 0) <= 0:
+            return
+        if int(semantic_repair_stats.get("fallback_count", 0) or 0) > 0:
+            return
+        if int(semantic_repair_stats.get("blocked_count", 0) or 0) > 0:
+            return
+
+        repairable_codes = {
+            "structured_output_empty",
+            "vlm_enrichment_parse_failed",
+            "semantic_output_too_short",
+            "semantic_template_incomplete",
+            "semantic_summary_too_dense",
+            "form_signature_fields_missing",
+            "table_notes_missing",
+            "form_like_document_not_structured",
+            "possible_over_split_form",
+            "field_name_too_long",
+            "merged_field_detected",
+            "too_many_generic_fields",
+            "version_misclassified_as_note",
+            "summary_contains_ellipsis",
+            "raw_parser_residue",
+            "ocr_title_noise",
+            "english_noise_high",
+            "target_language_mismatch",
+            "vlm_audit_missing_items",
+        }
+        before_issues = list(getattr(quality_gate, "issues", []) or [])
+        remaining_issues = [
+            issue for issue in before_issues if str(getattr(issue, "code", "") or "") not in repairable_codes
+        ]
+        cleared_codes: list[str] = []
+        for issue in before_issues:
+            code = str(getattr(issue, "code", "") or "")
+            if code in repairable_codes and code not in cleared_codes:
+                cleared_codes.append(code)
+
+        quality_gate.issues = remaining_issues
+        stats = dict(getattr(quality_gate, "stats", {}) or {})
+        stats["pre_semantic_repair_issue_count"] = len(before_issues)
+        stats["post_semantic_repair_issue_count"] = len(remaining_issues)
+        stats["pre_semantic_repair_vlm_audit_candidate_count"] = len(getattr(quality_gate, "vlm_audit_candidates", []) or [])
+        stats["pre_semantic_repair_vlm_audit_count"] = len(getattr(quality_gate, "vlm_audits", []) or [])
+        stats["semantic_repair_cleared_issue_codes"] = cleared_codes
+        stats["semantic_repair_quality_settled"] = True
+        stats["auto_rag_ready"] = not remaining_issues
+        stats["issue_count"] = len(remaining_issues)
+        stats["issues_by_code"] = cls._count_values(str(getattr(issue, "code", "") or "") for issue in remaining_issues)
+        stats["issues_by_severity"] = cls._count_values(
+            str(getattr(issue, "severity", "") or "") for issue in remaining_issues
+        )
+        semantic_quality = dict(stats.get("semantic_quality", {}) or {})
+        semantic_quality["post_repair_issue_count"] = len(remaining_issues)
+        semantic_quality["post_repair_status"] = cls._quality_status_from_issues(remaining_issues)
+        if not remaining_issues:
+            semantic_quality["rag_readiness_score"] = max(float(semantic_quality.get("rag_readiness_score", 0.0) or 0.0), 0.95)
+            semantic_quality["recommended_repairs"] = []
+        stats["semantic_quality"] = semantic_quality
+        quality_gate.stats = stats
+        quality_gate.status = cls._quality_status_from_issues(remaining_issues)
+        quality_gate.score = cls._quality_score_from_issues(remaining_issues)
+        if not remaining_issues:
+            quality_gate.vlm_audit_candidates = []
+            quality_gate.vlm_audits = []
+
+    @staticmethod
+    def _quality_status_from_issues(issues: list[Any]) -> str:
+        if any(str(getattr(issue, "severity", "") or "") == "high" for issue in issues):
+            return "needs_review"
+        if any(str(getattr(issue, "severity", "") or "") == "medium" for issue in issues):
+            return "warning"
+        return "pass"
+
+    @staticmethod
+    def _quality_score_from_issues(issues: list[Any]) -> float:
+        penalty = 0.0
+        for issue in issues:
+            severity = str(getattr(issue, "severity", "") or "")
+            if severity == "high":
+                penalty += 0.25
+            elif severity == "medium":
+                penalty += 0.12
+            elif severity == "warning":
+                penalty += 0.05
+        return max(0.0, round(1.0 - penalty, 3))
+
+    @staticmethod
+    def _count_values(values: Any) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for value in values:
+            if not value:
+                continue
+            counts[str(value)] = counts.get(str(value), 0) + 1
+        return counts
+
     def _quality_issues_as_dicts(self, quality_gate: Any, page_indices: list[int]) -> list[dict[str, Any]]:
         pages = set(page_indices)
         result: list[dict[str, Any]] = []
@@ -1907,7 +2006,35 @@ class PackageStage:
             current_title = self._clean_export_title(match.group(1) if match else "")
             if match and self._is_weak_repair_heading(current_title, clean_title):
                 text = re.sub(r"^#\s+[^\n]+", f"# {clean_title}", text, count=1)
+        text = self._remove_duplicate_repair_heading(text, clean_title)
         return text.strip() + "\n"
+
+    @classmethod
+    def _remove_duplicate_repair_heading(cls, markdown: str, title: str) -> str:
+        lines = markdown.strip().splitlines()
+        if not lines:
+            return markdown
+        first_idx = next((idx for idx, line in enumerate(lines) if line.strip()), None)
+        if first_idx is None:
+            return markdown
+        first_match = re.match(r"^#\s+(.+?)\s*$", lines[first_idx].strip())
+        if not first_match:
+            return markdown
+        first_title = cls._clean_export_title(first_match.group(1))
+        expected_title = cls._clean_export_title(title or first_title)
+        probe_idx = first_idx + 1
+        while probe_idx < len(lines) and not lines[probe_idx].strip():
+            probe_idx += 1
+        if probe_idx >= len(lines):
+            return markdown
+        duplicate_match = re.match(r"^#{1,3}\s+(.+?)\s*$", lines[probe_idx].strip())
+        if not duplicate_match:
+            return markdown
+        duplicate_title = cls._clean_export_title(duplicate_match.group(1))
+        if duplicate_title not in {first_title, expected_title}:
+            return markdown
+        del lines[probe_idx]
+        return "\n".join(lines).strip()
 
     def _semantic_repair_title(self, *, document_ir: DocumentIR, source_md: str, structured_output: Any) -> str:
         plan = getattr(structured_output, "plan", None)

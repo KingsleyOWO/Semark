@@ -1007,6 +1007,60 @@ Text
 
         self.assertTrue(PackageStage._quality_gate_needs_semantic_repair(quality_gate))
 
+    def test_semantic_repair_normalization_removes_duplicate_title_heading(self):
+        markdown = (
+            "# Complaint Process\n\n"
+            "## Complaint Process\n\n"
+            "### Intake\n"
+            "- Victim files a complaint.\n"
+        )
+
+        text = PackageStage()._normalize_repaired_markdown(markdown, "Complaint Process")
+
+        self.assertEqual(text.count("Complaint Process"), 1)
+        self.assertIn("### Intake", text)
+
+    def test_semantic_repair_normalization_keeps_distinct_first_section(self):
+        markdown = (
+            "# Complaint Process\n\n"
+            "## Intake\n"
+            "- Victim files a complaint.\n"
+        )
+
+        text = PackageStage()._normalize_repaired_markdown(markdown, "Complaint Process")
+
+        self.assertIn("# Complaint Process", text)
+        self.assertIn("## Intake", text)
+
+    def test_semantic_repair_settles_repairable_quality_gate_issues(self):
+        quality_gate = SimpleNamespace(
+            status="needs_review",
+            score=0.25,
+            issues=[
+                SimpleNamespace(code="structured_output_empty", severity="high"),
+                SimpleNamespace(code="vlm_enrichment_parse_failed", severity="high"),
+            ],
+            vlm_audit_candidates=[{"page_idx": 0, "reasons": ["structured_output_empty"]}],
+            vlm_audits=[{"success": False}],
+            stats={"issue_count": 2},
+        )
+
+        PackageStage._settle_quality_gate_after_semantic_repair(
+            quality_gate,
+            {"applied_count": 1, "fallback_count": 0, "blocked_count": 0},
+        )
+
+        self.assertEqual(quality_gate.status, "pass")
+        self.assertEqual(quality_gate.issues, [])
+        self.assertEqual(quality_gate.stats["post_semantic_repair_issue_count"], 0)
+        self.assertEqual(quality_gate.stats["issues_by_code"], {})
+        self.assertTrue(quality_gate.stats["auto_rag_ready"])
+        self.assertEqual(quality_gate.vlm_audit_candidates, [])
+        self.assertEqual(quality_gate.vlm_audits, [])
+        self.assertEqual(quality_gate.stats["pre_semantic_repair_vlm_audit_candidate_count"], 1)
+        self.assertEqual(quality_gate.stats["pre_semantic_repair_vlm_audit_count"], 1)
+        self.assertIn("structured_output_empty", quality_gate.stats["semantic_repair_cleared_issue_codes"])
+
 
     def test_semantic_repair_rejects_chinese_template_for_english_output(self):
         repaired = (

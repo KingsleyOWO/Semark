@@ -25,6 +25,7 @@ Doc Parser converts PDFs, Office files, HTML, and images into RAG-ready Markdown
 ## Important Links
 
 - [README](README.md): setup, Docker, MinerU, VLM configuration, examples, security boundary, publishing notes.
+- [Traditional Chinese README](README.zh-TW.md): Traditional Chinese setup, Docker, MinerU, VLM configuration, examples, security boundary, and publishing notes.
 - [Examples](examples/README.md): synthetic samples and curated output demos.
 - [Demo snapshots](examples/demos/README.md): source-page images, generated Markdown, chunks, and quality reports.
 - [Third-party licenses](THIRD_PARTY_LICENSES.md): license notes for MinerU, PyMuPDF/MuPDF, models, and dependencies.

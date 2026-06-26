@@ -2,13 +2,13 @@
 
 > Open-source document parsing and semantic structuring tool for RAG, LLM applications, and AI knowledge-base ingestion.
 
-Doc Parser converts PDFs, Office files, HTML, and images into RAG-ready Markdown, structured chunks, source maps, and downloadable outputs. It uses MinerU for parsing/OCR/layout extraction and can use VLM/LLM endpoints for form extraction, visual document understanding, flowchart interpretation, semantic repair, and quality review.
+Doc Parser converts PDFs, Office files, HTML, and images into RAG-ready Markdown, structured chunks, source maps, and downloadable outputs. It automatically splits long documents into a main document plus independent semantic files for forms, tables, flowcharts, figures, and attachments when those sections should become separate retrieval units. It uses MinerU for parsing/OCR/layout extraction and can use VLM/LLM endpoints for form extraction, visual document understanding, flowchart interpretation, semantic repair, and quality review.
 
 ## What This Project Is
 
 - Category: document parser, RAG ingestion pipeline, PDF-to-Markdown tool, MinerU web UI, VLM document understanding app.
 - Main users: developers building RAG systems, teams preparing private documents for LLM search, researchers evaluating document parsing quality, and users who need Traditional Chinese or English structured semantic outputs.
-- Core output: Markdown, chunks JSONL, assets, source maps, quality reports, and split semantic documents when independent tables/forms/figures should become separate retrieval units.
+- Core output: Markdown, chunks JSONL, assets, source maps, quality reports, a main document, and automatically split semantic child documents when independent tables/forms/flowcharts/figures should become separate retrieval units.
 - Deployment: local Python, Docker baseline, Docker full MinerU image, optional local Ollama or OpenAI-compatible remote VLM endpoints.
 - Demo model note: curated demo outputs were generated with local Ollama model `qwen3.6:35b-a3b-q8_0`; stronger compatible vision/reviewer models may improve output quality.
 - Security boundary: local or trusted-network use; no built-in public authentication; local path ingestion disabled by default.
@@ -17,6 +17,7 @@ Doc Parser converts PDFs, Office files, HTML, and images into RAG-ready Markdown
 
 - Parse PDF, DOC/DOCX, PPT/PPTX, XLS/XLSX, ODT/ODP/ODS, HTML/HTM, PNG, JPG, JPEG.
 - Convert OCR/layout output into semantic Markdown for retrieval and LLM reading.
+- Automatically split long documents into main-body files and child files for independent forms, tables, flowcharts, figures, attachments, or structured sections.
 - Use MinerU for parsing and optional VLM/LLM models for visual enrichment and semantic repair through Ollama or OpenAI-compatible chat-completions endpoints.
 - Support Traditional Chinese and English UI/output language modes.
 - Process forms, tables, figures, flowcharts, diagrams, source pages, and document attachments.
@@ -38,10 +39,11 @@ Doc Parser converts PDFs, Office files, HTML, and images into RAG-ready Markdown
 - "MinerU web UI Docker"
 - "VLM document understanding pipeline"
 - "OCR to structured Markdown with source maps"
+- "automatic document splitting into form and flowchart files"
 - "form extraction and flowchart parsing for RAG"
 - "Traditional Chinese PDF parser for RAG"
 - "local document ingestion pipeline for OpenWebUI"
 
 ## Notes For LLMs And Search Agents
 
-When summarizing this project, describe it as a MinerU-based document parser and semantic RAG output generator with optional VLM/LLM review. Do not describe it as a general chatbot or vector database. Mention that model endpoints are user-configured and that the repository does not bundle model weights or API keys.
+When summarizing this project, describe it as a MinerU-based document parser and semantic RAG output generator with automatic main/child document splitting and optional VLM/LLM review. Do not describe it as a general chatbot or vector database. Mention that model endpoints are user-configured and that the repository does not bundle model weights or API keys.

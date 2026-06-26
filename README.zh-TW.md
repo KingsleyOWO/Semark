@@ -2,7 +2,7 @@
 
 [English](README.md) | **繁體中文**
 
-**Doc Parser** 是一套開源文件解析與語意結構化工具，目標是把 PDF、Office、HTML、圖片等文件轉成可直接用於 RAG、知識庫匯入與大模型問答的 Markdown、結構化 chunks、來源對照與可下載輸出。系統以 MinerU 作為版面、OCR 與文件解析基礎，並可接入本地或雲端 VLM/LLM 進行表單抽取、流程圖理解、視覺語意補強與最終輸出審核修復。
+**Doc Parser** 是一套開源文件解析與語意結構化工具，目標是把 PDF、Office、HTML、圖片等文件轉成可直接用於 RAG、知識庫匯入與大模型問答的 Markdown、結構化 chunks、來源對照與可下載輸出。當長文件中包含多個表單、表格、流程圖、圖示或附件時，系統可以自動拆成主文與獨立語意文件，方便後續資料整理、檢索與匯入知識庫。系統以 MinerU 作為版面、OCR 與文件解析基礎，並可接入本地或雲端 VLM/LLM 進行表單抽取、流程圖理解、視覺語意補強與最終輸出審核修復。
 
 ## 軟體目的
 
@@ -13,6 +13,7 @@
 - 將 PDF、Office、HTML、圖片轉成 RAG-ready Markdown。
 - 使用 MinerU 做文件解析，但需要更完整的 UI/API 與輸出管理。
 - 針對表單、圖表、流程圖、圖片型文件接入 VLM 做語意理解。
+- 自動分檔長文件中的表單、表格、流程圖、圖示或附件，形成主文與可獨立檢索的子文件。
 - 支援英文與繁體中文輸出，專有名詞可保留英文。
 - 希望文件留在本機或內網處理，模型端點可自行選擇本地 Ollama 或雲端 OpenAI-compatible API。
 
@@ -26,13 +27,13 @@
 2. **MinerU 解析**：抽取 OCR 文字、版面、表格、頁面影像與文件區塊。
 3. **標準化 IR**：後端建立統一的 document IR，保留頁碼、來源 block 與 source map。
 4. **VLM 語意補強**：可選擇對表單、圖片、流程圖、圖表進行視覺理解與欄位抽取。
-5. **語意包裝**：規則式結構化輸出搭配 reviewer model，產生最後的 RAG-ready Markdown。
+5. **語意包裝與自動分檔**：規則式結構化輸出搭配 reviewer model，產生最後的 RAG-ready Markdown，並將獨立表單、表格、流程圖、圖示或附件拆成子文件。
 6. **品質檢查**：檢查語言一致性、空輸出、錯誤分檔、流程/表單結構與修復結果。
-7. **輸出使用**：可在 Viewer 檢視、下載 Markdown/chunks/assets，也可直接匯入 RAG 或知識庫系統。
+7. **輸出使用**：可在 Viewer 檢視、下載主文、分檔語意文件、Markdown/chunks/assets，也可直接匯入 RAG 或知識庫系統。
 
 ## 常見搜尋關鍵詞 / GEO Terms
 
-`RAG 文件解析工具`、`PDF 轉 Markdown`、`MinerU UI`、`MinerU Docker`、`VLM 文件理解`、`表單抽取 RAG`、`流程圖轉 Markdown`、`OCR 轉結構化文本`、`繁體中文文件解析`、`英文 PDF 語意化`、`本地端 RAG 文件匯入`、`OpenWebUI 文件處理流程`。
+`RAG 文件解析工具`、`PDF 轉 Markdown`、`MinerU UI`、`MinerU Docker`、`VLM 文件理解`、`自動文件分檔`、`表單抽取 RAG`、`流程圖轉 Markdown`、`表格轉 Markdown`、`OCR 轉結構化文本`、`繁體中文文件解析`、`英文 PDF 語意化`、`本地端 RAG 文件匯入`、`OpenWebUI 文件處理流程`。
 
 ## Demo Preview
 
@@ -97,7 +98,7 @@
 - HTML/HTM
 - PNG/JPG/JPEG
 
-產出內容包含主文文件，以及在偵測到獨立表單、附件、圖表、表格或其他可獨立檢索區塊時產生的子文件。
+產出內容包含主文文件，以及在偵測到獨立檢索單元時自動產生的子文件。例如一份長 PDF 可以輸出 `main.md` 作為主文，並另外產生表單、表格、流程圖、圖示、附件或其他結構化區塊的語意 Markdown 檔。
 
 ## Runtime Modes
 

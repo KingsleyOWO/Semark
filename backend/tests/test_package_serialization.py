@@ -779,6 +779,126 @@ Text
         self.assertIn("結案或製成處理", output["all_text"])
 
 
+    def test_flowchart_output_filters_parser_merged_branch_labels(self):
+        document_ir = DocumentIR(
+            doc_id="doc-flow",
+            run_id="run-flow",
+            source=SourceInfo(path="delegation-flow.pdf", ext="pdf", sha256="abc", size_bytes=1),
+            engine=EngineInfo(backend="pipeline", method="ocr"),
+            blocks=[
+                Block(
+                    block_id="title",
+                    type=BlockType.TEXT,
+                    page_idx=0,
+                    reading_order=0,
+                    payload={"text": "Request for Delegation"},
+                ),
+                Block(
+                    block_id="image",
+                    type=BlockType.IMAGE,
+                    page_idx=0,
+                    reading_order=1,
+                    payload={},
+                ),
+                Block(
+                    block_id="merged",
+                    type=BlockType.TEXT,
+                    page_idx=0,
+                    reading_order=2,
+                    payload={"text": "Approved Rejected"},
+                ),
+                Block(
+                    block_id="draft",
+                    type=BlockType.TEXT,
+                    page_idx=0,
+                    reading_order=3,
+                    payload={"text": "Draft agreement"},
+                ),
+                Block(
+                    block_id="filed",
+                    type=BlockType.TEXT,
+                    page_idx=0,
+                    reading_order=4,
+                    payload={"text": "Agreement filed"},
+                ),
+            ],
+        )
+
+        output = PackageStage()._augment_visual_output_from_page_text(
+            {
+                "image_type": "flowchart",
+                "all_text": ["Request for Delegation", "Approved", "Rejected"],
+                "structured_content": [
+                    "Request for Delegation > Approved > Draft agreement",
+                    "Request for Delegation > Rejected",
+                ],
+            },
+            document_ir,
+            document_ir.blocks[1],
+        )
+
+        self.assertIn("Approved", output["all_text"])
+        self.assertIn("Rejected", output["all_text"])
+        self.assertNotIn("Approved Rejected", output["all_text"])
+        self.assertIn("Draft agreement", output["all_text"])
+
+    def test_semantic_repair_evidence_marks_parser_merged_flowchart_labels(self):
+        document_ir = DocumentIR(
+            doc_id="doc-flow",
+            run_id="run-flow",
+            source=SourceInfo(path="delegation-flow.pdf", ext="pdf", sha256="abc", size_bytes=1),
+            engine=EngineInfo(backend="pipeline", method="ocr"),
+            blocks=[
+                Block(
+                    block_id="title",
+                    type=BlockType.TEXT,
+                    page_idx=0,
+                    reading_order=0,
+                    payload={"text": "Request for Delegation"},
+                ),
+                Block(
+                    block_id="merged",
+                    type=BlockType.TEXT,
+                    page_idx=0,
+                    reading_order=1,
+                    payload={"text": "Approved Rejected"},
+                ),
+                Block(
+                    block_id="draft",
+                    type=BlockType.TEXT,
+                    page_idx=0,
+                    reading_order=2,
+                    payload={"text": "Draft agreement"},
+                ),
+            ],
+        )
+        enrichments = {
+            "image": {
+                "input": {"page_idx": 0},
+                "kind": "figure_description",
+                "output": {
+                    "image_type": "flowchart",
+                    "all_text": ["Request for Delegation", "Approved", "Rejected"],
+                    "structured_content": [
+                        "Request for Delegation > Approved > Draft agreement",
+                        "Request for Delegation > Rejected",
+                    ],
+                },
+            }
+        }
+
+        evidence = PackageStage()._semantic_repair_source_evidence(
+            document_ir=document_ir,
+            page_indices=[0],
+            enrichments=enrichments,
+            fallback_text="",
+        )
+
+        self.assertIn("visual label conflict hints", evidence)
+        self.assertIn("Approved | Rejected", evidence)
+        self.assertNotIn("- text: Approved Rejected", evidence)
+        self.assertIn("structured_content", evidence)
+
     def test_chinese_visual_summary_does_not_invent_workflow_steps(self):
         text = PackageStage()._render_visual_semantic_content(
             "Government Agency A (甲)",

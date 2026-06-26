@@ -247,6 +247,7 @@ Repair goals:
 - Rebuild the document structure from source evidence, not from boilerplate.
 - Remove repetitive template filler, repeated titles, parser residue, ellipses, and merged field labels.
 - Preserve exact source field names, dates, amounts, notes, checkbox options, approval/signature roles, and legal/article references.
+- For flowcharts/diagrams, prefer VLM structured paths and visible-text lists when parser text merges adjacent branch labels; split those labels into separate branches/outcomes instead of copying a combined label as one node.
 - For forms, group fields by meaning and explain only useful completion/approval/notes information.
 - For official forms, the final Markdown should be the usable semantic document: identity, purpose, who uses it, authorization/request scope, required fields, conditional fields, signature/authority rules, instructions/notices, and RAG query anchors when supported by evidence.
 - Do not include a generic "Source Extracted Text" dump in the final Markdown. Use source text as evidence, then rewrite it into semantic sections.

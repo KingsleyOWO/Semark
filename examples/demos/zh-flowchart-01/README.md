@@ -14,6 +14,12 @@ VLM/reviewer model rewrites the final output into RAG-ready semantic Markdown.
 - [chunks.jsonl](chunks.jsonl): retrieval chunks generated from the semantic output.
 - [quality_gate.json](quality_gate.json): pass/fail status, issue summary, and repair metadata.
 
+## Model Note
+
+This snapshot was generated in the test environment with local Ollama model
+`qwen3.6:35b-a3b-q8_0` as the enrichment/reviewer model. Stronger compatible
+vision or reviewer models may improve visual reasoning and semantic repair quality.
+
 ## Run Metadata
 
 - Run ID: `01KW0VM74QCTCYD2Y0RJBWJZ3B`

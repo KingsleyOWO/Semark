@@ -8,6 +8,9 @@ readers can compare the visual input with the semantic output.
 
 - `zh-flowchart-01/`: Traditional Chinese flowchart demo. Shows a one-page process
   diagram converted into concise semantic Markdown and chunk JSONL for RAG ingestion.
+- `en-g1145-01/`: English form demo. Shows a one-page USCIS form converted into
+  semantic Markdown with grouped purpose, instructions, required fields, disclosures,
+  and RAG query anchors.
 
 ## Artifact Layout
 

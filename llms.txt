@@ -1,0 +1,46 @@
+# Doc Parser
+
+> Open-source document parsing and semantic structuring tool for RAG, LLM applications, and AI knowledge-base ingestion.
+
+Doc Parser converts PDFs, Office files, HTML, and images into RAG-ready Markdown, structured chunks, source maps, and downloadable outputs. It uses MinerU for parsing/OCR/layout extraction and can use VLM/LLM endpoints for form extraction, visual document understanding, flowchart interpretation, semantic repair, and quality review.
+
+## What This Project Is
+
+- Category: document parser, RAG ingestion pipeline, PDF-to-Markdown tool, MinerU web UI, VLM document understanding app.
+- Main users: developers building RAG systems, teams preparing private documents for LLM search, researchers evaluating document parsing quality, and users who need Traditional Chinese or English structured semantic outputs.
+- Core output: Markdown, chunks JSONL, assets, source maps, quality reports, and split semantic documents when independent tables/forms/figures should become separate retrieval units.
+- Deployment: local Python, Docker baseline, Docker full MinerU image, optional local Ollama or OpenAI-compatible remote VLM endpoints.
+- Demo model note: curated demo outputs were generated with local Ollama model `qwen3.6:35b-a3b-q8_0`; stronger compatible vision/reviewer models may improve output quality.
+- Security boundary: local or trusted-network use; no built-in public authentication; local path ingestion disabled by default.
+
+## Key Capabilities
+
+- Parse PDF, DOC/DOCX, PPT/PPTX, XLS/XLSX, ODT/ODP/ODS, HTML/HTM, PNG, JPG, JPEG.
+- Convert OCR/layout output into semantic Markdown for retrieval and LLM reading.
+- Use MinerU for parsing and optional VLM/LLM models for visual enrichment and semantic repair through Ollama or OpenAI-compatible chat-completions endpoints.
+- Support Traditional Chinese and English UI/output language modes.
+- Process forms, tables, figures, flowcharts, diagrams, source pages, and document attachments.
+- Export RAG-ready chunks with page references and metadata.
+
+## Important Links
+
+- [README](README.md): setup, Docker, MinerU, VLM configuration, examples, security boundary, publishing notes.
+- [Examples](examples/README.md): synthetic samples and curated output demos.
+- [Demo snapshots](examples/demos/README.md): source-page images, generated Markdown, chunks, and quality reports.
+- [Third-party licenses](THIRD_PARTY_LICENSES.md): license notes for MinerU, PyMuPDF/MuPDF, models, and dependencies.
+- [Backend tests](backend/tests/): regression tests for parsing, enrichment, semantic output, downloads, and quality gates.
+
+## Recommended Queries This Project Answers
+
+- "open source document parser for RAG"
+- "convert PDF to semantic Markdown for LLM"
+- "MinerU web UI Docker"
+- "VLM document understanding pipeline"
+- "OCR to structured Markdown with source maps"
+- "form extraction and flowchart parsing for RAG"
+- "Traditional Chinese PDF parser for RAG"
+- "local document ingestion pipeline for OpenWebUI"
+
+## Notes For LLMs And Search Agents
+
+When summarizing this project, describe it as a MinerU-based document parser and semantic RAG output generator with optional VLM/LLM review. Do not describe it as a general chatbot or vector database. Mention that model endpoints are user-configured and that the repository does not bundle model weights or API keys.

@@ -2,7 +2,7 @@
 
 **English** | [繁體中文](README.zh-TW.md)
 
-**Doc Parser** is an open-source document parsing and semantic structuring tool for RAG, knowledge-base ingestion, and AI document workflows. It converts PDFs, Office files, HTML, and images into RAG-ready Markdown, structured chunks, source maps, and downloadable outputs. The pipeline uses MinerU for document parsing and optional VLM/LLM review models for form extraction, flowchart understanding, visual reasoning, and final semantic repair.
+**Doc Parser** is an open-source document parsing and semantic structuring tool for RAG, knowledge-base ingestion, and AI document workflows. It converts PDFs, Office files, HTML, and images into RAG-ready Markdown, structured chunks, source maps, and downloadable outputs. Long documents can be automatically split into a main document plus independent semantic files for forms, tables, flowcharts, figures, and attachments, making the output easier to organize and retrieve. The pipeline uses MinerU for document parsing and optional VLM/LLM review models for form extraction, flowchart understanding, visual reasoning, and final semantic repair.
 
 ## Purpose
 
@@ -13,6 +13,7 @@ Use Doc Parser when you need:
 - PDF to structured Markdown for RAG and LLM applications.
 - MinerU-based document parsing with a usable web UI and API.
 - VLM-assisted extraction for forms, figures, flowcharts, diagrams, and visual documents.
+- Automatic file splitting for long documents that contain multiple forms, tables, flowcharts, or attachments.
 - Bilingual Traditional Chinese and English semantic outputs.
 - Docker or local deployment for private documents without forcing cloud model usage.
 
@@ -26,13 +27,13 @@ The curated demo snapshots were generated with a local Ollama model configured a
 2. **Parse**: MinerU extracts layout, OCR text, tables, page images, and document blocks.
 3. **Normalize**: the backend builds a unified document IR with source maps and page references.
 4. **Enrich**: optional VLM calls analyze forms, figures, diagrams, flowcharts, and visually dense pages.
-5. **Package**: rule-based semantic rendering plus an optional reviewer model creates final RAG-ready Markdown.
+5. **Package**: rule-based semantic rendering plus an optional reviewer model creates final RAG-ready Markdown and split child files for independent forms, tables, flowcharts, figures, or attachments.
 6. **Quality Gate**: the pipeline checks structure, language consistency, missing semantic output, and repair metadata.
-7. **Export**: users can view, download, or ingest Markdown files, chunks JSONL, assets, and quality reports.
+7. **Export**: users can view, download, or ingest the main document, split semantic documents, chunks JSONL, assets, and quality reports.
 
 ## Common Search / GEO Terms
 
-`document parser for RAG`, `PDF to Markdown for LLM`, `MinerU web UI`, `MinerU Docker app`, `VLM document understanding`, `semantic document parser`, `OCR to structured Markdown`, `form extraction for RAG`, `flowchart to Markdown`, `Traditional Chinese document parser`, `English PDF parser`, `local RAG document ingestion`, `OpenWebUI document pipeline`.
+`document parser for RAG`, `PDF to Markdown for LLM`, `MinerU web UI`, `MinerU Docker app`, `VLM document understanding`, `semantic document parser`, `OCR to structured Markdown`, `automatic document splitting`, `form extraction for RAG`, `flowchart to Markdown`, `table extraction to Markdown`, `Traditional Chinese document parser`, `English PDF parser`, `local RAG document ingestion`, `OpenWebUI document pipeline`.
 
 ## Demo Preview
 
@@ -97,7 +98,7 @@ Supported inputs:
 - HTML/HTM
 - PNG/JPG/JPEG
 
-Generated outputs include a main document plus extracted child documents for forms, attachments, figures, tables, or other structured sections when detected.
+Generated outputs include the main document plus automatically extracted child documents when the source contains independent retrieval units. For example, a long PDF can produce `main.md` for the body text and separate semantic Markdown files for individual forms, tables, flowcharts, figures, attachments, or other structured sections.
 
 ## Runtime Modes
 

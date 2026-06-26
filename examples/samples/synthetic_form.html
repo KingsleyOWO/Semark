@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <title>Synthetic Leave Request Form</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 40px; color: #111; }
+    h1 { font-size: 26px; }
+    .form-grid { display: grid; grid-template-columns: 160px 1fr 160px 1fr; gap: 0; border: 1px solid #444; }
+    .label, .value { border: 1px solid #444; padding: 10px; min-height: 28px; }
+    .label { background: #eef2f7; font-weight: 700; }
+    .wide { grid-column: span 3; }
+    .section { margin-top: 24px; }
+    .box { border: 1px solid #444; padding: 12px; min-height: 72px; }
+  </style>
+</head>
+<body>
+  <h1>Demo Leave Request Form</h1>
+  <p>Public synthetic form for OCR, field extraction, and VLM enrichment testing.</p>
+
+  <div class="form-grid">
+    <div class="label">Employee Name</div><div class="value">Alex Chen</div>
+    <div class="label">Department</div><div class="value">Demo Operations</div>
+    <div class="label">Request Type</div><div class="value">Annual Leave</div>
+    <div class="label">Request ID</div><div class="value">LR-2026-0608</div>
+    <div class="label">Start Date</div><div class="value">2026-07-01</div>
+    <div class="label">End Date</div><div class="value">2026-07-03</div>
+    <div class="label">Backup Owner</div><div class="value wide">Taylor Lin, demo@example.invalid</div>
+  </div>
+
+  <section class="section">
+    <h2>Reason</h2>
+    <div class="box">Family travel. All active tasks are documented in the handoff note.</div>
+  </section>
+
+  <section class="section">
+    <h2>Approval Checklist</h2>
+    <ul>
+      <li>Manager approval required.</li>
+      <li>Backup owner confirmed.</li>
+      <li>No production deployment scheduled during requested dates.</li>
+    </ul>
+  </section>
+</body>
+</html>

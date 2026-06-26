@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <title>Synthetic Process Brief</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 40px; color: #111; }
+    h1 { font-size: 26px; }
+    .steps { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 24px 0; }
+    .step { border: 1px solid #555; padding: 14px; min-height: 120px; }
+    .step strong { display: block; margin-bottom: 8px; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { border: 1px solid #555; padding: 8px; }
+    th { background: #f1f5f9; }
+  </style>
+</head>
+<body>
+  <h1>Demo Document Intake Process</h1>
+  <p>This synthetic process brief is designed to demonstrate headings, step-like layout blocks, and owner tables.</p>
+
+  <div class="steps">
+    <div class="step"><strong>1. Upload</strong>Operator uploads a PDF, Office file, image, or HTML document.</div>
+    <div class="step"><strong>2. Parse</strong>Parser extracts text, tables, images, and page-level layout data.</div>
+    <div class="step"><strong>3. Enrich</strong>Optional VLM summarizes forms, figures, and complex visual blocks.</div>
+    <div class="step"><strong>4. Package</strong>Outputs are saved as Markdown, TXT, DOCX, chunks, and source maps.</div>
+  </div>
+
+  <h2>Responsibility Matrix</h2>
+  <table>
+    <thead><tr><th>Stage</th><th>Owner</th><th>Expected Output</th><th>Review Signal</th></tr></thead>
+    <tbody>
+      <tr><td>Upload</td><td>Frontend</td><td>Document record</td><td>File appears in dashboard</td></tr>
+      <tr><td>Parse</td><td>Backend parser adapter</td><td>Document IR</td><td>Page count and blocks detected</td></tr>
+      <tr><td>Enrich</td><td>VLM adapter</td><td>Captions and field guides</td><td>Structured enrichment JSON</td></tr>
+      <tr><td>Package</td><td>Pipeline package stage</td><td>RAG-ready files</td><td>Downloadable output bundle</td></tr>
+    </tbody>
+  </table>
+</body>
+</html>

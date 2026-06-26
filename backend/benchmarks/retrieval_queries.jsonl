@@ -1,0 +1,5 @@
+{"query_id":"backup_property_form_001","sample_id":"backup_property_form","query":"財產增加單 適用場景 財產管理 請購","expected_asset_type":"form_asset","expected_evidence":"assets/forms/form_p0000.png"}
+{"query_id":"backup_property_form_002","sample_id":"backup_property_form","query":"財產增加單 簽核流程 承辦人 組長 副主管 主管","expected_asset_type":"form_asset","expected_terms":["承辦人","組長","副主管","主管"]}
+{"query_id":"backup_property_form_003","sample_id":"backup_property_form","query":"財產編號 財產名稱 機型 規格 來源","expected_asset_type":"form_asset","expected_terms":["財產編號","財產名稱","機型/規格"]}
+{"query_id":"backup_long_mixed_001","sample_id":"backup_long_mixed_document","query":"組織圖 架構 董事會 院長","expected_asset_type":"figure_asset"}
+{"query_id":"backup_long_mixed_002","sample_id":"backup_long_mixed_document","query":"Retrieve chunks that have table evidence and source page references.","expected_artifact":"chunks.jsonl"}

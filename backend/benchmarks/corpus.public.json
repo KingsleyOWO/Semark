@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "description": "Benchmark corpus manifest. Local backup-derived samples are safe to run immediately; public samples are optional downloads for reproducible parser comparison.",
+  "local_samples": [
+    {
+      "sample_id": "backup_property_form",
+      "doc_id": "12e5c09a3a079db0",
+      "categories": ["form", "table", "traditional_chinese"],
+      "expected_outputs": ["rag.md", "assets_index.jsonl", "form_asset"]
+    },
+    {
+      "sample_id": "backup_long_mixed_document",
+      "doc_id": "05e2b4de9978f8cb",
+      "categories": ["long_pdf", "tables", "figures", "traditional_chinese"],
+      "expected_outputs": ["rag.md", "assets_index.jsonl", "chunks.jsonl"]
+    }
+  ],
+  "public_samples": [
+    {
+      "sample_id": "docling_technical_report",
+      "source_url": "https://arxiv.org/pdf/2408.09869",
+      "categories": ["pdf", "multi_column", "tables", "figures", "english"],
+      "license_note": "arXiv-hosted research paper; use for evaluation only unless license is confirmed."
+    },
+    {
+      "sample_id": "irs_w4_form",
+      "source_url": "https://www.irs.gov/pub/irs-pdf/fw4.pdf",
+      "categories": ["pdf", "form", "table", "english"],
+      "license_note": "US government public form."
+    },
+    {
+      "sample_id": "w3c_mathml_core",
+      "source_url": "https://www.w3.org/TR/mathml-core/",
+      "categories": ["html", "formula", "tables", "technical"],
+      "license_note": "W3C technical report; use as public HTML parsing sample."
+    }
+  ]
+}
+

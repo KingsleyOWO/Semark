@@ -1,0 +1,43 @@
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Node
+node_modules/
+dist/
+frontend/dist/
+*.tsbuildinfo
+
+# Runtime data
+backend/workspace/
+workspace/
+
+# Local outputs
+*.log
+.DS_Store
+
+# Local Docker overrides
+docker-compose.local-ollama.yml
+docker-compose.override.yml
+
+# Local tooling and release artifacts
+CLAUDE_CODE_LSP_SETUP.md
+DGX_SPARK_HANDOFF.md
+RELEASE_NOTES_*.md
+backend/docs/dgx_*.md
+.claude/
+.rollback_snapshots/
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.sha256

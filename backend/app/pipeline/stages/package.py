@@ -1621,13 +1621,29 @@ class PackageStage:
         ]
         for page_idx in selected_pages[:6]:
             lines.append(f"\n[Page {page_idx + 1} MinerU evidence]")
+            visual_reference_labels = self._visual_reference_labels_for_page(enrichments, page_idx)
+            merged_label_notes: list[str] = []
             blocks = document_ir.get_blocks_by_page(page_idx)
             for block in blocks[:80]:
                 block_text = self._repair_block_text(block)
                 if not block_text:
                     continue
+                merged_segments = self._split_merged_visual_label(block_text, visual_reference_labels)
+                if merged_segments:
+                    merged_label_notes.append(
+                        f'- parser text "{self._truncate_text(block_text, 180)}" appears to merge separate flowchart labels: '
+                        + " | ".join(merged_segments)
+                    )
+                    continue
                 block_type = getattr(block.type, "value", str(block.type))
                 lines.append(f"- {block_type}: {self._truncate_text(block_text, 900)}")
+
+            if merged_label_notes:
+                lines.append(f"\n[Page {page_idx + 1} visual label conflict hints]")
+                lines.extend(merged_label_notes[:12])
+                lines.append(
+                    "- Prefer VLM structured_content/all_text branch labels over merged parser text for flowchart relationships."
+                )
 
             enrichment_text = self._repair_enrichment_text_for_page(enrichments, page_idx)
             if enrichment_text:
@@ -3465,6 +3481,10 @@ class PackageStage:
 
         result["image_type"] = "flowchart"
         merged = self._dedupe_visual_lines([*existing_all_text, *page_lines])
+        merged = self._filter_merged_visual_label_lines(
+            merged,
+            self._visual_reference_labels_from_output(result),
+        )
         structured_len = sum(len(line) for line in structured_lines)
         if len(existing_all_text) < len(page_lines) or structured_len < 180:
             result["all_text"] = merged
@@ -3494,6 +3514,98 @@ class PackageStage:
             seen.add(key)
             result.append(clean)
         return result
+
+    @classmethod
+    def _visual_reference_labels_for_page(
+        cls,
+        enrichments: dict[str, dict[str, Any]],
+        page_idx: int,
+    ) -> list[str]:
+        labels: list[str] = []
+        for enrichment in enrichments.values():
+            input_page = (enrichment.get("input") or {}).get("page_idx")
+            evidence_page = (enrichment.get("evidence") or {}).get("page_idx")
+            if input_page != page_idx and evidence_page != page_idx:
+                continue
+            output = coerce_visual_vlm_output(dict(enrichment.get("output") or {}))
+            image_type = str(output.get("image_type") or "").lower()
+            structured_lines = split_vlm_lines(output.get("structured_content", ""))
+            caption = render_vlm_text(output.get("semantic_caption") or "")
+            is_flowchart = (
+                image_type == "flowchart"
+                or any(" > " in line for line in structured_lines)
+                or "flowchart" in caption.lower()
+                or "流程圖" in caption
+            )
+            if is_flowchart:
+                labels.extend(cls._visual_reference_labels_from_output(output))
+        return cls._dedupe_visual_lines(labels)
+
+    @classmethod
+    def _visual_reference_labels_from_output(cls, output: dict[str, Any]) -> list[str]:
+        parsed = coerce_visual_vlm_output(dict(output or {}))
+        labels: list[str] = []
+        labels.extend(split_vlm_lines(parsed.get("all_text", [])))
+        for line in split_vlm_lines(parsed.get("structured_content", "")):
+            if " > " not in line:
+                labels.append(line)
+                continue
+            labels.extend(segment.strip() for segment in line.split(">") if segment.strip())
+        return cls._dedupe_visual_lines(labels)
+
+    @classmethod
+    def _filter_merged_visual_label_lines(cls, lines: list[str], reference_labels: list[str]) -> list[str]:
+        if not reference_labels:
+            return lines
+        return [
+            line
+            for line in lines
+            if not cls._split_merged_visual_label(line, reference_labels)
+        ]
+
+    @classmethod
+    def _split_merged_visual_label(cls, text: str, reference_labels: list[str]) -> list[str]:
+        target_key = cls._compact_visual_label_key(text)
+        if len(target_key) < 4:
+            return []
+
+        candidates: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for raw_label in reference_labels:
+            label = re.sub(r"\s+", " ", str(raw_label or "").strip().strip("`'\""))
+            key = cls._compact_visual_label_key(label)
+            if len(key) < 2 or key == target_key or key in seen:
+                continue
+            seen.add(key)
+            candidates.append((key, label))
+        if len(candidates) < 2:
+            return []
+
+        candidates.sort(key=lambda item: len(item[0]), reverse=True)
+        best: list[str] | None = None
+
+        def walk(position: int, labels: list[str]) -> None:
+            nonlocal best
+            if best is not None:
+                return
+            if position == len(target_key):
+                if len(labels) >= 2:
+                    best = labels
+                return
+            if len(labels) >= 5:
+                return
+            for key, label in candidates:
+                if target_key.startswith(key, position):
+                    walk(position + len(key), [*labels, label])
+                    if best is not None:
+                        return
+
+        walk(0, [])
+        return best or []
+
+    @staticmethod
+    def _compact_visual_label_key(value: str) -> str:
+        return re.sub(r"[\W_]+", "", str(value or ""), flags=re.UNICODE).lower()
 
     @staticmethod
     def _is_noisy_visual_page_text(text: str) -> bool:

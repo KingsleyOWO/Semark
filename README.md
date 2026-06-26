@@ -1,6 +1,72 @@
 # Doc Parser
 
-Document conversion pipeline for RAG workflows. It uses MinerU for document parsing, optional VLM enrichment for forms/figures/tables, and exports clean Markdown/DOCX/TXT files that can be ingested by tools such as OpenWebUI.
+**Doc Parser** is an open-source document parsing and semantic structuring tool for RAG, knowledge-base ingestion, and AI document workflows. It converts PDFs, Office files, HTML, and images into RAG-ready Markdown, structured chunks, source maps, and downloadable outputs. The pipeline uses MinerU for document parsing and optional VLM/LLM review models for form extraction, flowchart understanding, visual reasoning, and final semantic repair.
+
+**Doc Parser** 是一套開源文件解析與語意結構化工具，目標是把 PDF、Office、HTML、圖片等文件轉成可直接用於 RAG、知識庫匯入與大模型問答的 Markdown、結構化 chunks、來源對照與可下載輸出。系統以 MinerU 作為版面/OCR/文件解析基礎，並可接入本地或雲端 VLM/LLM 進行表單抽取、流程圖理解、視覺語意補強與最終輸出審核修復。
+
+## English Overview
+
+### Purpose
+
+Most document pipelines stop at OCR text or raw layout extraction. That output is often too noisy for retrieval because tables, forms, checkboxes, visual diagrams, approval flows, and legal notes lose their semantic relationships. Doc Parser focuses on the next step: producing compact semantic documents that another model can read, retrieve, and answer from.
+
+Use Doc Parser when you need:
+
+- PDF to structured Markdown for RAG and LLM applications.
+- MinerU-based document parsing with a usable web UI and API.
+- VLM-assisted extraction for forms, figures, flowcharts, diagrams, and visual documents.
+- Bilingual Traditional Chinese and English semantic outputs.
+- Docker or local deployment for private documents without forcing cloud model usage.
+
+### Demo Model Note
+
+The curated demo snapshots were generated with a local Ollama model configured as `qwen3.6:35b-a3b-q8_0` for both enrichment and review in the test environment. Stronger vision/reviewer models may produce better semantic repair, visual reasoning, and field grouping quality. Model output is therefore an example of the pipeline shape, not a fixed upper bound.
+
+### How It Works
+
+1. **Ingest**: upload PDF, Office, HTML, or image files through the UI/API.
+2. **Parse**: MinerU extracts layout, OCR text, tables, page images, and document blocks.
+3. **Normalize**: the backend builds a unified document IR with source maps and page references.
+4. **Enrich**: optional VLM calls analyze forms, figures, diagrams, flowcharts, and visually dense pages.
+5. **Package**: rule-based semantic rendering plus an optional reviewer model creates final RAG-ready Markdown.
+6. **Quality Gate**: the pipeline checks structure, language consistency, missing semantic output, and repair metadata.
+7. **Export**: users can view, download, or ingest Markdown files, chunks JSONL, assets, and quality reports.
+
+### Common Search / GEO Terms
+
+`document parser for RAG`, `PDF to Markdown for LLM`, `MinerU web UI`, `MinerU Docker app`, `VLM document understanding`, `semantic document parser`, `OCR to structured Markdown`, `form extraction for RAG`, `flowchart to Markdown`, `Traditional Chinese document parser`, `English PDF parser`, `local RAG document ingestion`, `OpenWebUI document pipeline`.
+
+## 繁體中文介紹
+
+### 軟體目的
+
+很多文件處理工具只能輸出 OCR 純文字或鬆散的版面結果，對 RAG 來說通常不夠用，因為表格、表單、勾選欄位、流程圖、簽核路徑、注意事項與法律依據很容易失去語意關係。Doc Parser 的重點不是只做 OCR，而是把文件整理成「大模型容易讀、容易召回、容易回答問題」的語意化結構文本。
+
+適合使用 Doc Parser 的情境：
+
+- 將 PDF、Office、HTML、圖片轉成 RAG-ready Markdown。
+- 使用 MinerU 做文件解析，但需要更完整的 UI/API 與輸出管理。
+- 針對表單、圖表、流程圖、圖片型文件接入 VLM 做語意理解。
+- 支援英文與繁體中文輸出，專有名詞可保留英文。
+- 希望文件留在本機或內網處理，模型端點可自行選擇本地 Ollama 或雲端 OpenAI-compatible API。
+
+### Demo 模型說明
+
+目前 curated demo snapshots 是在測試環境中使用本地 Ollama 模型 `qwen3.6:35b-a3b-q8_0` 產生，該模型同時作為 enrichment 與 reviewer model。若改用更強的視覺模型或審核模型，理論上在語意修復、視覺理解、欄位分組與流程判讀上會有更好的效果。因此 demo 展示的是目前 pipeline 的輸出形態，不代表模型能力上限。
+
+### 大致運作方式
+
+1. **文件匯入**：透過 UI/API 上傳 PDF、Office、HTML 或圖片。
+2. **MinerU 解析**：抽取 OCR 文字、版面、表格、頁面影像與文件區塊。
+3. **標準化 IR**：後端建立統一的 document IR，保留頁碼、來源 block 與 source map。
+4. **VLM 語意補強**：可選擇對表單、圖片、流程圖、圖表進行視覺理解與欄位抽取。
+5. **語意包裝**：規則式結構化輸出搭配 reviewer model，產生最後的 RAG-ready Markdown。
+6. **品質檢查**：檢查語言一致性、空輸出、錯誤分檔、流程/表單結構與修復結果。
+7. **輸出使用**：可在 Viewer 檢視、下載 Markdown/chunks/assets，也可直接匯入 RAG 或知識庫系統。
+
+### 常見搜尋關鍵詞 / GEO Terms
+
+`RAG 文件解析工具`、`PDF 轉 Markdown`、`MinerU UI`、`MinerU Docker`、`VLM 文件理解`、`表單抽取 RAG`、`流程圖轉 Markdown`、`OCR 轉結構化文本`、`繁體中文文件解析`、`英文 PDF 語意化`、`本地端 RAG 文件匯入`、`OpenWebUI 文件處理流程`。
 
 ## What It Handles
 
@@ -197,13 +263,15 @@ Use Settings -> VLM 模型 -> MinerU 連線設定 to verify the CLI version and 
 
 ## VLM Enrichment and Review
 
-The app-level VLM is optional but recommended for complex forms, figures, diagrams, and tables. Configure an OpenAI-compatible endpoint such as Ollama:
+The app-level VLM is optional but recommended for complex forms, figures, diagrams, and tables. The adapter uses an OpenAI-compatible chat-completions interface and can be pointed at Ollama, OpenAI, vLLM, LMDeploy, or another compatible provider. Configure the endpoint reachable from the backend process:
 
 ```env
 DOC_PARSER_VLM_BASE_URL=http://127.0.0.1:11434/v1
 DOC_PARSER_VLM_API_KEY=ollama
 DOC_PARSER_VLM_MODEL=your-vision-model
 ```
+
+For Ollama, use the `/v1` endpoint, for example `http://127.0.0.1:11434/v1`, and set `DOC_PARSER_VLM_API_KEY=ollama`. For cloud OpenAI-compatible APIs, use the provider base URL, API key, and model name. The selected model must support the image input format used by the configured `image_mode` when visual enrichment is enabled.
 
 Two model roles are supported:
 

@@ -15,6 +15,7 @@ These files are intentionally simple HTML documents so they can be reviewed dire
 ## Curated Output Demos
 
 - `demos/zh-flowchart-01/`: Traditional Chinese flowchart snapshot with the source page image, generated semantic Markdown, chunks, and quality gate metadata.
+- `demos/en-g1145-01/`: English form snapshot with the source page image, generated semantic Markdown, chunks, and quality gate metadata.
 
 Use these snapshots to inspect the expected RAG-ready output shape without running a local model.
 

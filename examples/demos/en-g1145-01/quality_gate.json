@@ -1,0 +1,66 @@
+{
+  "status": "pass",
+  "score": 1.0,
+  "issues": [],
+  "vlm_audit_candidates": [],
+  "vlm_audits": [],
+  "stats": {
+    "issue_count": 0,
+    "issues_by_severity": {},
+    "issues_by_code": {},
+    "vlm_audit_candidate_count": 0,
+    "vlm_audit_count": 0,
+    "structured_document_type": "form_document",
+    "structured_record_count": 12,
+    "semantic_quality": {
+      "correctness_score": 1.0,
+      "rag_readiness_score": 0.95,
+      "recommended_repairs": [],
+      "post_repair_issue_count": 0,
+      "post_repair_status": "pass"
+    },
+    "semantic_output_language": "en",
+    "semantic_repair": {
+      "enabled": true,
+      "document_type": "form_document",
+      "applied_count": 1,
+      "attempted_count": 1,
+      "items": [
+        {
+          "target": "structured_rag",
+          "model_success": true,
+          "tokens_used": 5380,
+          "duration_seconds": 142.76513671875,
+          "status": "applied",
+          "summary": "Rebuilt low-quality boilerplate structure into a clean, RAG-ready semantic document. Removed repetitive template filler, corrected misidentified fields (e.g., 'What Is the Purpose of This Form?' was incorrectly parsed as a field), grouped exact source fields by meaning, and preserved all instructions, delivery rules, legal disclosures, and form metadata from the source evidence.",
+          "applied_repairs": [
+            "removed_repetitive_boilerplate",
+            "corrected_field_misidentification",
+            "restructured_to_semantic_sections",
+            "grouped_fields_by_meaning",
+            "preserved_exact_source_field_names",
+            "extracted_instructions_and_legal_disclosures",
+            "added_rag_query_anchors"
+          ],
+          "confidence": 0.95
+        }
+      ],
+      "trigger_codes": [
+        "field_name_too_long"
+      ],
+      "blocked_count": 0,
+      "fallback_count": 0
+    },
+    "semantic_repair_applied": true,
+    "post_repair_note": "Reviewer model rewrote semantic markdown/chunks after the rule-based quality gate.",
+    "pre_semantic_repair_issue_count": 1,
+    "post_semantic_repair_issue_count": 0,
+    "pre_semantic_repair_vlm_audit_candidate_count": 0,
+    "pre_semantic_repair_vlm_audit_count": 0,
+    "semantic_repair_cleared_issue_codes": [
+      "field_name_too_long"
+    ],
+    "semantic_repair_quality_settled": true,
+    "auto_rag_ready": true
+  }
+}

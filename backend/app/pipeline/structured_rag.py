@@ -891,6 +891,12 @@ def render_form_documents_markdown(
             if record.get("content_type")
             in {"form_section", "form_workflow", "form_attachment_rule"}
         ]
+        if plan.document_type == "form_document":
+            section_records = _merge_single_form_document_section_records(
+                section_records,
+                form_name=form_name,
+                language=language,
+            )
         for record in section_records:
             section_name = str(record.get("section") or "")
             if plan.document_type == "form_document" and section_name in skip_sections:
@@ -940,6 +946,54 @@ def _clean_rendered_form_record_content(text: str, *, form_name: str, section: s
     cleaned = re.sub(r"^表單：[^。]{1,220}。欄位：[^。]{1,140}。區塊：[^。]{1,140}。", "", cleaned)
     cleaned = re.sub(r"^表單：[^。]{1,220}。", "", cleaned)
     return cleaned.strip()
+
+
+def _merge_single_form_document_section_records(
+    records: list[dict[str, Any]],
+    *,
+    form_name: str,
+    language: str,
+) -> list[dict[str, Any]]:
+    """Render official multi-page forms as one semantic document, not page dumps."""
+
+    raw_source_sections = {
+        "Source Extracted Text",
+        "Original Extraction Supplement",
+    } if language == "en" else set()
+    keep_first_only = {"RAG Query Summary", "RAG 查詢摘要"}
+    grouped: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    seen_by_section: dict[str, set[str]] = {}
+
+    for record in records:
+        section = str(record.get("section") or "").strip()
+        if not section or section in raw_source_sections:
+            continue
+        content = _clean_rendered_form_record_content(
+            str(record.get("content") or ""),
+            form_name=form_name,
+            section=section,
+            language=language,
+        )
+        if not content:
+            continue
+        if section in keep_first_only and section in grouped:
+            continue
+        normalized = re.sub(r"\s+", " ", content).strip().lower()
+        if not normalized:
+            continue
+        seen = seen_by_section.setdefault(section, set())
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        if section not in grouped:
+            grouped[section] = dict(record)
+            grouped[section]["content"] = content
+            order.append(section)
+        else:
+            grouped[section]["content"] = f"{grouped[section]['content']}\n\n{content}"
+
+    return [grouped[section] for section in order]
 
 
 def build_form_chunks(
@@ -2944,7 +2998,11 @@ def _records_from_form_output(
         for item in output.get("all_text", [])
         if str(item).strip()
     ])
-    if all_text_items:
+    if all_text_items and _should_emit_form_source_text_record(
+        language=language,
+        output=output,
+        fields=fields,
+    ):
         if language == "en":
             source_text_section = "Source Extracted Text"
             source_text_content = (
@@ -3046,6 +3104,17 @@ def _records_from_form_output(
         )
 
     return records
+
+
+def _should_emit_form_source_text_record(
+    *,
+    language: str,
+    output: dict[str, Any],
+    fields: list[dict[str, Any]],
+) -> bool:
+    if language == "en" and (fields or str(output.get("filling_guide") or "").strip()):
+        return False
+    return True
 
 
 def _clean_evidence_text(value: str) -> str:
@@ -3597,10 +3666,14 @@ def _infer_field_section(field_name: str) -> str:
         (r"保證|保證人|商號|營業|資本|負責人|被保人|關係", "保證人/商號資料"),
         (r"學校|系所|科系|學位|進修|選修|課程|學科|減免|受訓|訓練|education|school", "進修/訓練資訊"),
         (
-            r"姓名|出生|身分證|電話|手機|E-?mail|地址|緊急|申請|日期|單位|職級|職稱|員工|name|date|birth|birthday|ssn|social security|taxpayer|identification|phone|email|address|department|applicant|preparer|vendor|student|passport|nationality",
+            r"authorization|authorize|authorizing|disclosure|disclose|consent|purpose|record|records|transcript|tax return|tax form|medical records|education records|from whom|to whom|of what|source|recipient",
+            "授權/揭露範圍",
+        ),
+        (
+            r"姓名|出生|身分證|電話|手機|E-?mail|地址|緊急|申請|日期|單位|職級|職稱|員工|name|date|birth|birthday|ssn|social security|taxpayer|identification|phone|email|address|city|state|zip|department|applicant|preparer|vendor|student|passport|nationality|guardian|parent of minor|representative",
             "申請/基本資料",
         ),
-        (r"附件|合約|切結|證明|預算|attachment|certificate|document|record|transcript", "附件/佐證資料"),
+        (r"附件|合約|切結|證明|預算|attachment|certificate|document|supporting|evidence", "附件/佐證資料"),
     ]
     for pattern, section in mapping:
         if re.search(pattern, field_name, re.IGNORECASE):

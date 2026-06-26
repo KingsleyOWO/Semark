@@ -2080,7 +2080,7 @@ class PackageStage:
             return False
         if "QUALITY ISSUES JSON" in text or "SOURCE EVIDENCE" in text:
             return False
-        if re.search(r"\.\.\.|…", text):
+        if PackageStage._semantic_repair_has_placeholder_ellipsis(text, semantic_output_language):
             return False
         if not re.search(r"^#{1,3}\s+", text, re.MULTILINE) and "- " not in text:
             return False
@@ -2090,6 +2090,21 @@ class PackageStage:
         if language == "en" and re.search(r"^#{1,3}\s*(表單用途|適用場景|填寫重點|注意事項|RAG 查詢摘要)", text, re.MULTILINE):
             return False
         return True
+
+    @staticmethod
+    def _semantic_repair_has_placeholder_ellipsis(markdown: str, semantic_output_language: str) -> bool:
+        text = str(markdown or "")
+        if semantic_output_language != "en":
+            return bool(re.search(r"\.\.\.|…", text))
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if re.fullmatch(r"[-*]?\s*(?:\.{3}|…)", stripped):
+                return True
+            if re.search(r"(?:\.{3}|…)\s*$", stripped):
+                return True
+        return False
 
     def _split_repair_markdown_into_chunks(self, markdown: str, max_chars: int = 2400) -> list[str]:
         lines = markdown.strip().splitlines()

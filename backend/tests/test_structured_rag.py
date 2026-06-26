@@ -2293,6 +2293,81 @@ def test_form_documents_rag_outputs_english_semantic_template():
     assert "## 表單用途" not in output.rag_markdown
     assert "用途與填寫重點" not in output.rag_markdown
 
+def test_english_single_form_document_suppresses_source_text_dump_and_groups_fields():
+    document_ir = DocumentIR(
+        doc_id="doc-ssa-like",
+        run_id="run-ssa-like",
+        source=SourceInfo(path="authorization-form.pdf", ext="pdf", sha256="abc", size_bytes=123),
+        engine=EngineInfo(backend="pipeline", method="auto"),
+        pages=[PageInfo(page_idx=0), PageInfo(page_idx=1)],
+        blocks=[
+            Block(
+                block_id="form_page_0000",
+                type=BlockType.TABLE,
+                page_idx=0,
+                payload={"table_body": "Name SSN Birthday Authorization to disclose records Signature Date Signed"},
+            ),
+            Block(
+                block_id="form_page_0001",
+                type=BlockType.TEXT,
+                page_idx=1,
+                payload={"text": "Explanation of form, privacy act statement, paperwork reduction act statement."},
+            ),
+        ],
+    )
+
+    output = build_form_documents_rag(
+        document_ir,
+        {
+            "form_page_0000": {
+                "kind": "form_asset",
+                "input": {"page_idx": 0},
+                "output": {
+                    "title": "Authorization to Disclose Information",
+                    "document_type": "form",
+                    "field_schema": [
+                        {"name": "NAME (First, Middle, Last, Suffix)", "type": "text", "required": True},
+                        {"name": "SSN", "type": "text", "required": True},
+                        {"name": "Birthday (MM/DD/YYYY)", "type": "date", "required": True},
+                        {"name": "PURPOSE", "type": "text", "required": False},
+                        {"name": "Date Signed", "type": "date", "required": True},
+                        {"name": "Witness Phone Number (or Address)", "type": "text", "required": False},
+                    ],
+                    "filling_guide": "## Form Purpose\nAuthorizes disclosure of records for a benefits request.\n\n## Filling Guidance\nComplete identity, authorization scope, and signature fields.",
+                    "all_text": [
+                        "Form SSA-827 (06-2024) UF",
+                        "Source text line that should not become a rendered Source Extracted Text section.",
+                    ],
+                },
+            },
+            "form_page_0001": {
+                "kind": "form_asset",
+                "input": {"page_idx": 1},
+                "output": {
+                    "title": "Explanation of Authorization Form",
+                    "document_type": "form",
+                    "field_schema": [],
+                    "filling_guide": "## Form Purpose\nExplains why authorization is needed.\n\n## Notes\nIncludes privacy act and paperwork reduction act notices.",
+                    "all_text": ["Explanation text should remain evidence, not a formal dump section."],
+                },
+            },
+        },
+        semantic_output_language="en",
+    )
+
+    assert output.plan.document_type == "form_document"
+    assert "Source Extracted Text" not in output.rag_markdown
+    assert "formal dump section" not in output.rag_markdown
+    assert output.rag_markdown.count("### Form Purpose") == 1
+    field_sections = {
+        record.get("section")
+        for record in output.records
+        if record.get("content_type") == "form_field"
+    }
+    assert "表單欄位" not in field_sections
+    assert "授權/揭露範圍" in field_sections
+    assert "申請/基本資料" in field_sections
+
 
 def test_form_documents_rag_filters_low_value_template_form_subdocs(tmp_path):
     document_ir = DocumentIR(

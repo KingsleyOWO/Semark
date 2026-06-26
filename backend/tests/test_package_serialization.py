@@ -476,6 +476,42 @@ Text
         )
 
 
+    def test_semantic_repair_allows_source_ellipsis_inside_english_field_label(self):
+        repaired = (
+            "# Authorization Form\n\n"
+            "## Fields\n"
+            "- WITNESS ... Signature: signed by the witness when required.\n"
+            "- Date Signed: date the authorization is signed.\n\n"
+            "## Notes\n"
+            "The form preserves source field labels while grouping them for retrieval. " * 4
+        )
+
+        self.assertTrue(
+            PackageStage._semantic_repair_markdown_is_usable(
+                repaired,
+                "# Authorization Form\n\n## Fields\nCurrent parser output. " * 8,
+                "en",
+            )
+        )
+
+
+    def test_semantic_repair_rejects_placeholder_ellipsis_for_english_output(self):
+        repaired = (
+            "# Authorization Form\n\n"
+            "## Notes\n"
+            "The applicant must satisfy the listed condition and not yet...\n"
+            "Additional text makes this candidate long enough for validation. " * 5
+        )
+
+        self.assertFalse(
+            PackageStage._semantic_repair_markdown_is_usable(
+                repaired,
+                "# Authorization Form\n\n## Notes\nCurrent parser output. " * 8,
+                "en",
+            )
+        )
+
+
     def test_decorative_figure_assets_are_not_split_documents(self):
         asset = AssetEntry(
             type="figure_asset",

@@ -248,6 +248,8 @@ Repair goals:
 - Remove repetitive template filler, repeated titles, parser residue, ellipses, and merged field labels.
 - Preserve exact source field names, dates, amounts, notes, checkbox options, approval/signature roles, and legal/article references.
 - For forms, group fields by meaning and explain only useful completion/approval/notes information.
+- For official forms, the final Markdown should be the usable semantic document: identity, purpose, who uses it, authorization/request scope, required fields, conditional fields, signature/authority rules, instructions/notices, and RAG query anchors when supported by evidence.
+- Do not include a generic "Source Extracted Text" dump in the final Markdown. Use source text as evidence, then rewrite it into semantic sections.
 - For reference tables, preserve query dimensions, row/column meaning, units, conditions, and notes; do not rewrite lookup tables as fillable forms.
 - If QUALITY ISSUES JSON is not empty, you must return status="repaired" or status="uncertain" with standalone repaired_markdown.
 - Return status="pass" with empty repaired_markdown only when there are no real quality issues and the current Markdown is already RAG-ready.

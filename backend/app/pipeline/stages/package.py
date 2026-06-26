@@ -2883,6 +2883,18 @@ class PackageStage:
             re.search(r"\b(charts?|graphs?|diagrams?|workflows?|process(?:es)?|tables?|labels?|nodes?)\b", text)
             or any(token in text for token in ("流程", "圖表", "節點", "標籤"))
         )
+        warning_icon_signal = any(
+            token in text
+            for token in (
+                "caution symbol",
+                "warning sign",
+                "warning icon",
+                "exclamation mark",
+                "exclamation point",
+            )
+        )
+        if warning_icon_signal and not content_signal:
+            return True
         if has_shape_signal and not content_signal and (shape_keywords_only or (generic_figure_title and simple_shape_signal)):
             return True
         meaningful_facts = [

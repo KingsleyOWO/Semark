@@ -520,6 +520,25 @@ Text
         self.assertFalse(PackageStage()._should_export_asset_document(asset, "body", [asset]))
 
 
+    def test_caution_icon_figure_is_decorative(self):
+        asset = AssetEntry(
+            type="figure_asset",
+            asset_id="fig0000",
+            doc_id="doc",
+            run_id="run",
+            title="Figure 1",
+            page_idx=0,
+            asset_path="assets/figures/fig0000.jpg",
+            block_id="block",
+            retrieval_text="The image shows a caution symbol with an exclamation mark inside a triangle.",
+            semantic_caption="The image displays a standard warning sign with the word CAUTION below it.",
+            facts=["A caution symbol appears as an exclamation mark inside a triangle."],
+            keywords=["warning", "symbol", "icon"],
+        )
+
+        self.assertFalse(PackageStage()._should_export_asset_document(asset, "body", [asset]))
+
+
     def test_split_main_document_cleans_english_step_and_generic_table_headings(self):
         text = PackageStage()._render_split_main_document(
             source_md=(

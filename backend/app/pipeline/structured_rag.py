@@ -855,12 +855,14 @@ def render_form_documents_markdown(
     language = resolve_semantic_output_language(semantic_output_language)
     pack = get_form_language_pack(language)
     lines = [f"# {plan.title}", ""]
+    skip_sections = {"Use Cases", "適用場景"}
     for _, subdoc_records in _group_form_records(records):
         if not subdoc_records:
             continue
         first = subdoc_records[0]
+        form_name = str(first.get("form_name") or plan.title)
         page_title = "Page" if language == "en" else "頁碼"
-        lines.append(f"## {first['form_name']}")
+        lines.append(f"## {form_name}")
         separator = ": " if language == "en" else "："
         lines.append(f"{page_title}{separator}{first['page_label']}")
         lines.append("")
@@ -874,7 +876,13 @@ def render_form_documents_markdown(
             None,
         )
         if summary:
-            lines.append(_compact_text_no_ellipsis(str(summary["content"]), 900))
+            summary_text = _clean_rendered_form_record_content(
+                str(summary["content"]),
+                form_name=form_name,
+                section=str(summary.get("section") or ""),
+                language=language,
+            )
+            lines.append(_compact_text_no_ellipsis(summary_text, 900))
             lines.append("")
 
         section_records = [
@@ -884,10 +892,18 @@ def render_form_documents_markdown(
             in {"form_section", "form_workflow", "form_attachment_rule"}
         ]
         for record in section_records:
-            lines.append(f"### {record['section']}")
             section_name = str(record.get("section") or "")
+            if plan.document_type == "form_document" and section_name in skip_sections:
+                continue
+            lines.append(f"### {section_name}")
             section_limit = 2800 if any(term in section_name for term in ("注意事項", "備註", "Notes")) else 900
-            lines.append(_compact_text_no_ellipsis(str(record["content"]), section_limit))
+            content = _clean_rendered_form_record_content(
+                str(record["content"]),
+                form_name=form_name,
+                section=section_name,
+                language=language,
+            )
+            lines.append(_compact_text_no_ellipsis(content, section_limit))
             lines.append("")
 
         field_records = [
@@ -909,6 +925,21 @@ def render_form_documents_markdown(
             lines.append("")
 
     return "\n".join(lines).strip() + "\n"
+
+
+def _clean_rendered_form_record_content(text: str, *, form_name: str, section: str, language: str) -> str:
+    cleaned = re.sub(r"\s+", " ", text or "").strip()
+    if not cleaned:
+        return ""
+    if language == "en":
+        cleaned = re.sub(r"^Form:\s*[^.]{1,220}\.\s*Section:\s*[^.]{1,140}\.\s*", "", cleaned)
+        cleaned = re.sub(r"^Form:\s*[^.]{1,220}\.\s*Field:\s*[^.]{1,140}\.\s*Section:\s*[^.]{1,140}\.\s*", "", cleaned)
+        cleaned = re.sub(r"^Form:\s*[^.]{1,220}\.\s*", "", cleaned)
+        return cleaned.strip()
+    cleaned = re.sub(r"^表單：[^。]{1,220}。區塊：[^。]{1,140}。", "", cleaned)
+    cleaned = re.sub(r"^表單：[^。]{1,220}。欄位：[^。]{1,140}。區塊：[^。]{1,140}。", "", cleaned)
+    cleaned = re.sub(r"^表單：[^。]{1,220}。", "", cleaned)
+    return cleaned.strip()
 
 
 def build_form_chunks(
@@ -1444,11 +1475,69 @@ def _should_merge_forms_as_single_source_document(
         return False
     if len(source_pages) <= 1 and (source_has_form_keyword or form_like_source):
         return True
+    if (
+        len(form_outputs) == 1
+        and form_like_source
+        and _uncovered_pages_are_single_form_supporting_information(document_ir, source_pages, covered_pages)
+    ):
+        return True
     if coverage >= 0.8 and (source_has_form_keyword or form_like_source):
         return True
     if source_has_form_keyword and coverage >= 0.6:
         return True
     return False
+
+
+def _uncovered_pages_are_single_form_supporting_information(
+    document_ir: DocumentIR,
+    source_pages: list[int],
+    covered_pages: set[int],
+) -> bool:
+    """Treat instruction/privacy pages as part of a single official form."""
+
+    uncovered = [page_idx for page_idx in source_pages if page_idx not in covered_pages]
+    if not uncovered:
+        return True
+    if len(uncovered) > 6:
+        return False
+
+    support_patterns = [
+        r"\binstructions?\b",
+        r"\bgeneral instructions?\b",
+        r"\bspecific instructions?\b",
+        r"\bexplanation of form\b",
+        r"\bpurpose of form\b",
+        r"\bwhere to file\b",
+        r"\bsignature and date\b",
+        r"\bfuture developments?\b",
+        r"\bwhat'?s new\b",
+        r"\bprivacy act\b",
+        r"\bpaperwork reduction act\b",
+        r"\broutine uses\b",
+        r"\bsection references\b",
+        r"\bmail or fax\b",
+        r"\bchart for\b",
+        r"\bdo not send\b",
+        r"填寫說明|填表說明|申請須知|注意事項|隱私權|個人資料|補充說明|說明事項|備註",
+    ]
+
+    for page_idx in uncovered:
+        parts: list[str] = []
+        for block in document_ir.get_blocks_by_page(page_idx):
+            if block.type not in {BlockType.TEXT, BlockType.TABLE}:
+                continue
+            page_text = _plain_text(block.get_text())
+            if page_text:
+                parts.append(page_text)
+        page_text = "\n".join(parts).strip()
+        if len(re.sub(r"\s+", "", page_text)) < 80:
+            continue
+        marker_count = sum(1 for pattern in support_patterns if re.search(pattern, page_text, re.IGNORECASE))
+        if marker_count <= 0:
+            return False
+        if _has_strong_fillable_form_markers(page_text) and marker_count < 2:
+            return False
+    return True
 
 
 def _page_range_label(page_indices: list[int], semantic_output_language: str) -> str:

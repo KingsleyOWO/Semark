@@ -104,7 +104,7 @@ def test_travel_allowance_table_generates_row_level_records():
 
 
 
-def test_english_form_collection_includes_non_form_supporting_pages():
+def test_english_official_form_with_instruction_page_stays_single_document():
     document_ir = DocumentIR(
         doc_id="doc-ssa",
         run_id="run-ssa",
@@ -158,11 +158,14 @@ def test_english_form_collection_includes_non_form_supporting_pages():
         semantic_output_language="en",
     )
 
-    assert "## Supporting Information" in output.rag_markdown
-    assert "Explanation of Form SSA-827" in output.rag_markdown
-    assert "Privacy Act Statement" in output.rag_markdown
-    assert any(chunk["view"] == "structured_supporting_page" for chunk in output.chunks)
-    assert output.stats["supporting_page_count"] == 1
+    assert output.plan.document_type == "form_document"
+    assert output.plan.rag_strategy == "single_form_document_semantic_chunks"
+    assert output.plan.evidence["single_source_form_document"] is True
+    assert output.plan.evidence["source_page_indices"] == [0, 1]
+    assert output.stats["form_count"] == 1
+    assert output.stats["supporting_page_count"] == 0
+    assert not any(chunk["view"] == "structured_supporting_page" for chunk in output.chunks)
+    assert all(record["page_indices"] == [0, 1] for record in output.records)
 
 
 

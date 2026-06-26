@@ -274,6 +274,7 @@ class EnrichStage:
     # Form detection patterns
     FORM_PATTERNS = [
         r"申請|表單|報支|請假|加班|進修|附件|出差單|差旅|application|form",
+        r"authorization|authorisation|consent|request|claim|transcript|tax|irs|ssa",
         r"簽核|審核|核准|approval",
         r"填寫|fill|complete",
     ]
@@ -1162,6 +1163,10 @@ class EnrichStage:
         filename = Path(source_path).stem.lower()
         for pattern in self.FORM_PATTERNS:
             if re.search(pattern, filename, re.IGNORECASE):
+                return True
+        for pattern in self.enrich_config.form_filename_patterns:
+            value = str(pattern or "").strip()
+            if value and re.search(re.escape(value), filename, re.IGNORECASE):
                 return True
         return False
 
@@ -2071,11 +2076,27 @@ class EnrichStage:
             "保證人",
             "對保人",
             "立約",
+            "name",
+            "ssn",
+            "social security",
+            "signature",
+            "date signed",
+            "taxpayer",
+            "requester",
+            "authorization",
+            "authorize",
+            "consent",
+            "phone number",
+            "street address",
+            "omb no",
+            "form 4506",
+            "form ssa",
             "□",
             "☐",
             "☑",
         ]
-        hits = sum(1 for term in form_terms if term in text)
+        lower_text = text.lower()
+        hits = sum(1 for term in form_terms if term in text or term.lower() in lower_text)
         has_table = any(block.type == BlockType.TABLE for block in page_blocks)
         return hits >= (3 if has_table else 3)
 

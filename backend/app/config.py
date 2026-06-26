@@ -144,7 +144,11 @@ class EnrichConfig(BaseModel):
 
     # Gating heuristics for forms
     form_filename_patterns: list[str] = Field(
-        default_factory=lambda: ["申請", "申請書", "申請表", "表單", "請假", "加班", "進修", "附件"]
+        default_factory=lambda: [
+            "申請", "申請書", "申請表", "表單", "請假", "加班", "進修", "附件",
+            "form", "application", "authorization", "authorisation", "consent", "request",
+            "claim", "transcript", "tax", "irs", "ssa",
+        ]
     )
     min_text_ratio_for_vlm: float = 0.3  # pages with less text are candidates
 

@@ -103,3 +103,45 @@ async def test_table_without_crop_routes_to_text_vlm(tmp_path: Path):
     assert "亞洲" in fake_vlm.table_calls[0]["table_body"]
     assert result.enrichments[0].input["route"] == "vlm_text_from_mineru_table"
     assert result.enrichments[0].evidence["asset_path"] is None
+
+def test_english_authorization_page_cues_are_detected_as_form_page():
+    config = PipelineConfig(
+        enrich=EnrichConfig(
+            enable_vlm=True,
+            vlm_enrich_forms=True,
+            vlm_enrich_figures=False,
+            vlm_enrich_tables=False,
+        )
+    )
+    stage = EnrichStage(db=None, config=config)
+    document_ir = DocumentIR(
+        doc_id="doc-ssa",
+        run_id="run-ssa",
+        source=SourceInfo(path="ssa-827.pdf", ext="pdf", sha256="abc", size_bytes=100),
+        engine=EngineInfo(backend="pipeline", method="ocr"),
+        pages=[PageInfo(page_idx=0)],
+        blocks=[
+            Block(
+                block_id="b0",
+                type=BlockType.TEXT,
+                page_idx=0,
+                payload={
+                    "text": (
+                        "AUTHORIZATION TO DISCLOSE INFORMATION TO SSA "
+                        "NAME SSN Birthday Phone Number Street Address "
+                        "Signature Date Signed OMB No. 0960-0623"
+                    )
+                },
+            )
+        ],
+    )
+
+    assert stage._detect_form_pages(document_ir) == [0]
+
+
+def test_configured_english_form_filename_pattern_is_used():
+    config = PipelineConfig(enrich=EnrichConfig(form_filename_patterns=["transcript-request"]))
+    stage = EnrichStage(db=None, config=config)
+
+    assert stage._is_form_document("sample-transcript-request.pdf") is True
+

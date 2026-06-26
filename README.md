@@ -68,6 +68,59 @@ The curated demo snapshots were generated with a local Ollama model configured a
 
 `RAG 文件解析工具`、`PDF 轉 Markdown`、`MinerU UI`、`MinerU Docker`、`VLM 文件理解`、`表單抽取 RAG`、`流程圖轉 Markdown`、`OCR 轉結構化文本`、`繁體中文文件解析`、`英文 PDF 語意化`、`本地端 RAG 文件匯入`、`OpenWebUI 文件處理流程`。
 
+## Demo Preview
+
+The curated demos below show the source page beside the generated RAG-ready semantic Markdown. Full artifacts are stored under `examples/demos/`.
+
+### English Form: USCIS G-1145
+
+**Source page**
+
+![USCIS G-1145 source page](examples/demos/en-g1145-01/source-page.png)
+
+**Generated semantic Markdown excerpt**
+
+```markdown
+# USCIS Form G-1145: e-Notification of Application/Petition Acceptance
+
+## Identity & Purpose
+- Form ID: G-1145 (09/26/14Y)
+- Agency: U.S. Citizenship and Immigration Services (USCIS), Department of Homeland Security
+- Purpose: Request an electronic notification when USCIS accepts an immigration application or petition filed at a Lockbox facility.
+
+## Required Fields
+- Applicant/Petitioner Full Last Name
+- Applicant/Petitioner Full First Name
+- Applicant/Petitioner Full Middle Name
+- Email Address
+- Mobile Phone Number (Text Message)
+```
+
+Full output: [examples/demos/en-g1145-01/output.md](examples/demos/en-g1145-01/output.md)
+
+### 繁體中文流程圖：性騷擾申訴對象標準作業流程
+
+**來源頁面**
+
+![Traditional Chinese flowchart source page](examples/demos/zh-flowchart-01/source-page.png)
+
+**語意化 Markdown 摘要**
+
+```markdown
+# 不同性騷擾申訴對象標準作業流程圖
+
+## 適用目的
+規範被害人提出性騷擾申訴後，依事件場域及當事人身分關係判斷適用法律，並啟動相應調查或處理程序。
+
+## 申訴處理流程與調查程序
+起點：被害人提出申訴 → 判斷適用法律 → 依行為人身分啟動對應程序。
+- 性別平等工作法：依機關內部規定啟動調查程序。
+- 性別平等教育法：依學校內部規定啟動調查程序。
+- 性騷擾防治法：依行為人身分分流至機關/學校調查、社會處確認或警察機關申訴。
+```
+
+完整輸出：[examples/demos/zh-flowchart-01/output.md](examples/demos/zh-flowchart-01/output.md)
+
 ## What It Handles
 
 Supported inputs:

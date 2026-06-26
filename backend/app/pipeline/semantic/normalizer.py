@@ -180,18 +180,21 @@ def is_low_value_field_name(name: str) -> bool:
 
 def infer_field_type(name: str) -> str:
     normalized = _normalize_field_name(name)
-    if re.search(r"簽名|簽章|核章", normalized):
+    lowered = normalized.lower()
+    if re.search(r"簽名|簽章|核章", normalized) or re.search(r"\b(signature|signed|authorized representative)\b", lowered):
         return "signature"
-    if normalized.startswith("□") or re.search(r"保險|報支單位|示範院|APEC|PECC|其他$", normalized):
+    if normalized.startswith("□") or re.search(r"保險|報支單位|示範院|APEC|PECC|其他$", normalized) or re.search(r"\b(yes|no|other|guardian|parent of minor|representative)\b", lowered):
         return "checkbox"
-    if re.search(r"日期|期間|年月日", normalized):
+    if re.search(r"日期|期間|年月日", normalized) or re.search(r"\b(date|birth|birthday|expires|period|year)\b", lowered):
         return "date"
-    if re.search(r"金額|費用|交通費|宿費|膳雜費|生活費|辦公費|匯率|折合台幣|合計|小計|雜費", normalized):
+    if re.search(r"金額|費用|交通費|宿費|膳雜費|生活費|辦公費|匯率|折合台幣|合計|小計|雜費", normalized) or re.search(r"\b(amount|total|expense|fee|fare|mileage|rate|account|routing)\b", lowered):
         return "number"
-    if "身份證" in normalized or "身分證" in normalized:
+    if "身份證" in normalized or "身分證" in normalized or re.search(r"\b(ssn|social security|identification|taxpayer|employer identification)\b", lowered):
         return "id"
-    if "姓名" in normalized or "申請人" in normalized or "受款人" in normalized or "領款人" in normalized:
+    if "姓名" in normalized or "申請人" in normalized or "受款人" in normalized or "領款人" in normalized or re.search(r"\b(name|applicant|payee|preparer)\b", lowered):
         return "name"
+    if re.search(r"\b(email|phone|address|city|state|zip)\b", lowered):
+        return "text"
     if re.search(r"飛機|汽車|火車|高鐵|計程車", normalized):
         return "choice"
     return "text"
@@ -199,26 +202,28 @@ def infer_field_type(name: str) -> str:
 
 def infer_requirement(name: str) -> str:
     normalized = _normalize_field_name(name)
+    lowered = normalized.lower()
     if normalized.startswith("□"):
         return "conditional"
-    if re.search(r"預估|預借|需用日期|報支單位|付款|支票|戶名|銀行|帳號|預算|計畫|保險|申根|其他|變更|備註|代理人|主任秘書|副院長|院長|董事長", normalized):
+    if re.search(r"預估|預借|需用日期|報支單位|付款|支票|戶名|銀行|帳號|預算|計畫|保險|申根|其他|變更|備註|代理人|主任秘書|副院長|院長|董事長", normalized) or re.search(r"\b(other|optional|if applicable|guardian|parent of minor|representative|witness|checkbox)\b", lowered):
         return "conditional"
-    if re.search(r"申請單位|申請人|申請日期|姓名|職級|職稱|出差地點|出差事由|出差期間|單位主管|出差人簽", normalized):
+    if re.search(r"申請單位|申請人|申請日期|姓名|職級|職稱|出差地點|出差事由|出差期間|單位主管|出差人簽", normalized) or re.search(r"\b(name|date signed|signature|signed|address|applicant|payee|taxpayer|ssn|social security|birthday)\b", lowered):
         return "required"
     return "situational"
 
 
 def infer_field_section(name: str) -> str:
     mapping = [
-        (r"主任|主管|秘書|副院長|院長|董事長|人事|處長|簽|章|核|對保", "簽核/用印"),
+        (r"主任|主管|秘書|副院長|院長|董事長|人事|處長|簽|章|核|對保|signature|signed|approval|approved|certification|witness signature", "簽核/用印"),
         (r"採購|請購|預付款|預付|承辦單位|詢價|議價|招標|報價|廠商|電腦中心|資服中心", "採購/請購資訊"),
         (r"飛機|汽車|火車|高鐵|計程車", "交通工具"),
-        (r"出差地點|出差事由|出差期間|代理人|變更|起訖地點|起始地點|到達地點|工作紀要", "出差/行程資訊"),
-        (r"□|保險|報支單位|預估費用|預借金額|金額|費用|交通費|宿費|膳雜費|生活費|辦公費|匯率|幣別|折合台幣|合計|小計|預算|付款|支票|匯款|受款人|領款人|應繳回|應補發|沖預借|單據編號", "費用/報支資訊"),
+        (r"出差地點|出差事由|出差期間|代理人|變更|起訖地點|起始地點|到達地點|工作紀要|business purpose|trip|travel|itinerary|lodging|car", "出差/行程資訊"),
+        (r"□|保險|報支單位|預估費用|預借金額|金額|費用|交通費|宿費|膳雜費|生活費|辦公費|匯率|幣別|折合台幣|合計|小計|預算|付款|支票|匯款|受款人|領款人|應繳回|應補發|沖預借|單據編號|amount|expense|fee|fare|payment|payee|account|routing|total|reimbursement|mileage|rate", "費用/報支資訊"),
         (r"保證|保證人|商號|營業|資本|負責人|被保人|關係", "保證人/商號資料"),
-        (r"學校|系所|科系|學位|進修|選修|課程|學科|減免|受訓|訓練", "進修/訓練資訊"),
-        (r"姓名|出生|身分證|身份證|電話|手機|E-?mail|地址|緊急|申請|日期|單位|職級|職稱|員工", "申請/基本資料"),
-        (r"附件|合約|切結|證明", "附件/佐證資料"),
+        (r"學校|系所|科系|學位|進修|選修|課程|學科|減免|受訓|訓練|education|school|student", "進修/訓練資訊"),
+        (r"authorization|authorize|authorizing|disclosure|disclose|consent|purpose|record|records|transcript|tax return|tax form|medical records|education records|from whom|to whom|of what|source|recipient", "授權/揭露範圍"),
+        (r"姓名|出生|身分證|身份證|電話|手機|E-?mail|地址|緊急|申請|日期|單位|職級|職稱|員工|name|date|birth|birthday|ssn|social security|taxpayer|identification|phone|email|address|city|state|zip|department|applicant|preparer|vendor|passport|nationality|guardian|parent of minor|representative", "申請/基本資料"),
+        (r"附件|合約|切結|證明|attachment|certificate|document|supporting|evidence", "附件/佐證資料"),
     ]
     for pattern, section in mapping:
         if re.search(pattern, name, re.IGNORECASE):

@@ -72,6 +72,7 @@ SECTION_TRANSLATIONS = {
     "出差/行程資訊": "Travel / Itinerary",
     "費用/報支資訊": "Expense / Payment Information",
     "附件/佐證資料": "Attachments / Supporting Evidence",
+    "授權/揭露範圍": "Authorization / Disclosure Scope",
     "簽核/用印": "Approval / Signature",
     "表單欄位": "Form Fields",
     "保證人/商號資料": "Guarantor / Business Information",

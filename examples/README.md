@@ -12,6 +12,12 @@ This directory contains synthetic public samples for exercising the document par
 
 These files are intentionally simple HTML documents so they can be reviewed directly and converted by browser print-to-PDF if a PDF demo is needed.
 
+## Curated Output Demos
+
+- `demos/zh-flowchart-01/`: Traditional Chinese flowchart snapshot with the source page image, generated semantic Markdown, chunks, and quality gate metadata.
+
+Use these snapshots to inspect the expected RAG-ready output shape without running a local model.
+
 ## Local Synthetic Demo
 
 Start the backend and frontend with local setup or Docker Compose, then run:

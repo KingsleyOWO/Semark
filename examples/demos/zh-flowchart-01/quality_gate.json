@@ -1,0 +1,67 @@
+{
+  "status": "pass",
+  "score": 1.0,
+  "issues": [],
+  "vlm_audit_candidates": [],
+  "vlm_audits": [],
+  "stats": {
+    "issue_count": 0,
+    "issues_by_severity": {},
+    "issues_by_code": {},
+    "vlm_audit_candidate_count": 1,
+    "vlm_audit_count": 1,
+    "structured_document_type": "generic_document",
+    "structured_record_count": 0,
+    "semantic_quality": {
+      "correctness_score": 0.6,
+      "rag_readiness_score": 0.95,
+      "recommended_repairs": [],
+      "post_repair_issue_count": 0,
+      "post_repair_status": "pass"
+    },
+    "semantic_output_language": "zh-TW",
+    "semantic_repair": {
+      "enabled": true,
+      "document_type": "generic_document",
+      "applied_count": 1,
+      "attempted_count": 1,
+      "items": [
+        {
+          "target": "structured_rag",
+          "model_success": true,
+          "tokens_used": 5359,
+          "duration_seconds": 86.39568519592285,
+          "status": "applied",
+          "summary": "修復語意摘要與路徑中的截斷符號，並將扁平的箭頭路徑重構為階層式決策樹結構。完整保留原始法規名稱、適用情境條件、版本編號及調查受理節點，消除重複模板與解析殘留，提升 RAG 檢索準確性。",
+          "applied_repairs": [
+            "移除語意摘要與路徑中的截斷符號(ellipsis)",
+            "將扁平箭頭路徑重構為階層式決策樹結構",
+            "補齊 MinerU 原始文本中遺漏的調查受理與移送節點",
+            "統一法規名稱格式並保留原文條件描述"
+          ],
+          "confidence": 0.95
+        }
+      ],
+      "trigger_codes": [
+        "structured_output_empty",
+        "vlm_enrichment_parse_failed",
+        "summary_contains_ellipsis"
+      ],
+      "blocked_count": 0,
+      "fallback_count": 0
+    },
+    "semantic_repair_applied": true,
+    "post_repair_note": "Reviewer model rewrote semantic markdown/chunks after the rule-based quality gate.",
+    "pre_semantic_repair_issue_count": 3,
+    "post_semantic_repair_issue_count": 0,
+    "pre_semantic_repair_vlm_audit_candidate_count": 1,
+    "pre_semantic_repair_vlm_audit_count": 1,
+    "semantic_repair_cleared_issue_codes": [
+      "structured_output_empty",
+      "vlm_enrichment_parse_failed",
+      "summary_contains_ellipsis"
+    ],
+    "semantic_repair_quality_settled": true,
+    "auto_rag_ready": true
+  }
+}

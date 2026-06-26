@@ -177,6 +177,8 @@ The public corpus script downloads:
 
 Downloaded public files are for local testing only and are not committed. Review each source's current terms before redistributing downloaded files.
 
+Curated output snapshots are available under `examples/demos/`. These show the rendered source page beside generated semantic Markdown, chunks, and quality gate metadata so users can inspect the expected RAG-ready output without running a model.
+
 ## Optional Warm MinerU Service
 
 From `backend/` after installing dependencies:

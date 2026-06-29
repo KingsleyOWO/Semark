@@ -59,7 +59,7 @@ else
 fi
 
 if [[ ! -f backend/pyproject.toml || ! -f frontend/package.json ]]; then
-  echo "This does not look like the doc-parser repository root." >&2
+  echo "This does not look like the Semark repository root." >&2
   exit 1
 fi
 

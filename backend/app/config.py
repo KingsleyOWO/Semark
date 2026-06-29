@@ -8,8 +8,14 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def semark_env(name: str) -> AliasChoices:
+    """Prefer SEMARK_* settings while accepting legacy DOC_PARSER_* names."""
+
+    return AliasChoices(f"SEMARK_{name}", f"DOC_PARSER_{name}")
 
 
 class MinerUMethod(StrEnum):
@@ -240,49 +246,51 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
-        env_prefix="DOC_PARSER_",
+        env_prefix="",
         extra="ignore",
+        populate_by_name=True,
     )
 
     # Paths
-    workspace_path: Path = Path("workspace")
-    database_path: Path = Path("workspace/doc_parser.db")
+    workspace_path: Path = Field(default=Path("workspace"), validation_alias=semark_env("WORKSPACE_PATH"))
+    database_path: Path = Field(default=Path("workspace/doc_parser.db"), validation_alias=semark_env("DATABASE_PATH"))
 
     # Server
-    host: str = "127.0.0.1"
-    port: int = 8000
-    debug: bool = False
-    enable_local_path_ingest: bool = False
+    host: str = Field(default="127.0.0.1", validation_alias=semark_env("HOST"))
+    port: int = Field(default=8000, validation_alias=semark_env("PORT"))
+    debug: bool = Field(default=False, validation_alias=semark_env("DEBUG"))
+    enable_local_path_ingest: bool = Field(default=False, validation_alias=semark_env("ENABLE_LOCAL_PATH_INGEST"))
     cors_origins: list[str] = Field(
         default_factory=lambda: [
             "http://localhost:5173",
             "http://127.0.0.1:5173",
             "http://localhost:5070",
             "http://127.0.0.1:5070",
-        ]
+        ],
+        validation_alias=semark_env("CORS_ORIGINS"),
     )
-    cors_allow_private_lan: bool = False
+    cors_allow_private_lan: bool = Field(default=False, validation_alias=semark_env("CORS_ALLOW_PRIVATE_LAN"))
 
     # Default profile
-    default_profile: ProfileName = ProfileName.ACCURATE
+    default_profile: ProfileName = Field(default=ProfileName.ACCURATE, validation_alias=semark_env("DEFAULT_PROFILE"))
 
     # MinerU
-    mineru_cli_path: str = "mineru"  # Assumes in PATH
-    mineru_model_source: str = "huggingface"
-    mineru_api_url: str | None = None
-    mineru_vlm_url: str | None = None
-    mineru_vlm_model_name: str | None = None
-    mineru_vlm_api_key: str | None = None
+    mineru_cli_path: str = Field(default="mineru", validation_alias=semark_env("MINERU_CLI_PATH"))  # Assumes in PATH
+    mineru_model_source: str = Field(default="huggingface", validation_alias=semark_env("MINERU_MODEL_SOURCE"))
+    mineru_api_url: str | None = Field(default=None, validation_alias=semark_env("MINERU_API_URL"))
+    mineru_vlm_url: str | None = Field(default=None, validation_alias=semark_env("MINERU_VLM_URL"))
+    mineru_vlm_model_name: str | None = Field(default=None, validation_alias=semark_env("MINERU_VLM_MODEL_NAME"))
+    mineru_vlm_api_key: str | None = Field(default=None, validation_alias=semark_env("MINERU_VLM_API_KEY"))
 
     # VLM defaults (can be overridden per-run)
-    vlm_base_url: str = "http://localhost:11434/v1"
-    vlm_api_key: str = "ollama"
-    vlm_model: str = "qwen2.5-vl:7b"
+    vlm_base_url: str = Field(default="http://localhost:11434/v1", validation_alias=semark_env("VLM_BASE_URL"))
+    vlm_api_key: str = Field(default="ollama", validation_alias=semark_env("VLM_API_KEY"))
+    vlm_model: str = Field(default="qwen2.5-vl:7b", validation_alias=semark_env("VLM_MODEL"))
 
     # Reviewer VLM defaults. Leave unset to reuse the enrichment VLM.
-    review_vlm_base_url: str | None = None
-    review_vlm_api_key: str | None = None
-    review_vlm_model: str | None = None
+    review_vlm_base_url: str | None = Field(default=None, validation_alias=semark_env("REVIEW_VLM_BASE_URL"))
+    review_vlm_api_key: str | None = Field(default=None, validation_alias=semark_env("REVIEW_VLM_API_KEY"))
+    review_vlm_model: str | None = Field(default=None, validation_alias=semark_env("REVIEW_VLM_MODEL"))
 
     @property
     def store_path(self) -> Path:

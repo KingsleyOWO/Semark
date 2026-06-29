@@ -45,7 +45,7 @@ async def ingest_document(
     if not settings.enable_local_path_ingest:
         raise HTTPException(
             status_code=403,
-            detail="Local path ingestion is disabled. Use file upload or enable DOC_PARSER_ENABLE_LOCAL_PATH_INGEST for trusted deployments.",
+            detail="Local path ingestion is disabled. Use file upload or enable SEMARK_ENABLE_LOCAL_PATH_INGEST for trusted deployments.",
         )
 
     if not request.path:

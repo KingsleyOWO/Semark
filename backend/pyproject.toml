@@ -1,7 +1,7 @@
 [project]
-name = "doc-parser"
+name = "semark"
 version = "0.1.0"
-description = "Document Parser for RAG - Convert PDF/Word/Image/HTML to structured markdown"
+description = "Semark: Semantic Markdown for RAG from PDF, Office, HTML, and images"
 license = "Apache-2.0"
 requires-python = ">=3.11"
 dependencies = [
@@ -25,6 +25,7 @@ dependencies = [
 ]
 
 [project.scripts]
+semark-eval = "app.eval.runner:main"
 doc-parser-eval = "app.eval.runner:main"
 
 [project.optional-dependencies]

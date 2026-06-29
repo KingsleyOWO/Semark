@@ -1,6 +1,6 @@
 # Demo Corpus
 
-This directory contains synthetic public samples for exercising the document parser without publishing private or customer data.
+This directory contains synthetic public samples for exercising Semark without publishing private or customer data.
 
 ## Included Synthetic Samples
 

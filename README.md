@@ -1,14 +1,16 @@
-# Doc Parser
+# Semark
 
 **English** | [繁體中文](README.zh-TW.md)
 
-**Doc Parser** is an open-source document parsing and semantic structuring tool for RAG, knowledge-base ingestion, and AI document workflows. It converts PDFs, Office files, HTML, and images into RAG-ready Markdown, structured chunks, source maps, and downloadable outputs. Long documents can be automatically split into a main document plus independent semantic files for forms, tables, flowcharts, figures, and attachments, making the output easier to organize and retrieve. The pipeline uses MinerU for document parsing and optional VLM/LLM review models for form extraction, flowchart understanding, visual reasoning, and final semantic repair.
+> Semantic Markdown for RAG: convert PDFs, Office files, HTML, and images into RAG-ready Markdown with MinerU, VLM/LLM review, source maps, chunks, and automatic document splitting.
+
+**Semark** is an open-source semantic document parser and Semantic Markdown generator for RAG, knowledge-base ingestion, and AI document workflows. It turns PDFs, Office files, HTML, and images into compact RAG-ready Markdown, structured chunks, source maps, and downloadable outputs. Long documents can be automatically split into a main document plus independent semantic files for forms, tables, flowcharts, figures, and attachments, making the output easier to organize, retrieve, and feed into LLM applications. The pipeline uses MinerU for parsing/OCR/layout evidence and optional VLM/LLM review models for form extraction, flowchart understanding, visual reasoning, semantic repair, and final quality checks.
 
 ## Purpose
 
-Most document pipelines stop at OCR text or raw layout extraction. That output is often too noisy for retrieval because tables, forms, checkboxes, visual diagrams, approval flows, and legal notes lose their semantic relationships. Doc Parser focuses on the next step: producing compact semantic documents that another model can read, retrieve, and answer from.
+Most document pipelines stop at OCR text or raw layout extraction. That output is often too noisy for retrieval because tables, forms, checkboxes, visual diagrams, approval flows, and legal notes lose their semantic relationships. Semark focuses on the next step: producing compact semantic Markdown that another model can read, retrieve, and answer from.
 
-Use Doc Parser when you need:
+Use Semark when you need:
 
 - PDF to structured Markdown for RAG and LLM applications.
 - MinerU-based document parsing with a usable web UI and API.
@@ -33,7 +35,9 @@ The curated demo snapshots were generated with a local Ollama model configured a
 
 ## Common Search / GEO Terms
 
-`document parser for RAG`, `PDF to Markdown for LLM`, `MinerU web UI`, `MinerU Docker app`, `VLM document understanding`, `semantic document parser`, `OCR to structured Markdown`, `automatic document splitting`, `form extraction for RAG`, `flowchart to Markdown`, `table extraction to Markdown`, `Traditional Chinese document parser`, `English PDF parser`, `local RAG document ingestion`, `OpenWebUI document pipeline`.
+`Semark`, `Semark document parser`, `Semantic Markdown for RAG`, `document parser for RAG`, `PDF to semantic Markdown`, `PDF to Markdown for LLM`, `RAG-ready Markdown`, `LLM-ready Markdown`, `AI document parser`, `MinerU web UI`, `MinerU Docker app`, `VLM document understanding`, `semantic document parser`, `OCR to structured Markdown`, `automatic document splitting`, `form extraction for RAG`, `flowchart to Markdown`, `table extraction to Markdown`, `Traditional Chinese document parser`, `English PDF parser`, `local RAG document ingestion`, `OpenWebUI document pipeline`, `LlamaIndex document ingestion`, `LangChain document ingestion`.
+
+Suggested GitHub topics: `rag`, `pdf-to-markdown`, `semantic-markdown`, `document-ai`, `mineru`, `vlm`, `ocr`, `llm`, `knowledge-base`, `ollama`, `openai-compatible`, `traditional-chinese`.
 
 ## Demo Preview
 
@@ -45,25 +49,44 @@ The curated demos below show the source page beside the generated RAG-ready sema
 
 ![USCIS G-1145 source page](examples/demos/en-g1145-01/source-page.png)
 
-**Generated semantic Markdown excerpt**
+**Generated semantic Markdown**
 
 ```markdown
 # USCIS Form G-1145: e-Notification of Application/Petition Acceptance
 
 ## Identity & Purpose
-- Form ID: G-1145 (09/26/14Y)
-- Agency: U.S. Citizenship and Immigration Services (USCIS), Department of Homeland Security
-- Purpose: Request an electronic notification when USCIS accepts an immigration application or petition filed at a Lockbox facility.
+- **Form ID:** G-1145 (09/26/14Y)
+- **Agency:** U.S. Citizenship and Immigration Services (USCIS), Department of Homeland Security
+- **Purpose:** Request an electronic notification (e-Notification) via email and/or text message when USCIS accepts your immigration application or petition filed at a Lockbox facility. This service is provided as a convenience and does not grant any status or benefit.
+
+## Instructions for Completion & Submission
+- Complete this form and clip it to the first page of your application package.
+- You will receive one e-Notification per form filed.
+- **Delivery Timeline:** Notifications are sent within 24 hours after USCIS accepts the application.
+- **Recipient Rules:**
+  - Domestic customers: Email and/or text message.
+  - Overseas customers: Email only.
+- **Important Notes:** Undeliverable e-Notifications cannot be resent. The notification will display your receipt number and a link to check case status, but will not contain personal information. USCIS will also mail a physical receipt notice (I-797C) within 10 days of acceptance.
 
 ## Required Fields
-- Applicant/Petitioner Full Last Name
-- Applicant/Petitioner Full First Name
-- Applicant/Petitioner Full Middle Name
-- Email Address
-- Mobile Phone Number (Text Message)
-```
+Grouped by meaning for completion:
+- **Applicant/Petitioner Identification:**
+  - `Applicant/Petitioner Full Last Name`
+  - `Applicant/Petitioner Full First Name`
+  - `Applicant/Petitioner Full Middle Name`
+- **Contact Information:**
+  - `Email Address` (Required for all)
+  - `Mobile Phone Number (Text Message)` (Required for domestic text notifications)
 
-Full output: [examples/demos/en-g1145-01/output.md](examples/demos/en-g1145-01/output.md)
+## Privacy Act Statement & Legal Disclosures
+- **Authorities:** Collected pursuant to section 103(a) of the Immigration and Nationality Act (INA).
+- **Purpose:** To request electronic notification upon USCIS acceptance of immigration forms.
+- **Disclosure:** Provision is voluntary. Failure to provide information may prevent receipt of text/email notifications.
+- **Routine Uses:** Information will be used/disclosed to DHS personnel and contractors per approved system of records notices [DHS/USCIS-007 & DHS/USCIS-001]. May also be shared for law enforcement or national security purposes.
+
+## RAG Query Anchors
+- Form G-1145 e-Notification purpose, Lockbox filing instructions, 24-hour notification timeline, domestic vs overseas delivery rules, I-797C receipt notice mailing timeframe, Privacy Act authorities and routine uses, field completion requirements.
+```
 
 ### Traditional Chinese Flowchart: Sexual Harassment Complaint Workflow
 
@@ -71,22 +94,37 @@ Full output: [examples/demos/en-g1145-01/output.md](examples/demos/en-g1145-01/o
 
 ![Traditional Chinese flowchart source page](examples/demos/zh-flowchart-01/source-page.png)
 
-**Generated semantic Markdown excerpt**
+**Generated semantic Markdown**
 
 ```markdown
 # 不同性騷擾申訴對象標準作業流程圖
 
-## 適用目的
-規範被害人提出性騷擾申訴後，依事件場域及當事人身分關係判斷適用法律，並啟動相應調查或處理程序。
+**版本資訊**：1130801製
 
-## 申訴處理流程與調查程序
-起點：被害人提出申訴 → 判斷適用法律 → 依行為人身分啟動對應程序。
-- 性別平等工作法：依機關內部規定啟動調查程序。
-- 性別平等教育法：依學校內部規定啟動調查程序。
-- 性騷擾防治法：依行為人身分分流至機關/學校調查、社會處確認或警察機關申訴。
+## 語意摘要
+本文件為「不同性騷擾申訴對象標準作業流程圖」之結構化語意描述。流程自被害人提出申訴開始，依據事件發生場域與當事人身分關係判斷適用之法規（《性別平等工作法》、《性別平等教育法》或《性騷擾防治法》），並依行為人身分啟動機關或學校內部調查程序；若無雇主或身分不明時，則移送警察或社會機關處理。後續將評估是否受理及是否續行調查。
+
+## 流程邏輯與判斷節點
+
+### 1. 申訴提出
+- **起始動作**：被害人提出申訴
+
+### 2. 適用法律判斷（依性騷擾事件發生之場域及當事人之身分關係）
+- **情境一**：執行職務或求職時；或於非工作時間遭受所屬機關(學校)之同一人持續性性騷擾；或於非工作時間遭受不同機關學校具共同作業或業務往來關係之同一人持續性性騷擾。
+  - **適用法規**：《性別平等工作法》
+  - **後續處理**：若行為人是機關人員，依機關內部規定啟動調查程序。
+- **情境二**：不論發生在上、下課期間或校內、外，事件之一方為學生，另一方為校長、教師、職員、工友或學生。
+  - **適用法規**：《性別平等教育法》
+  - **後續處理**：若行為人是學校人員，依學校內部規定啟動調查程序。
+- **情境三**：非屬《性別平等工作法》及《性別平等教育法》適用對象時。
+  - **適用法規**：《性騷擾防治法》
+  - **後續處理**：向性騷擾事件發生地之警察機關提出申訴，或移送本府社會機關處理。
+
+### 3. 受理與調查程序
+- **判斷節點**：是否有不予受理之情形？
+  - **是**：函復調查單位。
+  - **否**：認應續行調查 → 續行調查。
 ```
-
-Full output: [examples/demos/zh-flowchart-01/output.md](examples/demos/zh-flowchart-01/output.md)
 
 ## What It Handles
 
@@ -104,9 +142,9 @@ Generated outputs include the main document plus automatically extracted child d
 
 MinerU can run in three deployment modes:
 
-- Simple mode: leave `DOC_PARSER_MINERU_API_URL` empty. The `mineru` CLI auto-starts a temporary local API for each parse. This is easiest and most portable.
-- Service mode: run a warm `mineru-api` locally and set `DOC_PARSER_MINERU_API_URL`, for example `http://127.0.0.1:8601`. This avoids reloading parser resources every run.
-- Remote mode: point `DOC_PARSER_MINERU_API_URL` at a MinerU API/router on another machine, typically a GPU host.
+- Simple mode: leave `SEMARK_MINERU_API_URL` empty. The `mineru` CLI auto-starts a temporary local API for each parse. This is easiest and most portable.
+- Service mode: run a warm `mineru-api` locally and set `SEMARK_MINERU_API_URL`, for example `http://127.0.0.1:8601`. This avoids reloading parser resources every run.
+- Remote mode: point `SEMARK_MINERU_API_URL` at a MinerU API/router on another machine, typically a GPU host.
 
 If a configured MinerU API URL is unreachable, the app falls back to simple mode so parsing does not fail just because the warm service is down.
 
@@ -134,13 +172,13 @@ sudo apt install libreoffice
 Then configure VLM in `backend/.env` if you want model-enriched forms, figures, diagrams, and semantic output. The enrichment model is used for form extraction and visual understanding. The reviewer model is used by the final quality gate for audit and controlled repair checks; leave it unset to reuse the enrichment model.
 
 ```env
-DOC_PARSER_VLM_BASE_URL=http://127.0.0.1:11434/v1
-DOC_PARSER_VLM_API_KEY=ollama
-DOC_PARSER_VLM_MODEL=your-vision-model
+SEMARK_VLM_BASE_URL=http://127.0.0.1:11434/v1
+SEMARK_VLM_API_KEY=ollama
+SEMARK_VLM_MODEL=your-vision-model
 
-DOC_PARSER_REVIEW_VLM_BASE_URL=http://127.0.0.1:11434/v1
-DOC_PARSER_REVIEW_VLM_API_KEY=ollama
-DOC_PARSER_REVIEW_VLM_MODEL=your-stronger-review-model
+SEMARK_REVIEW_VLM_BASE_URL=http://127.0.0.1:11434/v1
+SEMARK_REVIEW_VLM_API_KEY=ollama
+SEMARK_REVIEW_VLM_MODEL=your-stronger-review-model
 ```
 
 Start the services:
@@ -194,12 +232,12 @@ The default Docker path is the full product path. `docker compose up --build` bu
 For Docker Desktop, or hosts where containers can reach a local Ollama service through `host.docker.internal`:
 
 ```bash
-export DOC_PARSER_VLM_BASE_URL=http://host.docker.internal:11434/v1
-export DOC_PARSER_VLM_API_KEY=ollama
-export DOC_PARSER_VLM_MODEL=your-vision-model
-export DOC_PARSER_REVIEW_VLM_BASE_URL=http://host.docker.internal:11434/v1
-export DOC_PARSER_REVIEW_VLM_API_KEY=ollama
-export DOC_PARSER_REVIEW_VLM_MODEL=your-stronger-review-model
+export SEMARK_VLM_BASE_URL=http://host.docker.internal:11434/v1
+export SEMARK_VLM_API_KEY=ollama
+export SEMARK_VLM_MODEL=your-vision-model
+export SEMARK_REVIEW_VLM_BASE_URL=http://host.docker.internal:11434/v1
+export SEMARK_REVIEW_VLM_API_KEY=ollama
+export SEMARK_REVIEW_VLM_MODEL=your-stronger-review-model
 
 docker compose up --build
 ```
@@ -212,8 +250,8 @@ Open:
 On Linux/WSL, Docker bridge networking may not always reach a host Ollama service through `host.docker.internal`. If Settings -> VLM model probe times out, use the host-network compose file so containers can call Ollama at `127.0.0.1:11434`:
 
 ```bash
-export DOC_PARSER_VLM_MODEL=your-vision-model
-export DOC_PARSER_REVIEW_VLM_MODEL=your-stronger-review-model
+export SEMARK_VLM_MODEL=your-vision-model
+export SEMARK_REVIEW_VLM_MODEL=your-stronger-review-model
 
 docker compose -f docker-compose.full.host.yml up --build
 ```
@@ -221,26 +259,28 @@ docker compose -f docker-compose.full.host.yml up --build
 If `5070` or `8585` is already in use, override both ports for the host-network compose file:
 
 ```bash
-DOC_PARSER_FRONTEND_PORT=35070 DOC_PARSER_PORT=38585 \
+SEMARK_FRONTEND_PORT=35070 SEMARK_PORT=38585 \
   docker compose -f docker-compose.full.host.yml up --build
 ```
 
 For cloud or remote OpenAI-compatible providers, point both model endpoints at the provider instead of Ollama:
 
 ```bash
-export DOC_PARSER_VLM_BASE_URL=https://your-provider.example/v1
-export DOC_PARSER_VLM_API_KEY=your-api-key
-export DOC_PARSER_VLM_MODEL=your-vision-model
-export DOC_PARSER_REVIEW_VLM_BASE_URL=https://your-provider.example/v1
-export DOC_PARSER_REVIEW_VLM_API_KEY=your-api-key
-export DOC_PARSER_REVIEW_VLM_MODEL=your-stronger-review-model
+export SEMARK_VLM_BASE_URL=https://your-provider.example/v1
+export SEMARK_VLM_API_KEY=your-api-key
+export SEMARK_VLM_MODEL=your-vision-model
+export SEMARK_REVIEW_VLM_BASE_URL=https://your-provider.example/v1
+export SEMARK_REVIEW_VLM_API_KEY=your-api-key
+export SEMARK_REVIEW_VLM_MODEL=your-stronger-review-model
 
 docker compose up --build
 ```
 
 The full image installs the backend with `.[mineru]`, includes PyMuPDF, LibreOffice for HTML/Office conversion, Chinese CJK fonts, MinerU pipeline extras, constrained PyTorch 2.6/2.7 plus torchvision, and the small compatibility dependency `six` for the MinerU pipeline backend. It provides the `mineru` CLI and stores the workspace plus MinerU/model caches in Docker volumes. First-time MinerU/model setup may download cache files according to MinerU's own behavior and license. The full image is intentionally larger because MinerU requires PyTorch at runtime.
 
-`DOC_PARSER_VLM_*` drives extraction/enrichment. `DOC_PARSER_REVIEW_VLM_*` drives final audit/repair checks and can point to a stronger model; if omitted, it falls back to the enrichment model. The selected model must support image input when visual enrichment is enabled.
+`SEMARK_VLM_*` drives extraction/enrichment. `SEMARK_REVIEW_VLM_*` drives final audit/repair checks and can point to a stronger model; if omitted, it falls back to the enrichment model. The selected model must support image input when visual enrichment is enabled.
+
+Legacy `DOC_PARSER_*` environment variables are still accepted for backward compatibility, but new examples and Docker files use `SEMARK_*`.
 
 API-only development Docker is still available, but it intentionally omits the full MinerU/LibreOffice processing stack and is not the recommended path for end users:
 
@@ -300,7 +340,7 @@ From `backend/` after installing dependencies:
 Then set this in `backend/.env`:
 
 ```env
-DOC_PARSER_MINERU_API_URL=http://127.0.0.1:8601
+SEMARK_MINERU_API_URL=http://127.0.0.1:8601
 ```
 
 Use Settings -> VLM Models -> MinerU Connection to verify the CLI version and whether the configured MinerU API URL is reachable.
@@ -310,17 +350,17 @@ Use Settings -> VLM Models -> MinerU Connection to verify the CLI version and wh
 The app-level VLM is optional but recommended for complex forms, figures, diagrams, and tables. The adapter uses an OpenAI-compatible chat-completions interface and can be pointed at Ollama, OpenAI, vLLM, LMDeploy, or another compatible provider. Configure the endpoint reachable from the backend process:
 
 ```env
-DOC_PARSER_VLM_BASE_URL=http://127.0.0.1:11434/v1
-DOC_PARSER_VLM_API_KEY=ollama
-DOC_PARSER_VLM_MODEL=your-vision-model
+SEMARK_VLM_BASE_URL=http://127.0.0.1:11434/v1
+SEMARK_VLM_API_KEY=ollama
+SEMARK_VLM_MODEL=your-vision-model
 ```
 
-For Ollama, use the `/v1` endpoint, for example `http://127.0.0.1:11434/v1`, and set `DOC_PARSER_VLM_API_KEY=ollama`. For cloud OpenAI-compatible APIs, use the provider base URL, API key, and model name. The selected model must support the image input format used by the configured `image_mode` when visual enrichment is enabled.
+For Ollama, use the `/v1` endpoint, for example `http://127.0.0.1:11434/v1`, and set `SEMARK_VLM_API_KEY=ollama`. For cloud OpenAI-compatible APIs, use the provider base URL, API key, and model name. The selected model must support the image input format used by the configured `image_mode` when visual enrichment is enabled.
 
 Two model roles are supported:
 
-- `DOC_PARSER_VLM_*`: extraction/enrichment model used during the Enrich stage for forms, figures, diagrams, and optional table work.
-- `DOC_PARSER_REVIEW_VLM_*`: reviewer model used by the final quality gate to audit the generated semantic output and guide controlled repair checks. If unset, the reviewer falls back to `DOC_PARSER_VLM_*`.
+- `SEMARK_VLM_*`: extraction/enrichment model used during the Enrich stage for forms, figures, diagrams, and optional table work.
+- `SEMARK_REVIEW_VLM_*`: reviewer model used by the final quality gate to audit the generated semantic output and guide controlled repair checks. If unset, the reviewer falls back to `SEMARK_VLM_*`.
 
 No default command sends documents to a cloud model; remote endpoints are opt-in through configuration.
 
@@ -342,7 +382,7 @@ Third-party components keep their own licenses and terms. In particular, PyMuPDF
 
 ## Security Boundary
 
-This service is designed for local or trusted-network use. The API has no built-in authentication, so do not expose it directly to the public internet. Keep `DOC_PARSER_ENABLE_LOCAL_PATH_INGEST=false` unless every API client is trusted, because local path ingestion lets clients ask the backend host to read local files. Keep `DOC_PARSER_CORS_ALLOW_PRIVATE_LAN=false` for portable/open-source defaults and explicitly list allowed origins.
+This service is designed for local or trusted-network use. The API has no built-in authentication, so do not expose it directly to the public internet. Keep `SEMARK_ENABLE_LOCAL_PATH_INGEST=false` unless every API client is trusted, because local path ingestion lets clients ask the backend host to read local files. Keep `SEMARK_CORS_ALLOW_PRIVATE_LAN=false` for portable/open-source defaults and explicitly list allowed origins.
 
 
 ## GitHub Release Dry Run

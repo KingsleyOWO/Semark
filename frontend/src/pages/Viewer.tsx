@@ -254,22 +254,22 @@ export function Viewer() {
   }
 
   return (
-    <div className="flex flex-col h-screen">
+    <div className="flex min-h-[calc(100vh-5.5rem)] flex-col xl:h-[calc(100vh-5.5rem)] xl:overflow-hidden">
       {/* Header */}
-      <div className="flex items-center gap-4 p-4 border-b shrink-0">
+      <div className="flex flex-wrap items-center gap-3 border-b p-3 shrink-0">
         <Button variant="ghost" size="sm" asChild>
           <Link to="/">
             <ArrowLeft className="mr-2 h-4 w-4" />
             {t('common.back')}
           </Link>
         </Button>
-        <div className="flex-1">
+        <div className="min-w-0 flex-1">
           <h1 className="text-lg font-bold">{t('viewer.title')}</h1>
           <p className="text-xs text-muted-foreground">
             {t('viewer.runMeta', { run: runId?.slice(0, 16) ?? '', profile: run?.profile ? t(`profile.${run.profile}`) : '' })}
           </p>
         </div>
-        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+        <div className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
           <span>{t('viewer.pageCount', { count: pages.length })}</span>
           <span>·</span>
           <span>{t('viewer.blockCount', { count: blocks.length })}</span>
@@ -279,9 +279,9 @@ export function Viewer() {
       </div>
 
       {/* Three-column layout */}
-      <div className="flex-1 grid grid-cols-12 gap-2 p-2 min-h-0">
+      <div className="grid min-h-0 flex-1 gap-3 p-2 xl:grid-cols-[minmax(360px,0.95fr)_minmax(520px,1.35fr)_minmax(360px,0.9fr)] 2xl:grid-cols-[minmax(440px,1fr)_minmax(720px,1.35fr)_minmax(440px,0.95fr)]">
         {/* Left: Split document markdown view (4 cols) */}
-        <div className="col-span-4 flex flex-col min-h-0 border rounded-lg">
+        <div className="flex min-h-[420px] flex-col rounded-lg border xl:min-h-0">
           <div className="flex items-center justify-between p-2 border-b shrink-0">
             <div className="flex items-center gap-2">
               <FileText className="h-4 w-4" />
@@ -293,7 +293,7 @@ export function Viewer() {
           </div>
           {splitDocuments.length > 0 && (
             <div className="border-b p-2 shrink-0">
-              <div className="flex flex-col gap-1">
+              <div className="flex max-h-48 flex-col gap-1 overflow-y-auto pr-1">
                 {splitDocuments.map((document) => {
                   const pageLabel =
                     document.page_label ??
@@ -355,7 +355,7 @@ export function Viewer() {
         </div>
 
         {/* Center: Page view (5 cols) */}
-        <div className="col-span-5 flex flex-col min-h-0 border rounded-lg">
+        <div className="flex min-h-[520px] flex-col rounded-lg border xl:min-h-0">
           <div className="flex items-center justify-between p-2 border-b shrink-0">
             <div className="flex items-center gap-2">
               <ImageIcon className="h-4 w-4" />
@@ -417,7 +417,7 @@ export function Viewer() {
         </div>
 
         {/* Right: Review panel (3 cols) */}
-        <div className="col-span-3 flex flex-col min-h-0 border rounded-lg">
+        <div className="flex min-h-[420px] flex-col rounded-lg border xl:min-h-0">
           <div className="flex items-center justify-between p-2 border-b shrink-0">
             <span className="text-sm font-medium">{t('viewer.tabs.review')}</span>
             <Badge variant={reviewIssues.length > 0 ? 'warning' : 'success'} className="text-xs">

@@ -575,8 +575,8 @@ export function Dashboard() {
   }
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
+    <div className="space-y-4">
+      <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
         <h1 className="text-2xl font-bold">{t('nav.dashboard')}</h1>
         <Button
           variant="outline"
@@ -589,8 +589,8 @@ export function Dashboard() {
       </div>
 
       {/* Workbench */}
-      <div className="grid gap-4 xl:grid-cols-[1fr_1fr_1.1fr]">
-        <Card className="min-h-[260px]">
+      <div className="grid gap-4 xl:grid-cols-[minmax(360px,1.05fr)_minmax(320px,0.85fr)_minmax(400px,1.1fr)] 2xl:grid-cols-[minmax(420px,1.15fr)_minmax(360px,0.85fr)_minmax(520px,1.25fr)]">
+        <Card className="h-full min-h-[260px]">
           <CardHeader className="pb-3">
             <CardTitle className="flex items-center gap-2 text-base">
               <Upload className="h-5 w-5" />
@@ -677,7 +677,7 @@ export function Dashboard() {
           </CardContent>
         </Card>
 
-        <Card className="min-h-[260px]">
+        <Card className="h-full min-h-[260px]">
           <CardHeader className="pb-3">
             <CardTitle className="flex items-center gap-2 text-base">
               <Play className="h-5 w-5" />
@@ -723,7 +723,7 @@ export function Dashboard() {
           </CardContent>
         </Card>
 
-        <Card className="min-h-[260px]">
+        <Card className="h-full min-h-[260px]">
           <CardHeader className="pb-3">
             <CardTitle className="flex items-center gap-2 text-base">
               <FileDown className="h-5 w-5" />
@@ -852,7 +852,7 @@ export function Dashboard() {
             </div>
           </CardHeader>
           <CardContent>
-            <div className="space-y-2 max-h-[400px] overflow-y-auto">
+            <div className="space-y-2 overflow-y-auto lg:max-h-[42vh]">
               {docs.map((doc) => (
                 <div
                   key={doc.doc_id}
@@ -1048,7 +1048,7 @@ export function Dashboard() {
           ) : runs.length === 0 ? (
             <p className="text-muted-foreground">{t('dashboard.noRuns')}</p>
           ) : (
-            <div className="rounded-md border max-h-[500px] overflow-y-auto">
+            <div className="max-h-[52vh] overflow-auto rounded-md border">
               <table className="w-full">
                 <thead className="sticky top-0 bg-background z-10">
                   <tr className="border-b bg-muted/50">

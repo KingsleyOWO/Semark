@@ -18,10 +18,10 @@ export function Layout({ children }: LayoutProps) {
   const { language, setLanguage, t } = useI18n()
 
   return (
-    <div className="min-h-screen bg-background">
+    <div className="flex min-h-screen flex-col bg-background">
       {/* Header */}
       <header className="sticky top-0 z-50 w-full border-b bg-background/95 backdrop-blur">
-        <div className="container flex h-14 items-center">
+        <div className="flex h-14 w-full items-center px-4 sm:px-5 lg:px-6">
           <Link to="/" className="flex items-center gap-2 font-semibold">
             <FileText className="h-5 w-5" />
             <span>{t('app.name')}</span>
@@ -62,7 +62,7 @@ export function Layout({ children }: LayoutProps) {
       </header>
 
       {/* Main content */}
-      <main className="container py-6">{children}</main>
+      <main className="min-w-0 w-full flex-1 px-4 py-4 sm:px-5 lg:px-6">{children}</main>
     </div>
   )
 }

@@ -323,7 +323,7 @@ export function Assets() {
   }
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-4">
       <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
         <div>
           <h1 className="text-2xl font-bold">{t('assets.title')}</h1>
@@ -347,8 +347,8 @@ export function Assets() {
         </div>
       </div>
 
-      <div className="grid gap-4 xl:grid-cols-[340px_minmax(380px,0.85fr)_minmax(460px,1.15fr)]">
-        <Card className="min-h-[680px]">
+      <div className="grid gap-4 xl:grid-cols-[minmax(280px,0.75fr)_minmax(360px,0.95fr)_minmax(520px,1.45fr)] 2xl:grid-cols-[minmax(320px,0.7fr)_minmax(420px,0.9fr)_minmax(680px,1.6fr)]">
+        <Card className="flex min-h-[520px] flex-col xl:h-[calc(100vh-12rem)] xl:min-h-[620px]">
           <CardHeader className="space-y-3 pb-3">
             <div className="flex items-start justify-between gap-3">
               <div>
@@ -405,8 +405,8 @@ export function Assets() {
               </Button>
             </div>
           </CardHeader>
-          <CardContent className="p-0">
-            <ScrollArea className="h-[620px]">
+          <CardContent className="flex min-h-0 flex-1 flex-col p-0">
+            <ScrollArea className="min-h-0 flex-1">
               <div className="space-y-1 p-2">
                 {runs.length === 0 ? (
                   <p className="p-2 text-sm text-muted-foreground">{t('assets.noCompletedRuns')}</p>
@@ -431,7 +431,7 @@ export function Assets() {
           </CardContent>
         </Card>
 
-        <Card className="min-h-[680px]">
+        <Card className="flex min-h-[520px] flex-col xl:h-[calc(100vh-12rem)] xl:min-h-[620px]">
           <CardHeader className="space-y-3 pb-3">
             <div className="flex items-center justify-between gap-3">
               <CardTitle className="flex items-center gap-2 text-sm">
@@ -502,8 +502,8 @@ export function Assets() {
               {t('assets.outputOnlyHint')}
             </div>
           </CardHeader>
-          <CardContent className="p-0">
-            <ScrollArea className="h-[476px]">
+          <CardContent className="flex min-h-0 flex-1 flex-col p-0">
+            <ScrollArea className="min-h-0 flex-1">
               {!selectedRunId ? (
                 <p className="p-4 text-sm text-muted-foreground">{t('assets.selectRunFirst')}</p>
               ) : splitDocumentsQuery.isLoading ? (
@@ -572,7 +572,7 @@ export function Assets() {
           </CardContent>
         </Card>
 
-        <Card className="min-h-[680px]">
+        <Card className="flex min-h-[520px] flex-col xl:h-[calc(100vh-12rem)] xl:min-h-[620px]">
           <CardHeader className="space-y-3 pb-3">
             <div className="flex flex-col gap-2 lg:flex-row lg:items-start lg:justify-between">
               <div className="min-w-0">
@@ -626,8 +626,8 @@ export function Assets() {
               />
             )}
           </CardHeader>
-          <CardContent className="p-0">
-            <ScrollArea className="h-[512px] border-t">
+          <CardContent className="flex min-h-0 flex-1 flex-col p-0">
+            <ScrollArea className="min-h-0 flex-1 border-t">
               {!selectedDocumentId ? (
                 <p className="p-4 text-sm text-muted-foreground">{t('assets.selectDocumentFirst')}</p>
               ) : selectedDocumentQuery.isLoading ? (

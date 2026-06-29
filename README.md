@@ -23,6 +23,14 @@ Use Semark when you need:
 
 The curated demo snapshots were generated with a local Ollama model configured as `qwen3.6:35b-a3b-q8_0` for both enrichment and review in the test environment. Stronger vision/reviewer models may produce better semantic repair, visual reasoning, and field grouping quality. Model output is therefore an example of the pipeline shape, not a fixed upper bound.
 
+## Start Here
+
+- New user full setup: [Quickstart From GitHub](#quickstart-from-github).
+- Docker with MinerU: [Docker Quickstart](#docker-quickstart).
+- Local or cloud model endpoints: [VLM Enrichment and Review](#vlm-enrichment-and-review).
+- Built-in samples and optional public downloads: [Demo Samples](#demo-samples).
+- Expected output examples without running a model: [Demo Preview](#demo-preview).
+
 ## How It Works
 
 1. **Ingest**: upload PDF, Office, HTML, or image files through the UI/API.
@@ -137,6 +145,48 @@ Supported inputs:
 - PNG/JPG/JPEG
 
 Generated outputs include the main document plus automatically extracted child documents when the source contains independent retrieval units. For example, a long PDF can produce `main.md` for the body text and separate semantic Markdown files for individual forms, tables, flowcharts, figures, attachments, or other structured sections.
+
+## Quickstart From GitHub
+
+The shortest full-feature path is Docker Compose:
+
+```bash
+git clone https://github.com/KingsleyOWO/Semark.git
+cd Semark
+
+# Optional, when using a local Ollama vision model.
+# Start Ollama in another shell if it is not already running, then pull a model you want to use.
+ollama pull your-vision-model
+
+export SEMARK_VLM_BASE_URL=http://host.docker.internal:11434/v1
+export SEMARK_VLM_API_KEY=ollama
+export SEMARK_VLM_MODEL=your-vision-model
+export SEMARK_REVIEW_VLM_BASE_URL=http://host.docker.internal:11434/v1
+export SEMARK_REVIEW_VLM_API_KEY=ollama
+export SEMARK_REVIEW_VLM_MODEL=your-review-model
+
+docker compose up --build
+```
+
+Open `http://localhost:5070`. Upload a PDF, Office file, HTML file, or image, select the uploaded document in the document list, then run `accurate` for MinerU plus configured VLM/LLM enrichment. Use `fast` only for a lightweight smoke test without model enrichment.
+
+On Linux/WSL, if the container cannot reach host Ollama through `host.docker.internal`, use:
+
+```bash
+export SEMARK_VLM_MODEL=your-vision-model
+export SEMARK_REVIEW_VLM_MODEL=your-review-model
+docker compose -f docker-compose.full.host.yml up --build
+```
+
+After a run succeeds, open `Viewer` to inspect source pages, semantic Markdown, chunks, quality metadata, and split documents. Open `Documents` to download generated Markdown/DOCX/TXT files in bulk or one document at a time.
+
+## What Gets Downloaded
+
+- `git clone` downloads the source code, documentation, synthetic samples, and small curated demo snapshots only.
+- `docker compose up --build` downloads operating-system packages, Python wheels, npm packages, MinerU dependencies, PyMuPDF, LibreOffice, CJK fonts, and the runtime dependencies needed by the full parser image.
+- The first MinerU run may download parser/model cache files according to MinerU's own upstream behavior and license. Docker stores these in named volumes, not in Git.
+- Semark does not bundle Ollama models, cloud model weights, API keys, private documents, generated outputs, or local caches. For local Ollama, pull the model yourself on the host with `ollama pull model-name`.
+- `scripts/fetch_demo_corpus.sh` downloads optional public test files into `workspace/demo-corpus/`, which is ignored by Git.
 
 ## Runtime Modes
 

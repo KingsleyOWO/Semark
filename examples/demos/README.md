@@ -1,4 +1,4 @@
-# Curated Output Demos
+# Semark Curated Output Demos
 
 This directory contains curated output snapshots from successful accurate-profile runs.
 Each demo keeps a small source-page image beside the generated RAG-ready Markdown so

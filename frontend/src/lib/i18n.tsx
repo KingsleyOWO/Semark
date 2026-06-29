@@ -11,11 +11,11 @@ type I18nContextValue = {
   t: (key: string, vars?: Vars) => string
 }
 
-const STORAGE_KEY = 'doc-parser-language'
+const STORAGE_KEY = 'semark-language'
 
 const messages: Record<Language, Record<string, string>> = {
   en: {
-    'app.name': 'Doc Parser',
+    'app.name': 'Semark',
     'nav.dashboard': 'Dashboard',
     'nav.assets': 'Documents',
     'nav.settings': '設定',
@@ -293,7 +293,7 @@ const messages: Record<Language, Record<string, string>> = {
     'settings.desc.repetition_penalty': 'Discourage repetition. 1.0 means no penalty; suggested: 1.0-1.2.',
   },
   'zh-TW': {
-    'app.name': '文件語意解析器',
+    'app.name': 'Semark',
     'nav.dashboard': '儀表板',
     'nav.assets': '文件管理',
     'nav.settings': '設定',

@@ -4,16 +4,16 @@ services:
       context: .
       dockerfile: Dockerfile.backend
     environment:
-      DOC_PARSER_HOST: 0.0.0.0
-      DOC_PARSER_PORT: 8585
-      DOC_PARSER_WORKSPACE_PATH: /data/workspace
-      DOC_PARSER_DATABASE_PATH: /data/workspace/doc_parser.db
-      DOC_PARSER_ENABLE_LOCAL_PATH_INGEST: "false"
-      DOC_PARSER_CORS_ORIGINS: '["http://localhost:5070","http://127.0.0.1:5070"]'
-      DOC_PARSER_CORS_ALLOW_PRIVATE_LAN: "false"
-      DOC_PARSER_MINERU_API_URL: ""
-      DOC_PARSER_VLM_MODEL: ""
-      DOC_PARSER_REVIEW_VLM_MODEL: ""
+      SEMARK_HOST: 0.0.0.0
+      SEMARK_PORT: 8585
+      SEMARK_WORKSPACE_PATH: /data/workspace
+      SEMARK_DATABASE_PATH: /data/workspace/doc_parser.db
+      SEMARK_ENABLE_LOCAL_PATH_INGEST: "false"
+      SEMARK_CORS_ORIGINS: '["http://localhost:5070","http://127.0.0.1:5070"]'
+      SEMARK_CORS_ALLOW_PRIVATE_LAN: "false"
+      SEMARK_MINERU_API_URL: ""
+      SEMARK_VLM_MODEL: ""
+      SEMARK_REVIEW_VLM_MODEL: ""
     ports:
       - "8585:8585"
     volumes:

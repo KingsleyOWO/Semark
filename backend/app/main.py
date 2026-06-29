@@ -61,8 +61,8 @@ async def _cancel_orphan_running_runs() -> int:
     return len(running_runs)
 
 app = FastAPI(
-    title="Doc Parser API",
-    description="Document Parser for RAG - Convert PDF/Word/Image/HTML to structured markdown",
+    title="Semark API",
+    description="Semantic Markdown for RAG from PDF, Office, HTML, and images",
     version="0.1.0",
     lifespan=lifespan,
 )

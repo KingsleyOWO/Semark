@@ -56,7 +56,7 @@ if [[ "$fetch_irs" == "true" ]]; then
 fi
 
 if [[ "$fetch_sec" == "true" ]]; then
-  SEC_USER_AGENT="${SEC_USER_AGENT:-doc-parser-demo/0.1 open-source-demo@example.invalid}"
+  SEC_USER_AGENT="${SEC_USER_AGENT:-semark-demo/0.1 open-source-demo@example.invalid}"
   OUT_DIR="$out_dir" SEC_USER_AGENT="$SEC_USER_AGENT" python3 - <<'SEC_PY'
 import json
 import os

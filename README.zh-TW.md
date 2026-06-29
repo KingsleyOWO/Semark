@@ -196,7 +196,20 @@ Docker 有兩種啟動方式。如果希望使用者直接在 Docker 內跑 Mine
 docker compose -f docker-compose.full.yml up --build
 ```
 
-在 Linux 上，Docker bridge networking 不一定能透過 `host.docker.internal` 連到主機上的 Ollama。如果 Settings -> VLM model probe timeout，請將 `DOC_PARSER_VLM_BASE_URL` 與 `DOC_PARSER_REVIEW_VLM_BASE_URL` 改成容器可連到的主機位址，或讓 backend 使用 host networking。Backend Docker image 會尊重 `DOC_PARSER_HOST` 與 `DOC_PARSER_PORT`，因此 host-network 測試時可使用其他 port 避免和 8585 衝突。
+在 Linux/WSL 上，Docker bridge networking 不一定能透過 `host.docker.internal` 連到主機上的 Ollama。如果 Settings -> VLM model probe timeout，請改用 host-network compose，讓容器直接用 `127.0.0.1:11434` 呼叫 Ollama：
+
+```bash
+export DOC_PARSER_VLM_MODEL=your-vision-model
+export DOC_PARSER_REVIEW_VLM_MODEL=your-stronger-review-model
+docker compose -f docker-compose.full.host.yml up --build
+```
+
+如果 `5070` 或 `8585` 已被占用，可以同時覆寫 host-network compose 的前後端 port：
+
+```bash
+DOC_PARSER_FRONTEND_PORT=35070 DOC_PARSER_PORT=38585 \
+  docker compose -f docker-compose.full.host.yml up --build
+```
 
 Full image 會安裝 backend `.[mineru]`、PyMuPDF、LibreOffice、中文 CJK fonts、MinerU pipeline extras、受限制版本的 PyTorch 2.6/2.7 與 torchvision，以及 MinerU pipeline backend 需要的 `six`。它會提供 `mineru` CLI，並把 MinerU/model cache 放在 Docker volume。映像不包含 model weights 或 API keys；第一次 MinerU/model setup 可能依照 MinerU 上游行為與授權下載 cache 檔案。
 

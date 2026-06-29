@@ -4,22 +4,23 @@ set -euo pipefail
 usage() {
   cat <<'USAGE'
 Usage:
-  scripts/smoke_clone.sh [--repo <git-url>] [--docker] [--full-docker]
+  scripts/smoke_clone.sh [--repo <git-url>] [--docker] [--api-only-docker]
 
 Examples:
   scripts/smoke_clone.sh
   scripts/smoke_clone.sh --repo https://github.com/OWNER/REPO.git
   scripts/smoke_clone.sh --repo https://github.com/OWNER/REPO.git --docker
-  scripts/smoke_clone.sh --repo https://github.com/OWNER/REPO.git --full-docker
+  scripts/smoke_clone.sh --repo https://github.com/OWNER/REPO.git --api-only-docker
 
 Without --repo, the script tests the current working tree. With --repo, it clones
-into a temporary directory and tests the clean clone.
+into a temporary directory and tests the clean clone. --docker checks the default
+full Docker path. --full-docker is kept as a backward-compatible alias.
 USAGE
 }
 
 repo_url=""
 run_docker="false"
-run_full_docker="false"
+run_api_only_docker="false"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -27,12 +28,12 @@ while [[ $# -gt 0 ]]; do
       repo_url="${2:-}"
       shift 2
       ;;
-    --docker)
+    --docker|--full-docker)
       run_docker="true"
       shift
       ;;
-    --full-docker)
-      run_full_docker="true"
+    --api-only-docker)
+      run_api_only_docker="true"
       shift
       ;;
     -h|--help)
@@ -80,7 +81,7 @@ npm run build
 cd ..
 
 if [[ "$run_docker" == "true" ]]; then
-  echo "Checking baseline Docker Compose"
+  echo "Checking default full Docker Compose"
   docker compose up --build -d
   for _ in $(seq 1 30); do
     if curl -fsS http://127.0.0.1:8585/api/health >/dev/null; then
@@ -90,12 +91,13 @@ if [[ "$run_docker" == "true" ]]; then
   done
   curl -fsS http://127.0.0.1:8585/api/health
   curl -fsSI http://127.0.0.1:5070/ >/dev/null
+  docker compose exec -T backend mineru --version
   docker compose down
 fi
 
-if [[ "$run_full_docker" == "true" ]]; then
-  echo "Checking full MinerU Docker Compose"
-  docker compose -f docker-compose.full.yml up --build -d
+if [[ "$run_api_only_docker" == "true" ]]; then
+  echo "Checking API-only Docker Compose"
+  docker compose -f docker-compose.api-only.yml up --build -d
   for _ in $(seq 1 30); do
     if curl -fsS http://127.0.0.1:8585/api/health >/dev/null; then
       break
@@ -104,8 +106,7 @@ if [[ "$run_full_docker" == "true" ]]; then
   done
   curl -fsS http://127.0.0.1:8585/api/health
   curl -fsSI http://127.0.0.1:5070/ >/dev/null
-  docker compose -f docker-compose.full.yml exec -T backend mineru --version
-  docker compose -f docker-compose.full.yml down
+  docker compose -f docker-compose.api-only.yml down
 fi
 
 if [[ -n "$cleanup_dir" ]]; then

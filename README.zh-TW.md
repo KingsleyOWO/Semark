@@ -188,19 +188,32 @@ npm run dev
 
 ## Docker Quickstart
 
-Docker 有兩種啟動方式。如果希望使用者直接在 Docker 內跑 MinerU，請使用 full compose。
+預設 Docker 路徑就是完整功能。`docker compose up --build` 會用 full backend 建置，包含 MinerU、PyMuPDF、LibreOffice、中文 CJK fonts，以及實際文件處理需要的轉檔與解析依賴。Repository 提供的是可重現的設定檔與安裝流程；不會 commit 或內建 model weights、API keys、私人文件、generated outputs 或本機 cache 檔案。
 
-完整 MinerU-capable Docker：
+如果使用 Docker Desktop，或主機環境中 container 可以透過 `host.docker.internal` 連到本機 Ollama：
 
 ```bash
-docker compose -f docker-compose.full.yml up --build
+export DOC_PARSER_VLM_BASE_URL=http://host.docker.internal:11434/v1
+export DOC_PARSER_VLM_API_KEY=ollama
+export DOC_PARSER_VLM_MODEL=your-vision-model
+export DOC_PARSER_REVIEW_VLM_BASE_URL=http://host.docker.internal:11434/v1
+export DOC_PARSER_REVIEW_VLM_API_KEY=ollama
+export DOC_PARSER_REVIEW_VLM_MODEL=your-stronger-review-model
+
+docker compose up --build
 ```
+
+開啟：
+
+- Frontend：`http://localhost:5070`
+- Backend health：`http://localhost:8585/api/health`
 
 在 Linux/WSL 上，Docker bridge networking 不一定能透過 `host.docker.internal` 連到主機上的 Ollama。如果 Settings -> VLM model probe timeout，請改用 host-network compose，讓容器直接用 `127.0.0.1:11434` 呼叫 Ollama：
 
 ```bash
 export DOC_PARSER_VLM_MODEL=your-vision-model
 export DOC_PARSER_REVIEW_VLM_MODEL=your-stronger-review-model
+
 docker compose -f docker-compose.full.host.yml up --build
 ```
 
@@ -211,30 +224,28 @@ DOC_PARSER_FRONTEND_PORT=35070 DOC_PARSER_PORT=38585 \
   docker compose -f docker-compose.full.host.yml up --build
 ```
 
-Full image 會安裝 backend `.[mineru]`、PyMuPDF、LibreOffice、中文 CJK fonts、MinerU pipeline extras、受限制版本的 PyTorch 2.6/2.7 與 torchvision，以及 MinerU pipeline backend 需要的 `six`。它會提供 `mineru` CLI，並把 MinerU/model cache 放在 Docker volume。映像不包含 model weights 或 API keys；第一次 MinerU/model setup 可能依照 MinerU 上游行為與授權下載 cache 檔案。
-
-如果要啟用 app-level VLM enrichment，請先設定模型端點。`DOC_PARSER_VLM_*` 用於 extraction/enrichment；`DOC_PARSER_REVIEW_VLM_*` 用於最後 audit/repair checks，也可以指向更強的模型。若省略 reviewer 設定，會 fallback 到 enrichment model。
+如果使用雲端或遠端 OpenAI-compatible provider，就把兩組模型 endpoint 指到對方服務，而不是 Ollama：
 
 ```bash
-export DOC_PARSER_VLM_BASE_URL=http://host.docker.internal:11434/v1
-export DOC_PARSER_VLM_API_KEY=ollama
+export DOC_PARSER_VLM_BASE_URL=https://your-provider.example/v1
+export DOC_PARSER_VLM_API_KEY=your-api-key
 export DOC_PARSER_VLM_MODEL=your-vision-model
-export DOC_PARSER_REVIEW_VLM_BASE_URL=http://host.docker.internal:11434/v1
-export DOC_PARSER_REVIEW_VLM_API_KEY=ollama
+export DOC_PARSER_REVIEW_VLM_BASE_URL=https://your-provider.example/v1
+export DOC_PARSER_REVIEW_VLM_API_KEY=your-api-key
 export DOC_PARSER_REVIEW_VLM_MODEL=your-stronger-review-model
-docker compose -f docker-compose.full.yml up --build
-```
 
-Baseline UI/API-only Docker：
-
-```bash
 docker compose up --build
 ```
 
-開啟：
+Full image 會安裝 backend `.[mineru]`、PyMuPDF、LibreOffice、中文 CJK fonts、MinerU pipeline extras、受限制版本的 PyTorch 2.6/2.7 與 torchvision，以及 MinerU pipeline backend 需要的 `six`。它會提供 `mineru` CLI，並把 workspace 與 MinerU/model cache 放在 Docker volume。第一次 MinerU/model setup 可能依照 MinerU 上游行為與授權下載 cache 檔案。Full image 較大是正常的，因為 MinerU runtime 需要 PyTorch。
 
-- Frontend：`http://localhost:5070`
-- Backend health：`http://localhost:8585/api/health`
+`DOC_PARSER_VLM_*` 用於 extraction/enrichment；`DOC_PARSER_REVIEW_VLM_*` 用於最後 audit/repair checks，也可以指向更強的模型。若省略 reviewer 設定，會 fallback 到 enrichment model。若啟用 visual enrichment，所選模型必須支援 image input。
+
+API-only development Docker 仍然保留，但它刻意不包含完整 MinerU/LibreOffice processing stack，不建議作為一般使用者的主要路徑：
+
+```bash
+docker compose -f docker-compose.api-only.yml up --build
+```
 
 Compose files 會把 backend workspace 放在 named Docker volume，並預設關閉 local path ingestion。重新散布 image 或推薦模型下載前，請先閱讀 `THIRD_PARTY_LICENSES.md`。
 
@@ -339,25 +350,26 @@ Ollama 請使用 `/v1` endpoint，例如 `http://127.0.0.1:11434/v1`，並設定
 scripts/smoke_clone.sh --repo https://github.com/OWNER/REPO.git
 ```
 
-包含 baseline Docker 檢查：
+包含預設完整 Docker 檢查：
 
 ```bash
 scripts/smoke_clone.sh --repo https://github.com/OWNER/REPO.git --docker
 ```
 
-包含 full MinerU Docker 檢查：
+包含 API-only development Docker 檢查：
 
 ```bash
-scripts/smoke_clone.sh --repo https://github.com/OWNER/REPO.git --full-docker
+scripts/smoke_clone.sh --repo https://github.com/OWNER/REPO.git --api-only-docker
 ```
 
-此 script 會安裝 full backend dependencies，包括 MinerU，執行 backend tests/lint、frontend lint/build，並可選擇驗證 baseline 或 full Docker Compose health endpoints。Full Docker 檢查也會確認 `mineru --version` 能在 backend container 內正常執行。
+此 script 會安裝 full backend dependencies，包括 MinerU，執行 backend tests/lint、frontend lint/build，並可選擇驗證 Docker Compose health endpoints。預設 Docker 檢查也會確認 `mineru --version` 能在 backend container 內正常執行。
 
 ## Notes For Publishing
 
 - GitHub repository root 應使用 `doc1/`，不是外層 workspace。
 - 對 GitHub URL 執行 `scripts/smoke_clone.sh` 後再公開宣布 repo。
-- `docker-compose.full.yml` 與 `scripts/install_full_local.sh` 是 MinerU + VLM demo 的主要 full-feature setup path。
+- `docker-compose.yml`、`docker-compose.full.host.yml` 與 `scripts/install_full_local.sh` 是 MinerU + VLM demo 的主要 full-feature setup path。
+- `docker-compose.api-only.yml` 是 lightweight development/API smoke path，不是一般使用者的主要路徑。
 - 不要 commit `backend/.env`、`backend/workspace/`、generated outputs 或 local model caches。
 - `backend/.env.example` 是可攜的設定模板，應保留在 repository。
 - 請確認 `THIRD_PARTY_LICENSES.md` 中 PyMuPDF、MinerU 與 VLM model/provider 的授權義務。

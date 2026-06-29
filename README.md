@@ -189,19 +189,32 @@ For LAN access, bind the backend/frontend to `0.0.0.0` and open the chosen ports
 
 ## Docker Quickstart
 
-There are two Docker paths. Use the full compose file when you want users to run MinerU from Docker.
+The default Docker path is the full product path. `docker compose up --build` builds the backend with MinerU, PyMuPDF, LibreOffice, CJK fonts, and the document conversion/parsing dependencies needed for real document processing. The repository provides reproducible setup files; it does not commit or bundle model weights, API keys, private documents, generated outputs, or local cache files.
 
-Full MinerU-capable Docker path:
+For Docker Desktop, or hosts where containers can reach a local Ollama service through `host.docker.internal`:
 
 ```bash
-docker compose -f docker-compose.full.yml up --build
+export DOC_PARSER_VLM_BASE_URL=http://host.docker.internal:11434/v1
+export DOC_PARSER_VLM_API_KEY=ollama
+export DOC_PARSER_VLM_MODEL=your-vision-model
+export DOC_PARSER_REVIEW_VLM_BASE_URL=http://host.docker.internal:11434/v1
+export DOC_PARSER_REVIEW_VLM_API_KEY=ollama
+export DOC_PARSER_REVIEW_VLM_MODEL=your-stronger-review-model
+
+docker compose up --build
 ```
+
+Open:
+
+- Frontend: `http://localhost:5070`
+- Backend health: `http://localhost:8585/api/health`
 
 On Linux/WSL, Docker bridge networking may not always reach a host Ollama service through `host.docker.internal`. If Settings -> VLM model probe times out, use the host-network compose file so containers can call Ollama at `127.0.0.1:11434`:
 
 ```bash
 export DOC_PARSER_VLM_MODEL=your-vision-model
 export DOC_PARSER_REVIEW_VLM_MODEL=your-stronger-review-model
+
 docker compose -f docker-compose.full.host.yml up --build
 ```
 
@@ -212,30 +225,28 @@ DOC_PARSER_FRONTEND_PORT=35070 DOC_PARSER_PORT=38585 \
   docker compose -f docker-compose.full.host.yml up --build
 ```
 
-This installs the backend with `.[mineru]`, includes PyMuPDF, LibreOffice for HTML/Office conversion, Chinese CJK fonts, MinerU pipeline extras, constrained PyTorch 2.6/2.7 plus torchvision, and the small compatibility dependency `six` for the MinerU pipeline backend, provides the `mineru` CLI, and stores the MinerU/model cache in a Docker volume. It does not bundle model weights or API keys; first-time MinerU/model setup may download cache files according to MinerU's own behavior and license. The full image is intentionally larger than the baseline image because MinerU requires PyTorch at runtime.
-
-Set VLM configuration before starting if you want app-level VLM enrichment. `DOC_PARSER_VLM_*` drives extraction/enrichment. `DOC_PARSER_REVIEW_VLM_*` drives final audit/repair checks and can point to a stronger model; if omitted, it falls back to the enrichment model.
+For cloud or remote OpenAI-compatible providers, point both model endpoints at the provider instead of Ollama:
 
 ```bash
-export DOC_PARSER_VLM_BASE_URL=http://host.docker.internal:11434/v1
-export DOC_PARSER_VLM_API_KEY=ollama
+export DOC_PARSER_VLM_BASE_URL=https://your-provider.example/v1
+export DOC_PARSER_VLM_API_KEY=your-api-key
 export DOC_PARSER_VLM_MODEL=your-vision-model
-export DOC_PARSER_REVIEW_VLM_BASE_URL=http://host.docker.internal:11434/v1
-export DOC_PARSER_REVIEW_VLM_API_KEY=ollama
+export DOC_PARSER_REVIEW_VLM_BASE_URL=https://your-provider.example/v1
+export DOC_PARSER_REVIEW_VLM_API_KEY=your-api-key
 export DOC_PARSER_REVIEW_VLM_MODEL=your-stronger-review-model
-docker compose -f docker-compose.full.yml up --build
-```
 
-Baseline UI/API-only Docker path:
-
-```bash
 docker compose up --build
 ```
 
-Then open:
+The full image installs the backend with `.[mineru]`, includes PyMuPDF, LibreOffice for HTML/Office conversion, Chinese CJK fonts, MinerU pipeline extras, constrained PyTorch 2.6/2.7 plus torchvision, and the small compatibility dependency `six` for the MinerU pipeline backend. It provides the `mineru` CLI and stores the workspace plus MinerU/model caches in Docker volumes. First-time MinerU/model setup may download cache files according to MinerU's own behavior and license. The full image is intentionally larger because MinerU requires PyTorch at runtime.
 
-- Frontend: `http://localhost:5070`
-- Backend health: `http://localhost:8585/api/health`
+`DOC_PARSER_VLM_*` drives extraction/enrichment. `DOC_PARSER_REVIEW_VLM_*` drives final audit/repair checks and can point to a stronger model; if omitted, it falls back to the enrichment model. The selected model must support image input when visual enrichment is enabled.
+
+API-only development Docker is still available, but it intentionally omits the full MinerU/LibreOffice processing stack and is not the recommended path for end users:
+
+```bash
+docker compose -f docker-compose.api-only.yml up --build
+```
 
 The compose files keep the backend workspace in a named Docker volume and keep local path ingestion disabled by default. Review `THIRD_PARTY_LICENSES.md` before redistributing images or recommending model downloads.
 
@@ -342,25 +353,26 @@ Before publishing, test from a clean clone rather than the working directory:
 scripts/smoke_clone.sh --repo https://github.com/OWNER/REPO.git
 ```
 
-To include the baseline Docker check:
+To include the default full Docker check:
 
 ```bash
 scripts/smoke_clone.sh --repo https://github.com/OWNER/REPO.git --docker
 ```
 
-To include the full MinerU Docker check:
+To include the API-only development Docker check:
 
 ```bash
-scripts/smoke_clone.sh --repo https://github.com/OWNER/REPO.git --full-docker
+scripts/smoke_clone.sh --repo https://github.com/OWNER/REPO.git --api-only-docker
 ```
 
-The script installs full backend dependencies including MinerU, runs backend tests and lint, runs frontend lint and build, and optionally verifies baseline or full Docker Compose health endpoints. The full Docker check also verifies that `mineru --version` works inside the backend container.
+The script installs full backend dependencies including MinerU, runs backend tests and lint, runs frontend lint and build, and optionally verifies Docker Compose health endpoints. The default Docker check also verifies that `mineru --version` works inside the backend container.
 
 ## Notes For Publishing
 
 - Use `doc1/` as the GitHub repository root, not the outer workspace.
 - Run `scripts/smoke_clone.sh` against the GitHub URL before announcing the repo.
-- Treat `docker-compose.full.yml` and `scripts/install_full_local.sh` as the primary full-feature setup paths for MinerU + VLM demos.
+- Treat `docker-compose.yml`, `docker-compose.full.host.yml`, and `scripts/install_full_local.sh` as the primary full-feature setup paths for MinerU + VLM demos.
+- Treat `docker-compose.api-only.yml` as a lightweight development/API smoke path, not as the end-user product path.
 - Do not commit `backend/.env`, `backend/workspace/`, generated outputs, or local model caches.
 - Commit `backend/.env.example` as the portable configuration template.
 - Review `THIRD_PARTY_LICENSES.md` for PyMuPDF, MinerU, and VLM model/provider obligations.

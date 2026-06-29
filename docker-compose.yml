@@ -2,7 +2,7 @@ services:
   backend:
     build:
       context: .
-      dockerfile: Dockerfile.backend
+      dockerfile: Dockerfile.backend-full
     environment:
       DOC_PARSER_HOST: 0.0.0.0
       DOC_PARSER_PORT: 8585
@@ -11,13 +11,22 @@ services:
       DOC_PARSER_ENABLE_LOCAL_PATH_INGEST: "false"
       DOC_PARSER_CORS_ORIGINS: '["http://localhost:5070","http://127.0.0.1:5070"]'
       DOC_PARSER_CORS_ALLOW_PRIVATE_LAN: "false"
-      DOC_PARSER_MINERU_API_URL: ""
-      DOC_PARSER_VLM_MODEL: ""
-      DOC_PARSER_REVIEW_VLM_MODEL: ""
+      DOC_PARSER_MINERU_CLI_PATH: mineru
+      DOC_PARSER_MINERU_MODEL_SOURCE: ${DOC_PARSER_MINERU_MODEL_SOURCE:-huggingface}
+      DOC_PARSER_MINERU_API_URL: ${DOC_PARSER_MINERU_API_URL:-}
+      DOC_PARSER_VLM_BASE_URL: ${DOC_PARSER_VLM_BASE_URL:-http://host.docker.internal:11434/v1}
+      DOC_PARSER_VLM_API_KEY: ${DOC_PARSER_VLM_API_KEY:-ollama}
+      DOC_PARSER_VLM_MODEL: ${DOC_PARSER_VLM_MODEL:-}
+      DOC_PARSER_REVIEW_VLM_BASE_URL: ${DOC_PARSER_REVIEW_VLM_BASE_URL:-}
+      DOC_PARSER_REVIEW_VLM_API_KEY: ${DOC_PARSER_REVIEW_VLM_API_KEY:-}
+      DOC_PARSER_REVIEW_VLM_MODEL: ${DOC_PARSER_REVIEW_VLM_MODEL:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "8585:8585"
     volumes:
       - doc-parser-workspace:/data/workspace
+      - mineru-cache:/root/.cache
 
   frontend:
     build:
@@ -32,3 +41,4 @@ services:
 
 volumes:
   doc-parser-workspace:
+  mineru-cache:

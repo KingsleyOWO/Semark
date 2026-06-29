@@ -23,6 +23,14 @@
 
 目前 curated demo snapshots 是在測試環境中使用本地 Ollama 模型 `qwen3.6:35b-a3b-q8_0` 產生，該模型同時作為 enrichment 與 reviewer model。若改用更強的 vision model 或 reviewer model，理論上在語意修復、視覺理解、欄位分組與流程判讀上會有更好的效果。因此 demo 展示的是目前 pipeline 的輸出形態，不代表模型能力上限。
 
+## 從這裡開始
+
+- 第一次完整安裝：[從 GitHub 快速啟動](#從-github-快速啟動)。
+- Docker 與 MinerU：[Docker Quickstart](#docker-quickstart)。
+- 本機或雲端模型端點：[VLM Enrichment and Review](#vlm-enrichment-and-review)。
+- 內建範例與可選 public corpus 下載：[Demo Samples](#demo-samples)。
+- 不跑模型也能先看預期輸出：[Demo Preview](#demo-preview)。
+
 ## 大致運作方式
 
 1. **文件匯入**：透過 UI/API 上傳 PDF、Office、HTML 或圖片。
@@ -137,6 +145,48 @@ Grouped by meaning for completion:
 - PNG/JPG/JPEG
 
 產出內容包含主文文件，以及在偵測到獨立檢索單元時自動產生的子文件。例如一份長 PDF 可以輸出 `main.md` 作為主文，並另外產生表單、表格、流程圖、圖示、附件或其他結構化區塊的語意 Markdown 檔。
+
+## 從 GitHub 快速啟動
+
+最短的完整功能路徑是 Docker Compose：
+
+```bash
+git clone https://github.com/KingsleyOWO/Semark.git
+cd Semark
+
+# 可選：如果要接本機 Ollama vision model。
+# Ollama 若尚未啟動，請在另一個 shell 啟動，並先拉取你要使用的模型。
+ollama pull your-vision-model
+
+export SEMARK_VLM_BASE_URL=http://host.docker.internal:11434/v1
+export SEMARK_VLM_API_KEY=ollama
+export SEMARK_VLM_MODEL=your-vision-model
+export SEMARK_REVIEW_VLM_BASE_URL=http://host.docker.internal:11434/v1
+export SEMARK_REVIEW_VLM_API_KEY=ollama
+export SEMARK_REVIEW_VLM_MODEL=your-review-model
+
+docker compose up --build
+```
+
+打開 `http://localhost:5070`。上傳 PDF、Office、HTML 或圖片，在文件清單勾選上傳的文件，然後使用 `accurate` 執行 MinerU 加上已設定的 VLM/LLM enrichment。`fast` 適合做不跑模型的輕量 smoke test。
+
+在 Linux/WSL 上，如果 container 透過 `host.docker.internal` 連不到主機上的 Ollama，改用 host-network compose：
+
+```bash
+export SEMARK_VLM_MODEL=your-vision-model
+export SEMARK_REVIEW_VLM_MODEL=your-review-model
+docker compose -f docker-compose.full.host.yml up --build
+```
+
+任務成功後，進入 `Viewer` 檢查來源頁面、語意 Markdown、chunks、quality metadata 與分檔文件；進入 `文件管理` 可以批次下載或單獨下載產出的 Markdown/DOCX/TXT 文件。
+
+## 會下載哪些檔案
+
+- `git clone` 只會下載原始碼、文件、synthetic samples 與小型 curated demo snapshots。
+- `docker compose up --build` 會下載 OS packages、Python wheels、npm packages、MinerU dependencies、PyMuPDF、LibreOffice、CJK fonts，以及完整 parser image 所需的 runtime dependencies。
+- 第一次執行 MinerU 時，可能會依 MinerU 上游行為與授權下載 parser/model cache。Docker 會把這些 cache 放在 named volumes，不會進 Git。
+- Semark 不會內建 Ollama models、雲端模型權重、API keys、私人文件、generated outputs 或本機 cache。若使用本機 Ollama，請先在主機上執行 `ollama pull model-name`。
+- `scripts/fetch_demo_corpus.sh` 會把可選的 public test files 下載到 `workspace/demo-corpus/`，該目錄已被 Git 忽略。
 
 ## Runtime Modes
 

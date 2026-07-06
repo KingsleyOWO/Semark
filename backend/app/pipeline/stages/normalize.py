@@ -54,7 +54,7 @@ class NormalizeStage:
     """
 
     # Page render settings
-    PAGE_RENDER_DPI = 150  # Balance between quality and size
+    PAGE_RENDER_DPI = 200  # Match MinerU's internal render; feeds VLM crops and viewer
     PAGE_RENDER_FORMAT = "png"
 
     # Text supplement settings

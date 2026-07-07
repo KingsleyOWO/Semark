@@ -104,7 +104,13 @@ def repair_preserves_facts(
     repair. Documents without fact tokens always pass.
     """
 
-    original_tokens = extract_fact_tokens(original_md)
+    from app.pipeline.corpus_rules import get_rules
+
+    # Template scaffolding labels (主要欄位分組:, 常見查詢關鍵字:, …) are
+    # renderer output, not document facts; the reviewer is explicitly asked
+    # to remove template filler, so their removal must not count as loss.
+    template_labels = set(get_rules().marker_list("template_section_labels"))
+    original_tokens = extract_fact_tokens(original_md) - template_labels
     evidence_tokens = extract_fact_tokens(evidence_text)
     repaired_normalized = _normalize(repaired_md)
     repaired_compact = _compact(repaired_normalized)

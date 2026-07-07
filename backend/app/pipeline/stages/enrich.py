@@ -86,6 +86,15 @@ def is_scanned_visual_page(
     Pure helper: reads only the DocumentIR, no I/O.
     """
     page_blocks = [b for b in document_ir.blocks if b.page_idx == page_idx]
+
+    # Ground-truth scan signal: the source PDF page has no text layer, yet
+    # MinerU produced OCR blocks. Pipeline OCR emits TEXT/TABLE blocks with
+    # no IMAGE block for full-page scans, so this cannot rely on IR images.
+    page_info = next((p for p in document_ir.pages if p.page_idx == page_idx), None)
+    source_text_chars = getattr(page_info, "source_text_chars", None)
+    if source_text_chars is not None and source_text_chars < 8:
+        return bool(page_blocks)
+
     image_blocks = [b for b in page_blocks if b.type == BlockType.IMAGE]
     if not image_blocks:
         return False

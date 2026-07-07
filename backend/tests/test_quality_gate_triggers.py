@@ -334,3 +334,38 @@ def test_zh_noise_in_english_reported_through_quality_gate(tmp_path):
     payload = result.to_dict()
     zh_noise = next(issue for issue in payload["issues"] if issue["code"] == "zh_noise_in_english")
     assert not any("一" <= char <= "鿿" for char in zh_noise["message"])
+
+
+def test_form_page_enrichment_counts_as_structure_signal():
+    # A detected form page (full-page enrichment keyed form_page_*) is not an
+    # IR IMAGE block, but it is hard evidence of structured content: the check
+    # must fire when structured output is empty. Live gap: 2-10 請假辦法 has a
+    # form page + form_asset enrichment yet shipped 0-byte structured output.
+    from app.pipeline.quality_gate import _check_structured_output_presence
+
+    document_ir = DocumentIR(
+        doc_id="doc-form-page",
+        run_id="run-1",
+        source=SourceInfo(path="請假辦法.pdf", ext=".pdf", sha256="x", size_bytes=1),
+        engine=EngineInfo(backend="pipeline", method="auto"),
+        pages=[PageInfo(page_idx=0)],
+        blocks=[
+            Block(
+                block_id="t-0",
+                type=BlockType.TEXT,
+                page_idx=0,
+                bbox_norm=[0, 0, 1000, 100],
+                payload={"text": "第一條 本辦法依本院人員管理辦法訂定之。"},
+            )
+        ],
+    )
+    issues = _check_structured_output_presence(
+        document_ir,
+        structured_output=None,
+        structured_text="",
+        source_md="來源文字" * 20,
+        enrichments={"form_page_0011": {"kind": "form_asset", "output": {"title": "請假單"}}},
+    )
+
+    assert [i.code for i in issues] == ["structured_output_empty"]
+    assert "form_page_enrichment" in issues[0].evidence["structure_signals"]

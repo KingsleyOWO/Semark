@@ -435,3 +435,53 @@ async def test_scanned_page_enriched_when_figure_route_lacks_image(
     assert result.enrichments[0].block_id == "form_page_0000"
     assert len(stage.vlm_adapter.form_calls) == 1
     assert stage.vlm_adapter.figure_calls == []
+
+
+# ---------------------------------------------------------------------------
+# Textless-source detection (real scans OCRed by MinerU emit no IMAGE blocks)
+# ---------------------------------------------------------------------------
+
+
+def test_textless_source_page_with_ocr_text_is_scanned():
+    # Live gap: MinerU pipeline OCR turns full-page scans into TEXT/TABLE
+    # blocks with no IMAGE block, so image-based detection misses them. The
+    # source PDF text layer being empty is the ground-truth scan signal.
+    doc = _scanned_document(num_pages=1, ocr_text="辨識出的內文" * 30)
+    doc.blocks = [b for b in doc.blocks if b.type != BlockType.IMAGE]
+    doc.pages = [PageInfo(page_idx=0, source_text_chars=0)]
+
+    assert is_scanned_visual_page(doc, 0) is True
+
+
+def test_born_digital_page_is_not_scanned_despite_ocr():
+    doc = _scanned_document(num_pages=1, ocr_text="數位文字" * 60)
+    doc.blocks = [b for b in doc.blocks if b.type != BlockType.IMAGE]
+    doc.pages = [PageInfo(page_idx=0, source_text_chars=1200)]
+
+    assert is_scanned_visual_page(doc, 0) is False
+
+
+def test_textless_page_without_blocks_is_not_scanned():
+    doc = _scanned_document(num_pages=1)
+    doc.blocks = []
+    doc.pages = [PageInfo(page_idx=0, source_text_chars=0)]
+
+    assert is_scanned_visual_page(doc, 0) is False
+
+
+def test_normalize_records_source_page_text_lengths(tmp_path):
+    from app.pipeline.stages.normalize import NormalizeStage
+
+    pdf = fitz.open()
+    page = pdf.new_page(width=595, height=842)
+    page.insert_text((72, 72), "born digital text layer content")
+    pdf.new_page(width=595, height=842)  # scanned-like: empty text layer
+    pdf_path = tmp_path / "mixed.pdf"
+    pdf.save(pdf_path)
+    pdf.close()
+
+    lengths = NormalizeStage.source_page_text_lengths(pdf_path)
+
+    assert len(lengths) == 2
+    assert lengths[0] > 10
+    assert lengths[1] == 0

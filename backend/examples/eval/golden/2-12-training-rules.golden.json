@@ -1,0 +1,42 @@
+{
+  "doc": {
+    "name": "示範研究院人員訓練辦法",
+    "source_pdf": "/home/tierit/Desktop/vd/2-12示範研究院人員訓練辦法1141211院長核定修正1150101施行.pdf",
+    "notes": "9-page text-layer regulation (17 articles, one form and two pledge attachments). Fact tokens verified against the PDF text layer via PyMuPDF."
+  },
+  "expectations": {
+    "must_include": [
+      "示範研究院人員訓練辦法",
+      "工作時間減免"
+    ],
+    "must_not_include": [
+      "來源抽取文字",
+      "<table",
+      "$\\square$"
+    ],
+    "fact_tokens": [
+      "示範研究院人員訓練辦法",
+      "範-12",
+      "114.12.11",
+      "115.01.01",
+      "78.01.11",
+      "本院人員管理辦法第十五條",
+      "終身學習活動",
+      "選修學分",
+      "短期研究",
+      "留職留薪",
+      "每週上課時數不得超過七小時",
+      "博士學位進修期限為三年",
+      "工作時間減免",
+      "M=(S+T1+T2+T3+X)",
+      "勞工退休金條例",
+      "本院退休暨退職基金辦法",
+      "三十分之一",
+      "人員進修申請表",
+      "示範研究院留職留薪人員保證規約",
+      "示範研究院人員申請工作時間減免保證規約"
+    ],
+    "min_chunk_count": 4,
+    "max_chunk_tokens": 1024
+  }
+}

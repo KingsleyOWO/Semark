@@ -48,6 +48,9 @@ class PageInfo(BaseModel):
     width_px: int | None = None
     height_px: int | None = None
     page_image_path: str | None = None
+    # Char count of the source PDF's own text layer for this page; 0 marks a
+    # scanned page even when MinerU OCR later produced text blocks for it.
+    source_text_chars: int | None = None
 
 
 class TextPayload(BaseModel):

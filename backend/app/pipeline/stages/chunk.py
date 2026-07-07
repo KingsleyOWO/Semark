@@ -5,12 +5,45 @@ Output: chunks.jsonl with semantic chunks preserving block references.
 """
 
 import json
+import math
+import re
 from dataclasses import dataclass, field
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 
 from app.config import PipelineConfig
 from app.models.document_ir import Block, BlockType, DocumentIR
+
+# Sections estimated below this many tokens merge with their neighbours so
+# retrieval never indexes near-empty chunks.
+MIN_SECTION_TOKENS = 80
+
+# Unicode ranges counted as CJK for token estimation.
+_CJK_RANGES = (
+    (0x3000, 0x303F),  # CJK symbols and punctuation
+    (0x3400, 0x4DBF),  # CJK unified ideographs extension A
+    (0x4E00, 0x9FFF),  # CJK unified ideographs
+    (0xFF00, 0xFFEF),  # Halfwidth and fullwidth forms
+)
+
+
+def estimate_tokens(text: str) -> int:
+    """
+    Estimate embedder token count for mixed CJK/non-CJK text.
+
+    CJK characters tokenize at roughly 1 token per 1.5 characters, other
+    characters at roughly 1 token per 4 characters. A plain len(text) // 3
+    undercounts CJK-heavy text by 2-3x, which silently overflows embedder
+    context windows.
+    """
+    cjk_chars = 0
+    for char in text:
+        code_point = ord(char)
+        if any(low <= code_point <= high for low, high in _CJK_RANGES):
+            cjk_chars += 1
+    other_chars = len(text) - cjk_chars
+    return math.ceil(cjk_chars / 1.5) + math.ceil(other_chars / 4)
 
 
 @dataclass
@@ -52,15 +85,26 @@ class ChunkStageResult:
     stats: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class _Section:
+    """A heading-delimited run of blocks with chunking bookkeeping."""
+
+    blocks: list[Block]
+    heading_path: list[str]
+    tokens: int
+    mergeable: bool  # every constituent section was below MIN_SECTION_TOKENS
+    heading_only: bool  # titles only, no body content
+
+
 class ChunkStage:
     """
     Chunk stage - splits document into semantic chunks.
 
     Chunking strategy:
     1. Split by headings (respects document structure)
-    2. Merge small consecutive blocks
-    3. Split large blocks if exceeding max_tokens
-    4. Preserve block references for traceability
+    2. Merge small consecutive sections (a heading is never left alone)
+    3. Split large sections if exceeding max_tokens
+    4. Preserve block references and heading paths for traceability
 
     Input: DocumentIR
     Output: chunks.jsonl
@@ -188,45 +232,41 @@ class ChunkStage:
         """
         Chunk blocks using heading-based strategy.
 
-        1. Group blocks by heading sections
-        2. Merge small groups
+        1. Group blocks by heading sections, tracking the heading path
+        2. Merge small groups (headings are never emitted alone)
         3. Split large groups
         """
         chunks: list[Chunk] = []
         chunk_idx = 0
 
         # Group blocks by sections (split at headings)
-        sections = self._split_by_headings(document_ir.blocks)
+        sections = self._build_sections(document_ir.blocks)
+        sections = self._merge_small_sections(sections, max_tokens)
 
-        for section_blocks in sections:
-            if not section_blocks:
-                continue
-
-            # Estimate token count (rough: 1 token ≈ 2 chars for CJK, 4 chars for English)
-            section_text = self._blocks_to_text(section_blocks)
-            estimated_tokens = len(section_text) // 3  # Average
-
-            if estimated_tokens <= max_tokens:
+        for section in sections:
+            if section.tokens <= max_tokens:
                 # Section fits in one chunk
                 chunk = self._create_chunk(
                     chunk_id=f"c{chunk_idx:06d}",
                     doc_id=document_ir.doc_id,
                     run_id=document_ir.run_id,
                     view=view,
-                    blocks=section_blocks,
+                    blocks=section.blocks,
+                    heading_path=section.heading_path,
                 )
                 chunks.append(chunk)
                 chunk_idx += 1
             else:
                 # Section too large, split further
                 sub_chunks = self._split_large_section(
-                    blocks=section_blocks,
+                    blocks=section.blocks,
                     doc_id=document_ir.doc_id,
                     run_id=document_ir.run_id,
                     view=view,
                     max_tokens=max_tokens,
                     overlap_tokens=overlap_tokens,
                     start_idx=chunk_idx,
+                    heading_path=section.heading_path,
                 )
                 chunks.extend(sub_chunks)
                 chunk_idx += len(sub_chunks)
@@ -258,6 +298,105 @@ class ChunkStage:
 
         return sections
 
+    def _build_sections(self, blocks: list[Block]) -> list[_Section]:
+        """Split blocks at headings and annotate each run with its heading path."""
+        heading_stack: list[tuple[int, str]] = []
+        sections: list[_Section] = []
+
+        for section_blocks in self._split_by_headings(blocks):
+            if not section_blocks:
+                continue
+
+            first = section_blocks[0]
+            if first.type == BlockType.TEXT and first.payload.get("text_level", 0) > 0:
+                level = int(first.payload.get("text_level", 0))
+                title = str(first.payload.get("text", "")).strip()
+                while heading_stack and heading_stack[-1][0] >= level:
+                    heading_stack.pop()
+                heading_stack.append((level, title))
+
+            tokens = estimate_tokens(self._blocks_to_text(section_blocks))
+            sections.append(
+                _Section(
+                    blocks=list(section_blocks),
+                    heading_path=[title for _, title in heading_stack],
+                    tokens=tokens,
+                    mergeable=tokens < MIN_SECTION_TOKENS,
+                    heading_only=self._section_is_heading_only(section_blocks),
+                )
+            )
+
+        return sections
+
+    def _section_is_heading_only(self, blocks: list[Block]) -> bool:
+        """Return true when a section contains titles but no body content."""
+        has_heading = False
+        for block in blocks:
+            if block.type == BlockType.TEXT and block.payload.get("text_level", 0) > 0:
+                has_heading = True
+                continue
+            if self._block_to_text(block).strip():
+                return False
+        return has_heading
+
+    def _merge_small_sections(
+        self,
+        sections: list[_Section],
+        max_tokens: int,
+    ) -> list[_Section]:
+        """
+        Merge consecutive sections that are each below MIN_SECTION_TOKENS
+        (up to max_tokens per merged section), and never leave a heading-only
+        section (title without body) to be emitted as its own chunk.
+        """
+        merged: list[_Section] = []
+
+        for section in sections:
+            if merged:
+                previous = merged[-1]
+                if previous.heading_only:
+                    # A bare title always attaches to what follows it; adopt
+                    # the follower's heading path (it already includes the
+                    # title via the heading stack).
+                    merged[-1] = self._merge_sections(
+                        previous, section, heading_path=section.heading_path
+                    )
+                    continue
+                if (
+                    previous.mergeable
+                    and section.mergeable
+                    and previous.tokens + section.tokens <= max_tokens
+                ):
+                    merged[-1] = self._merge_sections(
+                        previous, section, heading_path=previous.heading_path
+                    )
+                    continue
+            merged.append(section)
+
+        # A trailing bare title has nothing following it; fold it backward.
+        if len(merged) >= 2 and merged[-1].heading_only:
+            last = merged.pop()
+            merged[-1] = self._merge_sections(
+                merged[-1], last, heading_path=merged[-1].heading_path
+            )
+
+        return merged
+
+    def _merge_sections(
+        self,
+        first: _Section,
+        second: _Section,
+        heading_path: list[str],
+    ) -> _Section:
+        """Combine two adjacent sections into one."""
+        return _Section(
+            blocks=first.blocks + second.blocks,
+            heading_path=list(heading_path),
+            tokens=first.tokens + second.tokens,
+            mergeable=first.mergeable and second.mergeable,
+            heading_only=first.heading_only and second.heading_only,
+        )
+
     def _split_large_section(
         self,
         blocks: list[Block],
@@ -267,6 +406,7 @@ class ChunkStage:
         max_tokens: int,
         overlap_tokens: int,
         start_idx: int,
+        heading_path: list[str] | None = None,
     ) -> list[Chunk]:
         """Split a large section into smaller chunks."""
         chunks: list[Chunk] = []
@@ -275,8 +415,7 @@ class ChunkStage:
         chunk_idx = start_idx
 
         for block in blocks:
-            block_text = self._block_to_text(block)
-            block_tokens = len(block_text) // 3
+            block_tokens = estimate_tokens(self._block_to_text(block))
 
             if current_length + block_tokens > max_tokens and current_blocks:
                 # Create chunk with current blocks
@@ -286,6 +425,8 @@ class ChunkStage:
                     run_id=run_id,
                     view=view,
                     blocks=current_blocks,
+                    heading_path=heading_path,
+                    continuation=bool(chunks),
                 )
                 chunks.append(chunk)
                 chunk_idx += 1
@@ -297,7 +438,7 @@ class ChunkStage:
                 )
                 current_blocks = overlap_blocks + [block]
                 current_length = sum(
-                    len(self._block_to_text(b)) // 3 for b in current_blocks
+                    estimate_tokens(self._block_to_text(b)) for b in current_blocks
                 )
             else:
                 current_blocks.append(block)
@@ -311,6 +452,8 @@ class ChunkStage:
                 run_id=run_id,
                 view=view,
                 blocks=current_blocks,
+                heading_path=heading_path,
+                continuation=bool(chunks),
             )
             chunks.append(chunk)
 
@@ -326,7 +469,7 @@ class ChunkStage:
         current_tokens = 0
 
         for block in reversed(blocks):
-            block_tokens = len(self._block_to_text(block)) // 3
+            block_tokens = estimate_tokens(self._block_to_text(block))
             if current_tokens + block_tokens > overlap_tokens:
                 break
             overlap_blocks.insert(0, block)
@@ -341,9 +484,16 @@ class ChunkStage:
         run_id: str,
         view: str,
         blocks: list[Block],
+        heading_path: list[str] | None = None,
+        continuation: bool = False,
     ) -> Chunk:
         """Create a chunk from blocks."""
+        heading_path = list(heading_path or [])
         content = self._blocks_to_text(blocks)
+        if continuation and heading_path:
+            # Continuation of a split section: repeat the heading path so
+            # retrievers see the section context the heading blocks carry.
+            content = f"{' > '.join(heading_path)}（續）\n\n{content}"
         block_ids = [b.block_id for b in blocks]
         page_indices = list(set(b.page_idx for b in blocks))
 
@@ -360,7 +510,17 @@ class ChunkStage:
             "block_count": len(blocks),
             "has_table": any(b.type == BlockType.TABLE for b in blocks),
             "has_image": any(b.type == BlockType.IMAGE for b in blocks),
+            "heading_path": heading_path,
         }
+
+        # Preserve original table HTML (content renders it as markdown)
+        table_html = [
+            str(b.payload.get("table_body", ""))
+            for b in blocks
+            if b.type == BlockType.TABLE and b.payload.get("table_body")
+        ]
+        if table_html:
+            metadata["table_html"] = table_html
 
         # Add heading info if first block is heading
         if blocks and blocks[0].type == BlockType.TEXT:
@@ -398,7 +558,7 @@ class ChunkStage:
 
         elif block.type == BlockType.TABLE:
             caption = block.payload.get("table_caption", "")
-            body = block.payload.get("table_body", "")
+            body = _table_body_to_markdown(block.payload.get("table_body", ""))
             if caption:
                 return f"**{caption}**\n\n{body}"
             return body
@@ -428,3 +588,109 @@ class ChunkStage:
             return "\n".join(lines)
 
         return ""
+
+
+class _HTMLTableParser(HTMLParser):
+    """Collect (text, rowspan, colspan) cells for each table row."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.rows: list[list[tuple[str, int, int]]] = []
+        self._row: list[tuple[str, int, int]] | None = None
+        self._cell_parts: list[str] | None = None
+        self._rowspan = 1
+        self._colspan = 1
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "tr":
+            self._row = []
+        elif tag in ("td", "th") and self._row is not None:
+            attr_map = dict(attrs)
+            self._rowspan = self._parse_span(attr_map.get("rowspan"))
+            self._colspan = self._parse_span(attr_map.get("colspan"))
+            self._cell_parts = []
+        elif tag == "br" and self._cell_parts is not None:
+            self._cell_parts.append(" ")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in ("td", "th") and self._row is not None and self._cell_parts is not None:
+            self._row.append(
+                ("".join(self._cell_parts), self._rowspan, self._colspan)
+            )
+            self._cell_parts = None
+        elif tag == "tr" and self._row is not None:
+            self.rows.append(self._row)
+            self._row = None
+
+    def handle_data(self, data: str) -> None:
+        if self._cell_parts is not None:
+            self._cell_parts.append(data)
+
+    @staticmethod
+    def _parse_span(value: str | None) -> int:
+        try:
+            return max(int(str(value)), 1)
+        except (TypeError, ValueError):
+            return 1
+
+
+def _strip_html_tags(html: str) -> str:
+    """Strip tags and collapse whitespace."""
+    return " ".join(re.sub(r"<[^>]+>", " ", html).split())
+
+
+def _table_body_to_markdown(body: str) -> str:
+    """
+    Convert an HTML table to a markdown pipe table.
+
+    Rowspan/colspan cells repeat their value across the spanned grid cells.
+    Markup that does not parse into table rows has its tags stripped instead;
+    tag-free bodies pass through unchanged.
+    """
+    if "<" not in body:
+        return body
+
+    parser = _HTMLTableParser()
+    try:
+        parser.feed(body)
+        parser.close()
+    except Exception:
+        return _strip_html_tags(body)
+    if not parser.rows:
+        return _strip_html_tags(body)
+
+    # Expand rowspan/colspan into a rectangular grid by repeating values.
+    grid: list[list[str]] = []
+    carry: dict[int, tuple[str, int]] = {}
+    for cells in parser.rows:
+        row: list[str] = []
+        col = 0
+        for text, rowspan, colspan in cells:
+            while col in carry:
+                carried_text, remaining = carry.pop(col)
+                if remaining > 1:
+                    carry[col] = (carried_text, remaining - 1)
+                row.append(carried_text)
+                col += 1
+            clean = " ".join(text.split()).replace("|", "\\|")
+            for _ in range(colspan):
+                row.append(clean)
+                if rowspan > 1:
+                    carry[col] = (clean, rowspan - 1)
+                col += 1
+        while col in carry:
+            carried_text, remaining = carry.pop(col)
+            if remaining > 1:
+                carry[col] = (carried_text, remaining - 1)
+            row.append(carried_text)
+            col += 1
+        grid.append(row)
+
+    width = max(len(row) for row in grid)
+    lines: list[str] = []
+    for i, row in enumerate(grid):
+        padded = row + [""] * (width - len(row))
+        lines.append("| " + " | ".join(padded) + " |")
+        if i == 0:
+            lines.append("| " + " | ".join(["---"] * width) + " |")
+    return "\n".join(lines)

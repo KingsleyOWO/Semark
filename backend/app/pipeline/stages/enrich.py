@@ -27,11 +27,13 @@ from app.pipeline.org_chart_parser import OrgChartParser
 from app.pipeline.semantic.language import resolve_semantic_output_language
 from app.pipeline.structured_rag import looks_like_reference_table
 
-# Patterns indicating visual/diagram documents
-DIAGRAM_PATTERNS = [
-    r"架構圖|組織圖|流程圖|示意圖|概念圖",
-    r"diagram|chart|flowchart|structure|org.chart",
-]
+# Scanned visual page detection: a page whose IR is dominated by IMAGE
+# blocks is routed to full-page VLM enrichment when its non-image blocks
+# carry fewer than this many text characters ...
+SCANNED_PAGE_MAX_TEXT_CHARS = 200
+# ... or when one IMAGE block covers at least this fraction of the page
+# area (bbox_norm is 0-1000 on both axes).
+SCANNED_PAGE_MIN_IMAGE_COVERAGE = 0.85
 
 # MinerU YOLO category IDs
 class MinerUCategoryId:
@@ -62,6 +64,51 @@ def should_cache_enrichment(result: Any) -> bool:
     """Cache only clean successes. Salvaged/truncated outputs (needs_review)
     must not persist across runs, or one bad reply poisons every rerun."""
     return bool(getattr(result, "success", False) and not getattr(result, "needs_review", False))
+
+
+def is_scanned_visual_page(
+    document_ir: DocumentIR,
+    page_idx: int,
+    *,
+    max_text_chars: int = SCANNED_PAGE_MAX_TEXT_CHARS,
+    min_image_coverage: float = SCANNED_PAGE_MIN_IMAGE_COVERAGE,
+) -> bool:
+    """
+    Detect pages that are essentially a scan/photo of a page.
+
+    A page qualifies when its IR blocks are dominated by IMAGE block(s):
+    it has at least one IMAGE block AND either
+    - its non-image blocks carry very little text (< max_text_chars), or
+    - one IMAGE block covers most of the page (>= min_image_coverage of
+      the 0-1000 normalized page area) — the full-page-scan signature,
+      which holds even when MinerU OCR extracted text alongside the scan.
+
+    Pure helper: reads only the DocumentIR, no I/O.
+    """
+    page_blocks = [b for b in document_ir.blocks if b.page_idx == page_idx]
+    image_blocks = [b for b in page_blocks if b.type == BlockType.IMAGE]
+    if not image_blocks:
+        return False
+
+    text_chars = sum(
+        len((block.get_text() or "").strip())
+        for block in page_blocks
+        if block.type != BlockType.IMAGE
+    )
+    if text_chars < max_text_chars:
+        return True
+
+    page_area = 1000.0 * 1000.0  # bbox_norm space
+    for block in image_blocks:
+        bbox = block.bbox_norm
+        if not bbox or len(bbox) != 4:
+            continue
+        width = max(0, bbox[2] - bbox[0])
+        height = max(0, bbox[3] - bbox[1])
+        if (width * height) / page_area >= min_image_coverage:
+            return True
+
+    return False
 
 
 @dataclass
@@ -357,12 +404,31 @@ class EnrichStage:
             if self.enrich_config.vlm_enrich_forms:
                 form_pages = self._detect_form_pages(document_ir)
 
+            # Scanned visual pages (route b): pages dominated by IMAGE blocks
+            # with little machine text. Form-detected pages keep route (a) and
+            # never count against the scanned budget.
+            scanned_budget = self.enrich_config.scanned_page_vlm_budget
+            scanned_candidate_pages: list[int] = []
+            if self.enrich_config.enable_vlm and scanned_budget > 0:
+                form_page_set = set(form_pages)
+                scanned_candidate_pages = [
+                    page.page_idx
+                    for page in document_ir.pages
+                    if page.page_idx not in form_page_set
+                    and is_scanned_visual_page(document_ir, page.page_idx)
+                ]
+
             figure_detections: list[tuple[int, dict[str, Any]]] = []
             if self.enrich_config.enable_vlm and self.enrich_config.vlm_enrich_figures:
                 yolo_results = self._load_yolo_detections(parse_cache_path)
                 figure_detections = self._get_figure_detections(yolo_results)
 
-            vlm_total_items = len(blocks_to_enrich) + len(form_pages) + len(figure_detections)
+            vlm_total_items = (
+                len(blocks_to_enrich)
+                + len(form_pages)
+                + len(figure_detections)
+                + min(scanned_budget, len(scanned_candidate_pages))
+            )
 
             stats = {
                 "total_blocks": len(document_ir.blocks),
@@ -378,6 +444,8 @@ class EnrichStage:
                 "table_gating": gating_stats,
                 "form_pages_detected": len(form_pages),
                 "yolo_figures_detected": len(figure_detections),
+                "scanned_pages_detected": len(scanned_candidate_pages),
+                "scanned_pages_enriched": 0,
                 "progress": {
                     "phase": "enrich",
                     "total": vlm_total_items,
@@ -595,170 +663,63 @@ class EnrichStage:
                     completed_delta=1,
                 )
 
-            # Export form pages as full-page assets and enrich with VLM
-            if self.enrich_config.vlm_enrich_forms:
-                forms_dir = run_path / "assets" / "forms"
+            # Export detected form pages and scanned visual pages as
+            # full-page assets and enrich them via the form_asset VLM flow.
+            forms_dir = run_path / "assets" / "forms"
 
-                for page_idx in form_pages:
-                    current_item = progress_item("form_asset", page_idx, f"form_page_{page_idx:04d}")
-                    await emit_progress(
-                        f"VLM 規劃第 {page_idx + 1} 頁表單",
-                        current_item,
-                    )
-                    form_path = forms_dir / f"form_p{page_idx:04d}.png"
-                    exported = self._export_form_page(
-                        doc_id=doc_id,
-                        page_idx=page_idx,
-                        output_path=form_path,
-                    )
-                    if exported:
+            async def process_full_page(page_idx: int, route: str) -> bool:
+                """Render one full page and enrich it via the form_asset flow.
+
+                route is "form" (detected form page) or "scanned" (scanned
+                visual page). Both routes share the same 200-DPI render, VLM
+                call, cache keying, and enrichment entry shape, so the
+                package stage consumes them identically.
+                Returns True when an enrichment entry was appended.
+                """
+                page_label = "表單" if route == "form" else "掃描頁"
+                current_item = progress_item("form_asset", page_idx, f"form_page_{page_idx:04d}")
+                await emit_progress(
+                    f"VLM 規劃第 {page_idx + 1} 頁{page_label}",
+                    current_item,
+                )
+                form_path = forms_dir / f"form_p{page_idx:04d}.png"
+                exported = self._export_form_page(
+                    doc_id=doc_id,
+                    page_idx=page_idx,
+                    output_path=form_path,
+                )
+                if exported:
+                    if route == "form":
                         stats["form_pages_exported"] = stats.get("form_pages_exported", 0) + 1
 
-                        # Enrich form page with VLM if enabled
-                        if self.enrich_config.enable_vlm:
-                            form_block_id = f"form_page_{page_idx:04d}"
-                            prompt_version = f"{self.vlm_adapter.get_prompt_version('form_asset')}:{semantic_output_language}"
+                    # Enrich the full page with VLM if enabled
+                    if self.enrich_config.enable_vlm:
+                        form_block_id = f"form_page_{page_idx:04d}"
+                        prompt_version = f"{self.vlm_adapter.get_prompt_version('form_asset')}:{semantic_output_language}"
 
-                            # Check cache
-                            if use_cache:
-                                cached = await self.cache_manager.get_enrich_cache(
-                                    doc_id=doc_id,
-                                    block_id=form_block_id,
-                                    vlm_config_hash=vlm_config_hash,
-                                    prompt_version=prompt_version,
-                                )
-                                if cached:
-                                    stats["cache_hits"] += 1
-                                    output = cached
-
-                                    # Apply org chart processing if needed (even for cached results)
-                                    document_type = output.get("document_type", "") if isinstance(output, dict) else ""
-                                    if document_type == "org_chart" and "org_chart_graph" not in output:
-                                        page_blocks = [
-                                            {"text": b.payload.get("text", ""), "bbox": b.bbox_norm}
-                                            for b in document_ir.blocks
-                                            if b.page_idx == page_idx and b.type == BlockType.TEXT
-                                        ]
-
-                                        # Fallback to VLM's all_text if MinerU blocks are insufficient
-                                        MIN_BLOCKS_THRESHOLD = 10
-                                        if len(page_blocks) < MIN_BLOCKS_THRESHOLD and isinstance(output, dict):
-                                            vlm_all_text = output.get("all_text", [])
-                                            if vlm_all_text and len(vlm_all_text) > len(page_blocks):
-                                                # Use VLM's all_text as pseudo-blocks (no bbox)
-                                                page_blocks = [
-                                                    {"text": t, "bbox": None}
-                                                    for t in vlm_all_text
-                                                    if isinstance(t, str) and len(t.strip()) >= 2
-                                                ]
-
-                                        # Get original VLM structured_content for PATH parsing
-                                        vlm_structured_content = output.get("structured_content", "") if isinstance(output, dict) else ""
-
-                                        org_graph = self.org_chart_parser.parse_from_blocks(
-                                            blocks=page_blocks,
-                                            page_idx=page_idx,
-                                            title=output.get("title", ""),
-                                            date=output.get("date", ""),
-                                            vlm_structured_content=vlm_structured_content,
-                                        )
-                                        output["org_chart_graph"] = org_graph.to_dict()
-                                        graph_content = org_graph.to_structured_content()
-                                        if graph_content:
-                                            output["structured_content"] = graph_content
-                                        if org_graph.needs_review:
-                                            output["needs_review"] = True
-                                            output["review_reasons"] = org_graph.review_reasons
-
-                                    cached_needs_review = output.get("needs_review", False) if isinstance(output, dict) else False
-                                    enrichments.append(
-                                        EnrichmentEntry(
-                                            block_id=form_block_id,
-                                            kind="form_asset",
-                                            prompt_version=prompt_version,
-                                            model=self.vlm_config.model,
-                                            decode=self.vlm_config.decode_params.model_dump(),
-                                            input={
-                                                "cached": True,
-                                                "page_idx": page_idx,
-                                                "asset_path": str(form_path),
-                                            },
-                                            output=output,
-                                            quality={"needs_review": cached_needs_review},
-                                            evidence={
-                                                "page_idx": page_idx,
-                                                "bbox": None,  # Full page
-                                                "asset_path": str(form_path),
-                                            },
-                                        )
-                                    )
-                                    await emit_progress(
-                                        f"第 {page_idx + 1} 頁表單使用快取",
-                                        current_item,
-                                        completed_delta=1,
-                                    )
-                                    continue
-
-                            # Get rich context from page blocks (for form understanding)
-                            page_blocks = [b for b in document_ir.blocks if b.page_idx == page_idx]
-                            context = self._build_form_context(page_blocks)
-
-                            # Get page thumbnail if enabled (form is already full page,
-                            # but thumbnail provides context for adjacent pages)
-                            form_page_thumbnail = None
-                            if self.vlm_config.include_page_thumbnail:
-                                form_page_thumbnail = self._get_page_thumbnail(
-                                    doc_id=doc_id,
-                                    run_id=run_id,
-                                    page_idx=page_idx,
-                                    run_path=run_path,
-                                )
-
-                            # Call VLM for form enrichment
-                            result = await self._enrich_block(
-                                block=None,
-                                kind="form_asset",
-                                image_path=form_path,
-                                context=context,
+                        # Check cache
+                        if use_cache:
+                            cached = await self.cache_manager.get_enrich_cache(
                                 doc_id=doc_id,
-                                run_id=run_id,
-                                page_idx=page_idx,
-                                page_thumbnail_path=form_page_thumbnail,
+                                block_id=form_block_id,
+                                vlm_config_hash=vlm_config_hash,
+                                prompt_version=prompt_version,
                             )
+                            if cached:
+                                stats["cache_hits"] += 1
+                                output = cached
 
-                            if result.success:
-                                stats["enriched"] += 1
-                                # Track VLM call stats for form_asset
-                                stats["vlm_calls_by_kind"]["form_asset"] = stats["vlm_calls_by_kind"].get("form_asset", 0) + 1
-                                stats["vlm_total_duration_seconds"] += result.duration_seconds or 0
-                                stats["vlm_total_tokens"] += result.tokens_used or 0
-                                output = result.output
-
-                                # Check if this is an org chart - use Graph-based parsing
+                                # Apply org chart processing if needed (even for cached results)
                                 document_type = output.get("document_type", "") if isinstance(output, dict) else ""
-                                if document_type == "org_chart":
-                                    # D4: 建立 debug bundle
-                                    debug_bundle = OrgChartDebugBundle(
-                                        page_idx=page_idx,
-                                        doc_id=doc_id,
-                                        run_id=run_id,
-                                    )
-
-                                    # 收集 VLM#1 輸出
-                                    debug_bundle.vlm1_raw = result.raw_response if hasattr(result, 'raw_response') else {}
-                                    debug_bundle.vlm1_validated = output.copy() if isinstance(output, dict) else {}
-
-                                    # Get blocks for this page
+                                if document_type == "org_chart" and "org_chart_graph" not in output:
                                     page_blocks = [
                                         {"text": b.payload.get("text", ""), "bbox": b.bbox_norm}
                                         for b in document_ir.blocks
                                         if b.page_idx == page_idx and b.type == BlockType.TEXT
                                     ]
-                                    original_mineru_blocks = page_blocks.copy()
 
                                     # Fallback to VLM's all_text if MinerU blocks are insufficient
                                     MIN_BLOCKS_THRESHOLD = 10
-                                    used_vlm_fallback = False
                                     if len(page_blocks) < MIN_BLOCKS_THRESHOLD and isinstance(output, dict):
                                         vlm_all_text = output.get("all_text", [])
                                         if vlm_all_text and len(vlm_all_text) > len(page_blocks):
@@ -768,15 +729,10 @@ class EnrichStage:
                                                 for t in vlm_all_text
                                                 if isinstance(t, str) and len(t.strip()) >= 2
                                             ]
-                                            used_vlm_fallback = True
-
-                                    # D4: 記錄 MinerU blocks
-                                    debug_bundle.mineru_blocks = original_mineru_blocks
 
                                     # Get original VLM structured_content for PATH parsing
                                     vlm_structured_content = output.get("structured_content", "") if isinstance(output, dict) else ""
 
-                                    # Parse org chart using B+ approach
                                     org_graph = self.org_chart_parser.parse_from_blocks(
                                         blocks=page_blocks,
                                         page_idx=page_idx,
@@ -784,93 +740,15 @@ class EnrichStage:
                                         date=output.get("date", ""),
                                         vlm_structured_content=vlm_structured_content,
                                     )
-
-                                    # D4: 記錄 nodes candidates
-                                    debug_bundle.nodes_candidates = [n.to_dict() for n in org_graph.nodes]
-
-                                    # D3: VLM#2 edge selection (only if we have bbox data)
-                                    has_bbox = any(b.get("bbox") for b in page_blocks)
-
-                                    # D4: 記錄決策分支
-                                    debug_bundle.decision_trace = {
-                                        "mineru_blocks_count": len(original_mineru_blocks),
-                                        "used_vlm_fallback": used_vlm_fallback,
-                                        "final_blocks_count": len(page_blocks),
-                                        "bbox_available": has_bbox,
-                                        "nodes_count": len(org_graph.nodes),
-                                        "vlm2_eligible": has_bbox and len(org_graph.nodes) > 0,
-                                    }
-
-                                    edge_candidates = []
-                                    if has_bbox and org_graph.nodes:
-                                        # Generate edge candidates from heuristics
-                                        edge_candidates = self.org_chart_parser.generate_edge_candidates(
-                                            org_graph.nodes
-                                        )
-
-                                        # D4: 記錄 edge candidates
-                                        debug_bundle.edge_candidates = [ec.to_dict() for ec in edge_candidates]
-                                        debug_bundle.decision_trace["edge_candidates_count"] = len(edge_candidates)
-
-                                        if edge_candidates:
-                                            # Call VLM#2 for edge selection
-                                            try:
-                                                vlm2_result = await self._select_org_chart_edges_with_debug(
-                                                    doc_id=doc_id,
-                                                    run_id=run_id,
-                                                    image_path=form_path,
-                                                    edge_candidates=edge_candidates,
-                                                    nodes=org_graph.nodes,
-                                                )
-                                                vlm2_edges = vlm2_result.get("edges", [])
-
-                                                # D4: 記錄 VLM#2 輸出
-                                                debug_bundle.vlm2_raw = vlm2_result.get("raw", {})
-                                                debug_bundle.vlm2_validated = [e.to_dict() for e in vlm2_edges]
-                                                debug_bundle.decision_trace["vlm2_called"] = True
-                                                debug_bundle.decision_trace["vlm2_edges_count"] = len(vlm2_edges)
-
-                                                if vlm2_edges:
-                                                    # Replace heuristic edges with VLM#2 selected edges
-                                                    org_graph.edges = vlm2_edges
-                                            except Exception as e:
-                                                # VLM#2 failed, keep heuristic edges (or empty)
-                                                org_graph.review_reasons.append(f"VLM#2 edge selection failed: {e}")
-                                                debug_bundle.decision_trace["vlm2_called"] = True
-                                                debug_bundle.decision_trace["vlm2_error"] = str(e)
-                                        else:
-                                            debug_bundle.decision_trace["skipped_vlm2"] = "no_edge_candidates"
-                                    else:
-                                        debug_bundle.decision_trace["skipped_vlm2"] = "no_bbox" if not has_bbox else "no_nodes"
-
-                                    # Add graph to output
                                     output["org_chart_graph"] = org_graph.to_dict()
-
-                                    # Use graph's structured content if available
                                     graph_content = org_graph.to_structured_content()
-                                    if graph_content and len(graph_content) > len(output.get("structured_content", "")):
+                                    if graph_content:
                                         output["structured_content"] = graph_content
-
-                                    # Update needs_review based on graph validation
                                     if org_graph.needs_review:
                                         output["needs_review"] = True
                                         output["review_reasons"] = org_graph.review_reasons
 
-                                    # D4: 記錄最終結果並儲存
-                                    debug_bundle.canonical_graph = org_graph.to_dict()
-                                    debug_bundle.render_md = graph_content
-                                    debug_bundle.warnings = org_graph.review_reasons
-                                    debug_bundle.save(run_path)
-
-                                # Cache the result
-                                await self.cache_manager.set_enrich_cache(
-                                    doc_id=doc_id,
-                                    block_id=form_block_id,
-                                    vlm_config_hash=vlm_config_hash,
-                                    prompt_version=prompt_version,
-                                    output=output,
-                                )
-
+                                cached_needs_review = output.get("needs_review", False) if isinstance(output, dict) else False
                                 enrichments.append(
                                     EnrichmentEntry(
                                         block_id=form_block_id,
@@ -879,15 +757,13 @@ class EnrichStage:
                                         model=self.vlm_config.model,
                                         decode=self.vlm_config.decode_params.model_dump(),
                                         input={
+                                            "cached": True,
                                             "page_idx": page_idx,
                                             "asset_path": str(form_path),
+                                            **({"route": "scanned_page"} if route == "scanned" else {}),
                                         },
                                         output=output,
-                                        quality={
-                                            "needs_review": result.needs_review or output.get("needs_review", False),
-                                            "tokens_used": result.tokens_used,
-                                            "duration_seconds": result.duration_seconds,
-                                        },
+                                        quality={"needs_review": cached_needs_review},
                                         evidence={
                                             "page_idx": page_idx,
                                             "bbox": None,  # Full page
@@ -895,22 +771,235 @@ class EnrichStage:
                                         },
                                     )
                                 )
-                            else:
-                                stats["errors"] += 1
-                                import logging
-                                logging.error(f"VLM form enrichment failed: {result.error}")
+                                await emit_progress(
+                                    f"第 {page_idx + 1} 頁{page_label}使用快取",
+                                    current_item,
+                                    completed_delta=1,
+                                )
+                                return True
 
-                            await emit_progress(
-                                f"完成第 {page_idx + 1} 頁表單規劃",
-                                current_item,
-                                completed_delta=1,
+                        # Get rich context from page blocks (for form understanding)
+                        page_blocks = [b for b in document_ir.blocks if b.page_idx == page_idx]
+                        context = self._build_form_context(page_blocks)
+
+                        # Get page thumbnail if enabled (form is already full page,
+                        # but thumbnail provides context for adjacent pages)
+                        form_page_thumbnail = None
+                        if self.vlm_config.include_page_thumbnail:
+                            form_page_thumbnail = self._get_page_thumbnail(
+                                doc_id=doc_id,
+                                run_id=run_id,
+                                page_idx=page_idx,
+                                run_path=run_path,
                             )
-                    else:
+
+                        # Call VLM for form enrichment
+                        result = await self._enrich_block(
+                            block=None,
+                            kind="form_asset",
+                            image_path=form_path,
+                            context=context,
+                            doc_id=doc_id,
+                            run_id=run_id,
+                            page_idx=page_idx,
+                            page_thumbnail_path=form_page_thumbnail,
+                        )
+
+                        appended = False
+                        if result.success:
+                            stats["enriched"] += 1
+                            # Track VLM call stats for form_asset
+                            stats["vlm_calls_by_kind"]["form_asset"] = stats["vlm_calls_by_kind"].get("form_asset", 0) + 1
+                            stats["vlm_total_duration_seconds"] += result.duration_seconds or 0
+                            stats["vlm_total_tokens"] += result.tokens_used or 0
+                            output = result.output
+
+                            # Check if this is an org chart - use Graph-based parsing
+                            document_type = output.get("document_type", "") if isinstance(output, dict) else ""
+                            if document_type == "org_chart":
+                                # D4: 建立 debug bundle
+                                debug_bundle = OrgChartDebugBundle(
+                                    page_idx=page_idx,
+                                    doc_id=doc_id,
+                                    run_id=run_id,
+                                )
+
+                                # 收集 VLM#1 輸出
+                                debug_bundle.vlm1_raw = result.raw_response if hasattr(result, 'raw_response') else {}
+                                debug_bundle.vlm1_validated = output.copy() if isinstance(output, dict) else {}
+
+                                # Get blocks for this page
+                                page_blocks = [
+                                    {"text": b.payload.get("text", ""), "bbox": b.bbox_norm}
+                                    for b in document_ir.blocks
+                                    if b.page_idx == page_idx and b.type == BlockType.TEXT
+                                ]
+                                original_mineru_blocks = page_blocks.copy()
+
+                                # Fallback to VLM's all_text if MinerU blocks are insufficient
+                                MIN_BLOCKS_THRESHOLD = 10
+                                used_vlm_fallback = False
+                                if len(page_blocks) < MIN_BLOCKS_THRESHOLD and isinstance(output, dict):
+                                    vlm_all_text = output.get("all_text", [])
+                                    if vlm_all_text and len(vlm_all_text) > len(page_blocks):
+                                        # Use VLM's all_text as pseudo-blocks (no bbox)
+                                        page_blocks = [
+                                            {"text": t, "bbox": None}
+                                            for t in vlm_all_text
+                                            if isinstance(t, str) and len(t.strip()) >= 2
+                                        ]
+                                        used_vlm_fallback = True
+
+                                # D4: 記錄 MinerU blocks
+                                debug_bundle.mineru_blocks = original_mineru_blocks
+
+                                # Get original VLM structured_content for PATH parsing
+                                vlm_structured_content = output.get("structured_content", "") if isinstance(output, dict) else ""
+
+                                # Parse org chart using B+ approach
+                                org_graph = self.org_chart_parser.parse_from_blocks(
+                                    blocks=page_blocks,
+                                    page_idx=page_idx,
+                                    title=output.get("title", ""),
+                                    date=output.get("date", ""),
+                                    vlm_structured_content=vlm_structured_content,
+                                )
+
+                                # D4: 記錄 nodes candidates
+                                debug_bundle.nodes_candidates = [n.to_dict() for n in org_graph.nodes]
+
+                                # D3: VLM#2 edge selection (only if we have bbox data)
+                                has_bbox = any(b.get("bbox") for b in page_blocks)
+
+                                # D4: 記錄決策分支
+                                debug_bundle.decision_trace = {
+                                    "mineru_blocks_count": len(original_mineru_blocks),
+                                    "used_vlm_fallback": used_vlm_fallback,
+                                    "final_blocks_count": len(page_blocks),
+                                    "bbox_available": has_bbox,
+                                    "nodes_count": len(org_graph.nodes),
+                                    "vlm2_eligible": has_bbox and len(org_graph.nodes) > 0,
+                                }
+
+                                edge_candidates = []
+                                if has_bbox and org_graph.nodes:
+                                    # Generate edge candidates from heuristics
+                                    edge_candidates = self.org_chart_parser.generate_edge_candidates(
+                                        org_graph.nodes
+                                    )
+
+                                    # D4: 記錄 edge candidates
+                                    debug_bundle.edge_candidates = [ec.to_dict() for ec in edge_candidates]
+                                    debug_bundle.decision_trace["edge_candidates_count"] = len(edge_candidates)
+
+                                    if edge_candidates:
+                                        # Call VLM#2 for edge selection
+                                        try:
+                                            vlm2_result = await self._select_org_chart_edges_with_debug(
+                                                doc_id=doc_id,
+                                                run_id=run_id,
+                                                image_path=form_path,
+                                                edge_candidates=edge_candidates,
+                                                nodes=org_graph.nodes,
+                                            )
+                                            vlm2_edges = vlm2_result.get("edges", [])
+
+                                            # D4: 記錄 VLM#2 輸出
+                                            debug_bundle.vlm2_raw = vlm2_result.get("raw", {})
+                                            debug_bundle.vlm2_validated = [e.to_dict() for e in vlm2_edges]
+                                            debug_bundle.decision_trace["vlm2_called"] = True
+                                            debug_bundle.decision_trace["vlm2_edges_count"] = len(vlm2_edges)
+
+                                            if vlm2_edges:
+                                                # Replace heuristic edges with VLM#2 selected edges
+                                                org_graph.edges = vlm2_edges
+                                        except Exception as e:
+                                            # VLM#2 failed, keep heuristic edges (or empty)
+                                            org_graph.review_reasons.append(f"VLM#2 edge selection failed: {e}")
+                                            debug_bundle.decision_trace["vlm2_called"] = True
+                                            debug_bundle.decision_trace["vlm2_error"] = str(e)
+                                    else:
+                                        debug_bundle.decision_trace["skipped_vlm2"] = "no_edge_candidates"
+                                else:
+                                    debug_bundle.decision_trace["skipped_vlm2"] = "no_bbox" if not has_bbox else "no_nodes"
+
+                                # Add graph to output
+                                output["org_chart_graph"] = org_graph.to_dict()
+
+                                # Use graph's structured content if available
+                                graph_content = org_graph.to_structured_content()
+                                if graph_content and len(graph_content) > len(output.get("structured_content", "")):
+                                    output["structured_content"] = graph_content
+
+                                # Update needs_review based on graph validation
+                                if org_graph.needs_review:
+                                    output["needs_review"] = True
+                                    output["review_reasons"] = org_graph.review_reasons
+
+                                # D4: 記錄最終結果並儲存
+                                debug_bundle.canonical_graph = org_graph.to_dict()
+                                debug_bundle.render_md = graph_content
+                                debug_bundle.warnings = org_graph.review_reasons
+                                debug_bundle.save(run_path)
+
+                            # Cache the result
+                            await self.cache_manager.set_enrich_cache(
+                                doc_id=doc_id,
+                                block_id=form_block_id,
+                                vlm_config_hash=vlm_config_hash,
+                                prompt_version=prompt_version,
+                                output=output,
+                            )
+
+                            enrichments.append(
+                                EnrichmentEntry(
+                                    block_id=form_block_id,
+                                    kind="form_asset",
+                                    prompt_version=prompt_version,
+                                    model=self.vlm_config.model,
+                                    decode=self.vlm_config.decode_params.model_dump(),
+                                    input={
+                                        "page_idx": page_idx,
+                                        "asset_path": str(form_path),
+                                        **({"route": "scanned_page"} if route == "scanned" else {}),
+                                    },
+                                    output=output,
+                                    quality={
+                                        "needs_review": result.needs_review or output.get("needs_review", False),
+                                        "tokens_used": result.tokens_used,
+                                        "duration_seconds": result.duration_seconds,
+                                    },
+                                    evidence={
+                                        "page_idx": page_idx,
+                                        "bbox": None,  # Full page
+                                        "asset_path": str(form_path),
+                                    },
+                                )
+                            )
+                            appended = True
+                        else:
+                            stats["errors"] += 1
+                            import logging
+                            logging.error(f"VLM form enrichment failed: {result.error}")
+
                         await emit_progress(
-                            f"第 {page_idx + 1} 頁表單影像輸出失敗，已略過",
+                            f"完成第 {page_idx + 1} 頁{page_label}規劃",
                             current_item,
                             completed_delta=1,
                         )
+                        return appended
+                else:
+                    await emit_progress(
+                        f"第 {page_idx + 1} 頁{page_label}影像輸出失敗，已略過",
+                        current_item,
+                        completed_delta=1,
+                    )
+
+                return False
+
+            if self.enrich_config.vlm_enrich_forms:
+                for form_page_idx in form_pages:
+                    await process_full_page(form_page_idx, route="form")
 
             # Process YOLO-detected figures/diagrams
             if self.enrich_config.enable_vlm and self.enrich_config.vlm_enrich_figures:
@@ -1067,6 +1156,35 @@ class EnrichStage:
                         current_item,
                         completed_delta=1,
                     )
+
+            # Route scanned visual pages (route b) through the same full-page
+            # form_asset flow. Runtime exclusion: pages that already received
+            # any enrichment (block-level, form page, or YOLO figure) are left
+            # alone; the budget caps how many scanned pages reach the VLM.
+            if scanned_candidate_pages:
+                pages_with_enrichment = {
+                    entry.evidence.get("page_idx")
+                    for entry in enrichments
+                    if entry.evidence.get("page_idx") is not None
+                }
+                scanned_attempts = 0
+                for scanned_page_idx in scanned_candidate_pages:
+                    if scanned_attempts >= scanned_budget:
+                        break
+                    if scanned_page_idx in pages_with_enrichment:
+                        await emit_progress(
+                            f"第 {scanned_page_idx + 1} 頁已有其他語意分析，略過掃描頁分析",
+                            progress_item(
+                                "form_asset",
+                                scanned_page_idx,
+                                f"form_page_{scanned_page_idx:04d}",
+                            ),
+                            completed_delta=1,
+                        )
+                        continue
+                    scanned_attempts += 1
+                    if await process_full_page(scanned_page_idx, route="scanned"):
+                        stats["scanned_pages_enriched"] += 1
 
             await emit_progress("VLM 語意分析完成", None)
 
@@ -1791,12 +1909,6 @@ class EnrichStage:
                 table_body=table_body, table_headers=table_headers,
                 page_thumbnail_path=page_thumbnail_path,
             )
-        elif kind == "page_description":
-            return await self.vlm_adapter.enrich_figure(
-                image_path, context,
-                doc_id=doc_id, run_id=run_id, page_idx=page_idx, bbox=bbox,
-                page_thumbnail_path=page_thumbnail_path,
-            )
         else:
             return EnrichmentOutput(
                 success=False,
@@ -1911,95 +2023,6 @@ class EnrichStage:
                 "parsed_output": result.output,
             },
         }
-
-    def _is_diagram_document(self, source_path: str) -> bool:
-        """Check if document appears to be a diagram based on filename."""
-        filename = Path(source_path).stem.lower()
-        for pattern in DIAGRAM_PATTERNS:
-            if re.search(pattern, filename, re.IGNORECASE):
-                return True
-        return False
-
-    def _is_visual_page(self, document_ir: DocumentIR, page_idx: int) -> bool:
-        """
-        Check if a page is primarily visual (diagram, chart, etc.)
-
-        A visual page has:
-        - Low total text content (short text in blocks)
-        - Few text blocks
-        - Or is from a diagram document
-        """
-        # Get blocks on this page
-        page_blocks = [b for b in document_ir.blocks if b.page_idx == page_idx]
-
-        # Count text content
-        text_blocks = [b for b in page_blocks if b.type == BlockType.TEXT]
-        total_text = sum(len(b.payload.get("text", "")) for b in text_blocks)
-
-        # Visual page heuristics:
-        # - Less than 200 characters of text
-        # - Or filename matches diagram patterns
-        if total_text < 200:
-            return True
-
-        if self._is_diagram_document(document_ir.source.path):
-            return True
-
-        return False
-
-    def _get_visual_pages(self, document_ir: DocumentIR) -> list[int]:
-        """Get list of page indices that are primarily visual."""
-        visual_pages = []
-        for page in document_ir.pages:
-            if self._is_visual_page(document_ir, page.page_idx):
-                visual_pages.append(page.page_idx)
-        return visual_pages
-
-    def _render_page_to_image(
-        self,
-        doc_id: str,
-        page_idx: int,
-        output_dir: Path,
-    ) -> Path | None:
-        """
-        Render a PDF page to an image using PyMuPDF.
-
-        Returns the path to the rendered image, or None if rendering fails.
-        """
-        if not HAS_PYMUPDF:
-            return None
-
-        # Find the source PDF
-        source_dir = settings.get_doc_path(doc_id) / "source"
-        pdf_path = None
-        for f in source_dir.glob("original.*"):
-            if f.suffix.lower() == ".pdf":
-                pdf_path = f
-                break
-
-        if not pdf_path:
-            return None
-
-        try:
-            output_dir.mkdir(parents=True, exist_ok=True)
-            output_path = output_dir / f"page_{page_idx:04d}.png"
-
-            # Open PDF and render page
-            doc = fitz.open(pdf_path)
-            if page_idx >= len(doc):
-                doc.close()
-                return None
-
-            page = doc[page_idx]
-            # Render at 2x zoom for better quality
-            mat = fitz.Matrix(2.0, 2.0)
-            pix = page.get_pixmap(matrix=mat)
-            pix.save(output_path)
-            doc.close()
-
-            return output_path
-        except Exception:
-            return None
 
     def _detect_form_pages(self, document_ir: DocumentIR) -> list[int]:
         """

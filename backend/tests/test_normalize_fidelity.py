@@ -13,7 +13,6 @@ import pytest
 from app.models.document_ir import Block, BlockType
 from app.pipeline.stages.normalize import HAS_PYMUPDF, NormalizeStage
 
-
 # ---------------------------------------------------------------------------
 # Block type coverage
 # ---------------------------------------------------------------------------

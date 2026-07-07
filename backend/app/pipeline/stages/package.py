@@ -30,6 +30,7 @@ from app.models.org_chart import (
     OrgNode,
 )
 from app.pipeline.package_utils import (
+    caption_text,
     clean_html_table,
     clean_latex_symbols,
     html_table_to_text,
@@ -4246,7 +4247,7 @@ class PackageStage:
                         dst_path = figures_dir / f"{asset_id}{src_path.suffix}"
                         shutil.copy2(src_path, dst_path)
 
-                        caption = block.payload.get("caption", "")
+                        caption = caption_text(block.payload.get("caption", ""))
                         title = caption[:100] if caption else f"Figure {figure_idx + 1}"
 
                         # Integrate VLM enrichment for figures. Coerce first so malformed
@@ -4605,7 +4606,7 @@ class PackageStage:
 
         elif block.type == BlockType.IMAGE:
             img_path = block.payload.get("img_path", "")
-            caption = block.payload.get("caption", "")
+            caption = caption_text(block.payload.get("caption", ""))
 
             if img_path:
                 alt_text = caption or "Image"

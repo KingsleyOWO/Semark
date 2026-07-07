@@ -1208,22 +1208,64 @@ Text
         self.assertIn("## Intake", text)
 
     def test_semantic_repair_settles_repairable_quality_gate_issues(self):
+        # The settle step re-runs the rule-based quality gate on the repaired
+        # markdown (no unconditional clearing): issues settle only because the
+        # re-run on the repaired output comes back clean.
         quality_gate = SimpleNamespace(
             status="needs_review",
             score=0.25,
             issues=[
-                SimpleNamespace(code="structured_output_empty", severity="high"),
-                SimpleNamespace(code="vlm_enrichment_parse_failed", severity="high"),
+                SimpleNamespace(code="structured_output_empty", severity="high", page_idx=None),
+                SimpleNamespace(code="vlm_enrichment_parse_failed", severity="high", page_idx=None),
             ],
             vlm_audit_candidates=[{"page_idx": 0, "reasons": ["structured_output_empty"]}],
             vlm_audits=[{"success": False}],
             stats={"issue_count": 2},
         )
-
-        PackageStage._settle_quality_gate_after_semantic_repair(
-            quality_gate,
-            {"applied_count": 1, "fallback_count": 0, "blocked_count": 0},
+        document_ir = DocumentIR(
+            doc_id="doc",
+            run_id="run",
+            source=SourceInfo(path="policy.pdf", ext="pdf", sha256="abc", size_bytes=100),
+            engine=EngineInfo(backend="pipeline", method="auto"),
+            pages=[PageInfo(page_idx=0, page_image_path="assets/pages/page_0000.png")],
+            blocks=[
+                Block(
+                    block_id="b0",
+                    type=BlockType.TEXT,
+                    page_idx=0,
+                    payload={"text": "Policy overview describing scope and submission rules."},
+                )
+            ],
         )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_path = Path(tmpdir)
+            outputs = run_path / "outputs"
+            outputs.mkdir(parents=True)
+            (outputs / "structured_rag.md").write_text(
+                "# Policy\n\n## Scope\n- Applies to all staff of the institute.\n",
+                encoding="utf-8",
+            )
+
+            asyncio.run(
+                PackageStage()._settle_quality_gate_after_semantic_repair(
+                    quality_gate,
+                    {"applied_count": 1, "fallback_count": 0, "blocked_count": 0},
+                    outputs_dir=outputs,
+                    document_ir=document_ir,
+                    source_md="# Policy",
+                    assets=[],
+                    structured_output=SimpleNamespace(
+                        plan=SimpleNamespace(document_type="generic_document", title="Policy"),
+                        records=[],
+                        chunks=[],
+                        rag_markdown="",
+                    ),
+                    enrichments={},
+                    run_path=run_path,
+                    semantic_output_language="en",
+                )
+            )
 
         self.assertEqual(quality_gate.status, "pass")
         self.assertEqual(quality_gate.issues, [])
@@ -1235,6 +1277,7 @@ Text
         self.assertEqual(quality_gate.stats["pre_semantic_repair_vlm_audit_candidate_count"], 1)
         self.assertEqual(quality_gate.stats["pre_semantic_repair_vlm_audit_count"], 1)
         self.assertIn("structured_output_empty", quality_gate.stats["semantic_repair_cleared_issue_codes"])
+        self.assertEqual(quality_gate.stats["post_repair_recheck"]["issue_count"], 0)
 
 
     def test_semantic_repair_rejects_chinese_template_for_english_output(self):

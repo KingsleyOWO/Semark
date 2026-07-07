@@ -1362,7 +1362,15 @@ def test_quality_gate_flags_empty_structured_output_even_when_source_exists(tmp_
             source_md="被害人提出申訴。依事件場域與當事人身分判斷適用法律，並分流至性別平等工作法、性別平等教育法或性騷擾防治法。",
             assets=[],
             structured_output=structured_output,
-            enrichments={},
+            enrichments={
+                # The flowchart image was enriched as a figure, so the document has
+                # structure signals and empty structured output must be flagged.
+                "fig": {
+                    "kind": "figure_caption",
+                    "input": {"page_idx": 0},
+                    "output": {"semantic_caption": "性騷擾申訴標準作業流程圖"},
+                }
+            },
             run_path=tmp_path,
             vlm_adapter=None,
             max_vlm_audits=0,

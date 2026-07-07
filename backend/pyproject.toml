@@ -30,7 +30,7 @@ doc-parser-eval = "app.eval.runner:main"
 
 [project.optional-dependencies]
 mineru = [
-    "mineru[pipeline]>=3.1.15",
+    "mineru[pipeline]>=3.4.2,<4",
     "torch>=2.6,<2.8",
     "torchvision>=0.21,<0.23",
     "six>=1.17,<2",

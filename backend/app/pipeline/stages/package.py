@@ -10,6 +10,7 @@ Output files:
 - outputs/quality.json: Quality report
 """
 
+import copy
 import json
 import re
 import shutil
@@ -29,13 +30,21 @@ from app.models.org_chart import (
     OrgNode,
 )
 from app.pipeline.package_utils import (
+    caption_text,
     clean_html_table,
     clean_latex_symbols,
     html_table_to_text,
     infer_table_asset_title,
     semantic_table_to_text,
 )
-from app.pipeline.quality_gate import run_quality_gate, write_quality_gate
+from app.pipeline.quality_gate import (
+    _resolve_page_image as resolve_quality_gate_page_image,
+)
+from app.pipeline.quality_gate import (
+    run_quality_gate,
+    write_quality_gate,
+)
+from app.pipeline.repair_guard import repair_preserves_facts
 from app.pipeline.semantic.language import resolve_semantic_output_language
 from app.pipeline.structured_rag import (
     build_form_documents_rag,
@@ -590,6 +599,7 @@ class PackageStage:
                     quality_gate=quality_gate,
                     enrichments=enrichments,
                     semantic_output_language=semantic_output_language,
+                    run_path=run_path,
                 )
                 quality_gate.stats["semantic_repair"] = semantic_repair_stats
                 if semantic_repair_stats.get("applied_count", 0) > 0:
@@ -597,7 +607,18 @@ class PackageStage:
                     quality_gate.stats["post_repair_note"] = (
                         "Reviewer model rewrote semantic markdown/chunks after the rule-based quality gate."
                     )
-                    self._settle_quality_gate_after_semantic_repair(quality_gate, semantic_repair_stats)
+                    await self._settle_quality_gate_after_semantic_repair(
+                        quality_gate,
+                        semantic_repair_stats,
+                        outputs_dir=outputs_dir,
+                        document_ir=document_ir,
+                        source_md=source_md,
+                        assets=assets,
+                        structured_output=structured_output,
+                        enrichments=enrichments,
+                        run_path=run_path,
+                        semantic_output_language=semantic_output_language,
+                    )
                 if semantic_repair_stats.get("blocked_count", 0) > 0:
                     quality_gate.stats["semantic_repair_blocked"] = True
                     quality_gate.stats["auto_rag_ready"] = False
@@ -732,11 +753,13 @@ class PackageStage:
         enrichments: dict[str, dict[str, Any]],
         semantic_output_language: str,
         review_adapter: Any | None = None,
+        run_path: Path | None = None,
     ) -> dict[str, Any]:
         """Use the reviewer model to rewrite low-quality semantic Markdown.
 
         The deterministic records remain as evidence; the repaired Markdown is
         written back to form/structured outputs and appended as RAG chunks.
+        The reviewer is grounded with the rendered page image when one exists.
         """
 
         review_adapter = review_adapter or VLMAdapter(self.config.review_vlm)
@@ -760,6 +783,7 @@ class PackageStage:
                     enrichments=enrichments,
                     semantic_output_language=semantic_output_language,
                     review_adapter=review_adapter,
+                    run_path=run_path,
                 )
             )
         else:
@@ -773,6 +797,7 @@ class PackageStage:
                     enrichments=enrichments,
                     semantic_output_language=semantic_output_language,
                     review_adapter=review_adapter,
+                    run_path=run_path,
                 )
             )
 
@@ -856,6 +881,7 @@ class PackageStage:
         semantic_output_language: str,
         review_adapter: Any,
         max_forms: int = 3,
+        run_path: Path | None = None,
     ) -> dict[str, Any]:
         forms_index_path = outputs_dir / "forms_index.json"
         if not forms_index_path.exists():
@@ -896,9 +922,11 @@ class PackageStage:
                 enrichments=enrichments,
                 fallback_text=current_markdown,
             )
+            page_image_path = self._semantic_repair_page_image(document_ir, page_indices, run_path)
+            item_stats["page_image_attached"] = page_image_path is not None
             result = await review_adapter.enrich(
                 kind="semantic_repair",
-                image_path=None,
+                image_path=page_image_path,
                 context=source_evidence,
                 doc_id=document_ir.doc_id,
                 run_id=document_ir.run_id,
@@ -980,6 +1008,27 @@ class PackageStage:
                 items.append(item_stats)
                 continue
 
+            facts_ok, fact_report = repair_preserves_facts(current_markdown, source_evidence, repaired_markdown)
+            if not facts_ok:
+                item_stats["status"] = "fallback_retained"
+                item_stats["reason"] = "fact_loss"
+                item_stats["repair_rejected_reason"] = "fact_loss"
+                item_stats["missing_fact_tokens"] = fact_report["missing_tokens"][:20]
+                item_stats["fact_survival_ratio"] = fact_report["survival_ratio"]
+                item_stats["fact_token_count"] = fact_report["checked_token_count"]
+                item_stats["summary"] = str(output.get("summary") or "")
+                self._retain_form_candidate_for_review(
+                    outputs_dir=outputs_dir,
+                    form_item=item,
+                    item_stats=item_stats,
+                    current_markdown=current_markdown,
+                    document_ir=document_ir,
+                    semantic_output_language=semantic_output_language,
+                )
+                blocked_items.append(item)
+                items.append(item_stats)
+                continue
+
             md_path.write_text(repaired_markdown, encoding="utf-8")
             self._write_repaired_split_form_document(
                 outputs_dir=outputs_dir,
@@ -1041,6 +1090,7 @@ class PackageStage:
         enrichments: dict[str, dict[str, Any]],
         semantic_output_language: str,
         review_adapter: Any,
+        run_path: Path | None = None,
     ) -> dict[str, Any]:
         current_markdown = str(getattr(structured_output, "rag_markdown", "") or source_md or "")
         if not current_markdown.strip():
@@ -1053,9 +1103,10 @@ class PackageStage:
             enrichments=enrichments,
             fallback_text=current_markdown,
         )
+        page_image_path = self._semantic_repair_page_image(document_ir, [], run_path)
         result = await review_adapter.enrich(
             kind="semantic_repair",
-            image_path=None,
+            image_path=page_image_path,
             context=source_evidence,
             doc_id=document_ir.doc_id,
             run_id=document_ir.run_id,
@@ -1070,6 +1121,7 @@ class PackageStage:
         )
         item_stats = {
             "target": "structured_rag",
+            "page_image_attached": page_image_path is not None,
             "model_success": bool(getattr(result, "success", False)),
             "tokens_used": int(getattr(result, "tokens_used", 0) or 0),
             "duration_seconds": float(getattr(result, "duration_seconds", 0) or 0),
@@ -1118,6 +1170,26 @@ class PackageStage:
         if not self._semantic_repair_markdown_is_usable(repaired_markdown, current_markdown, semantic_output_language):
             item_stats["status"] = "fallback_retained"
             item_stats["reason"] = "repaired_markdown_not_usable"
+            item_stats["summary"] = str(output.get("summary") or "")
+            self._retain_structured_candidate_for_review(
+                outputs_dir=outputs_dir,
+                document_ir=document_ir,
+                current_markdown=current_markdown,
+                title=title,
+                reason=item_stats["reason"],
+                summary=item_stats["summary"],
+                semantic_output_language=semantic_output_language,
+            )
+            return {"attempted_count": 1, "applied_count": 0, "blocked_count": 0, "fallback_count": 1, "items": [item_stats]}
+
+        facts_ok, fact_report = repair_preserves_facts(current_markdown, source_evidence, repaired_markdown)
+        if not facts_ok:
+            item_stats["status"] = "fallback_retained"
+            item_stats["reason"] = "fact_loss"
+            item_stats["repair_rejected_reason"] = "fact_loss"
+            item_stats["missing_fact_tokens"] = fact_report["missing_tokens"][:20]
+            item_stats["fact_survival_ratio"] = fact_report["survival_ratio"]
+            item_stats["fact_token_count"] = fact_report["checked_token_count"]
             item_stats["summary"] = str(output.get("summary") or "")
             self._retain_structured_candidate_for_review(
                 outputs_dir=outputs_dir,
@@ -1489,8 +1561,29 @@ class PackageStage:
                 codes.append(code)
         return codes
 
-    @classmethod
-    def _settle_quality_gate_after_semantic_repair(cls, quality_gate: Any, semantic_repair_stats: dict[str, Any]) -> None:
+    async def _settle_quality_gate_after_semantic_repair(
+        self,
+        quality_gate: Any,
+        semantic_repair_stats: dict[str, Any],
+        *,
+        outputs_dir: Path,
+        document_ir: DocumentIR,
+        source_md: str,
+        assets: list[Any],
+        structured_output: Any,
+        enrichments: dict[str, dict[str, Any]],
+        run_path: Path,
+        semantic_output_language: str,
+    ) -> None:
+        """Re-validate the repaired markdown instead of rubber-stamping the gate.
+
+        After an applied repair, the rule-based quality gate checks are re-run
+        on the repaired markdown (VLM audits are skipped to bound cost) and the
+        re-run's issues/score/status become the final gate state. Issues the
+        repair did not actually fix stay on the gate, and ``auto_rag_ready`` is
+        only set when the re-run finds no issues.
+        """
+
         if int(semantic_repair_stats.get("applied_count", 0) or 0) <= 0:
             return
         if int(semantic_repair_stats.get("fallback_count", 0) or 0) > 0:
@@ -1498,94 +1591,84 @@ class PackageStage:
         if int(semantic_repair_stats.get("blocked_count", 0) or 0) > 0:
             return
 
-        repairable_codes = {
-            "structured_output_empty",
-            "vlm_enrichment_parse_failed",
-            "semantic_output_too_short",
-            "semantic_template_incomplete",
-            "semantic_summary_too_dense",
-            "form_signature_fields_missing",
-            "table_notes_missing",
-            "form_like_document_not_structured",
-            "possible_over_split_form",
-            "field_name_too_long",
-            "merged_field_detected",
-            "too_many_generic_fields",
-            "version_misclassified_as_note",
-            "summary_contains_ellipsis",
-            "raw_parser_residue",
-            "ocr_title_noise",
-            "english_noise_high",
-            "target_language_mismatch",
-            "vlm_audit_missing_items",
-        }
+        stats = dict(getattr(quality_gate, "stats", {}) or {})
+        repaired_markdown = ""
+        repaired_path = outputs_dir / "structured_rag.md"
+        if repaired_path.exists():
+            try:
+                repaired_markdown = repaired_path.read_text(encoding="utf-8")
+            except OSError:
+                repaired_markdown = ""
+        if not repaired_markdown.strip():
+            # Without the repaired text there is nothing to re-validate, so the
+            # pre-repair issues stay instead of being cleared blindly.
+            stats["post_repair_recheck"] = {"skipped_reason": "repaired_markdown_missing"}
+            quality_gate.stats = stats
+            return
+
+        recheck_output = copy.copy(structured_output)
+        try:
+            recheck_output.rag_markdown = repaired_markdown
+            # The repair replaced the chunk view; stale pre-repair chunks must
+            # not mask losses during re-validation.
+            recheck_output.chunks = []
+        except (AttributeError, TypeError):
+            recheck_output = structured_output
+
+        recheck = await run_quality_gate(
+            document_ir=document_ir,
+            source_md=repaired_markdown,
+            assets=assets,
+            structured_output=recheck_output,
+            enrichments=enrichments,
+            run_path=run_path,
+            vlm_adapter=None,
+            max_vlm_audits=0,
+            semantic_output_language=semantic_output_language,
+        )
+
         before_issues = list(getattr(quality_gate, "issues", []) or [])
-        remaining_issues = [
-            issue for issue in before_issues if str(getattr(issue, "code", "") or "") not in repairable_codes
-        ]
-        cleared_codes: list[str] = []
+        before_codes: list[str] = []
         for issue in before_issues:
             code = str(getattr(issue, "code", "") or "")
-            if code in repairable_codes and code not in cleared_codes:
-                cleared_codes.append(code)
+            if code and code not in before_codes:
+                before_codes.append(code)
+        remaining_codes: list[str] = []
+        for issue in recheck.issues:
+            code = str(getattr(issue, "code", "") or "")
+            if code and code not in remaining_codes:
+                remaining_codes.append(code)
+        cleared_codes = [code for code in before_codes if code not in set(remaining_codes)]
 
-        quality_gate.issues = remaining_issues
-        stats = dict(getattr(quality_gate, "stats", {}) or {})
+        quality_gate.issues = list(recheck.issues)
+        quality_gate.status = recheck.status
+        quality_gate.score = recheck.score
+
         stats["pre_semantic_repair_issue_count"] = len(before_issues)
-        stats["post_semantic_repair_issue_count"] = len(remaining_issues)
+        stats["post_semantic_repair_issue_count"] = len(recheck.issues)
         stats["pre_semantic_repair_vlm_audit_candidate_count"] = len(getattr(quality_gate, "vlm_audit_candidates", []) or [])
         stats["pre_semantic_repair_vlm_audit_count"] = len(getattr(quality_gate, "vlm_audits", []) or [])
         stats["semantic_repair_cleared_issue_codes"] = cleared_codes
         stats["semantic_repair_quality_settled"] = True
-        stats["auto_rag_ready"] = not remaining_issues
-        stats["issue_count"] = len(remaining_issues)
-        stats["issues_by_code"] = cls._count_values(str(getattr(issue, "code", "") or "") for issue in remaining_issues)
-        stats["issues_by_severity"] = cls._count_values(
-            str(getattr(issue, "severity", "") or "") for issue in remaining_issues
-        )
+        stats["auto_rag_ready"] = not recheck.issues
+        stats["issue_count"] = len(recheck.issues)
+        stats["issues_by_code"] = dict(recheck.stats.get("issues_by_code") or {})
+        stats["issues_by_severity"] = dict(recheck.stats.get("issues_by_severity") or {})
+        stats["post_repair_recheck"] = {
+            "issue_count": len(recheck.issues),
+            "cleared": cleared_codes,
+            "remaining": remaining_codes,
+            "vlm_audits_skipped": True,
+        }
         semantic_quality = dict(stats.get("semantic_quality", {}) or {})
-        semantic_quality["post_repair_issue_count"] = len(remaining_issues)
-        semantic_quality["post_repair_status"] = cls._quality_status_from_issues(remaining_issues)
-        if not remaining_issues:
-            semantic_quality["rag_readiness_score"] = max(float(semantic_quality.get("rag_readiness_score", 0.0) or 0.0), 0.95)
-            semantic_quality["recommended_repairs"] = []
+        semantic_quality.update(dict(recheck.stats.get("semantic_quality") or {}))
+        semantic_quality["post_repair_issue_count"] = len(recheck.issues)
+        semantic_quality["post_repair_status"] = recheck.status
         stats["semantic_quality"] = semantic_quality
         quality_gate.stats = stats
-        quality_gate.status = cls._quality_status_from_issues(remaining_issues)
-        quality_gate.score = cls._quality_score_from_issues(remaining_issues)
-        if not remaining_issues:
+        if not recheck.issues:
             quality_gate.vlm_audit_candidates = []
             quality_gate.vlm_audits = []
-
-    @staticmethod
-    def _quality_status_from_issues(issues: list[Any]) -> str:
-        if any(str(getattr(issue, "severity", "") or "") == "high" for issue in issues):
-            return "needs_review"
-        if any(str(getattr(issue, "severity", "") or "") == "medium" for issue in issues):
-            return "warning"
-        return "pass"
-
-    @staticmethod
-    def _quality_score_from_issues(issues: list[Any]) -> float:
-        penalty = 0.0
-        for issue in issues:
-            severity = str(getattr(issue, "severity", "") or "")
-            if severity == "high":
-                penalty += 0.25
-            elif severity == "medium":
-                penalty += 0.12
-            elif severity == "warning":
-                penalty += 0.05
-        return max(0.0, round(1.0 - penalty, 3))
-
-    @staticmethod
-    def _count_values(values: Any) -> dict[str, int]:
-        counts: dict[str, int] = {}
-        for value in values:
-            if not value:
-                continue
-            counts[str(value)] = counts.get(str(value), 0) + 1
-        return counts
 
     def _quality_issues_as_dicts(self, quality_gate: Any, page_indices: list[int]) -> list[dict[str, Any]]:
         pages = set(page_indices)
@@ -3184,6 +3267,33 @@ class PackageStage:
                 return page.page_image_path
         return None
 
+    def _semantic_repair_page_image(
+        self,
+        document_ir: DocumentIR,
+        page_indices: list[int],
+        run_path: Path | None,
+    ) -> Path | None:
+        """Resolve the first evidence page image so the repair reviewer is not blind.
+
+        Mirrors the evidence-page selection of `_semantic_repair_source_evidence`
+        and returns None when no rendered page image exists (text-only fallback).
+        """
+
+        selected_pages = list(page_indices) or self._document_page_indices(document_ir)[:4]
+        for page_idx in selected_pages:
+            raw_path = self._document_page_image_path(document_ir, page_idx)
+            if not raw_path:
+                continue
+            if run_path is not None:
+                resolved = resolve_quality_gate_page_image(run_path, raw_path)
+                if resolved is not None:
+                    return resolved
+                continue
+            candidate = Path(raw_path)
+            if candidate.exists():
+                return candidate
+        return None
+
     def _infer_source_title(self, source_md: str, source_path: str) -> str:
         """Pick a stable human title for split-document metadata."""
 
@@ -4137,7 +4247,7 @@ class PackageStage:
                         dst_path = figures_dir / f"{asset_id}{src_path.suffix}"
                         shutil.copy2(src_path, dst_path)
 
-                        caption = block.payload.get("caption", "")
+                        caption = caption_text(block.payload.get("caption", ""))
                         title = caption[:100] if caption else f"Figure {figure_idx + 1}"
 
                         # Integrate VLM enrichment for figures. Coerce first so malformed
@@ -4496,7 +4606,7 @@ class PackageStage:
 
         elif block.type == BlockType.IMAGE:
             img_path = block.payload.get("img_path", "")
-            caption = block.payload.get("caption", "")
+            caption = caption_text(block.payload.get("caption", ""))
 
             if img_path:
                 alt_text = caption or "Image"

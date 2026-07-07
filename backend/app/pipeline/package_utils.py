@@ -23,6 +23,13 @@ LATEX_CHECKBOX_PATTERNS = [
 _LATEX_CHECKBOX_COMPILED = [(re.compile(p, re.IGNORECASE), r) for p, r in LATEX_CHECKBOX_PATTERNS]
 
 
+def caption_text(value: Any) -> str:
+    """Coerce a MinerU caption (str or list of parts) to display text."""
+    if isinstance(value, list):
+        return " ".join(str(x) for x in value if x)
+    return str(value) if value else ""
+
+
 def clean_latex_symbols(text: str) -> str:
     """
     Convert common LaTeX symbols to Unicode equivalents.

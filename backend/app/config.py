@@ -121,7 +121,7 @@ class VLMConfig(BaseModel):
     chat_template: str | None = None  # Path or name for vLLM chat template
 
     # Image transfer
-    image_mode: VLMImageMode = VLMImageMode.STATIC_URL  # Prefer static URL
+    image_mode: VLMImageMode = VLMImageMode.DATA_URI  # Universally safe; static URL requires an endpoint that fetches remote URLs
     static_url_base: str = "http://localhost:8585/api/assets"  # Backend asset URL
 
     # Vision options
@@ -131,7 +131,7 @@ class VLMConfig(BaseModel):
 
     # JSON schema strict mode (Ollama/vLLM structured outputs)
     # When True, uses response_format with JSON schema to constrain output
-    use_json_schema: bool = False  # Default off (needs model support)
+    use_json_schema: bool = True  # Adapter retries without the constraint if the provider rejects it
 
     # Capability probe cache
     probe_result: dict[str, Any] | None = None
@@ -220,7 +220,9 @@ PROFILES: dict[ProfileName, PipelineConfig] = {
     ),
     ProfileName.ACCURATE: PipelineConfig(
         mineru=MinerUConfig(
-            method=MinerUMethod.OCR,
+            # AUTO preserves the exact text layer of born-digital PDFs; forcing
+            # OCR re-recognizes clean text and injects recognition errors.
+            method=MinerUMethod.AUTO,
             backend=MinerUBackend.PIPELINE,
             table=True,
             formula=True,

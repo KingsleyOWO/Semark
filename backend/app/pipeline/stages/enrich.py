@@ -47,11 +47,21 @@ class MinerUCategoryId:
 # Minimum score threshold for YOLO detection
 YOLO_MIN_SCORE = 0.5
 
-# Standard image sizes for VLM (max dimension)
-VLM_IMAGE_MAX_SIZE = 1024
+# Standard image sizes for VLM (max dimension). Dense zh-TW labels in
+# flowcharts/figures are illegible below ~2048 px on full-width crops.
+VLM_IMAGE_MAX_SIZE = 2048
+
+# Upper bound for crop zoom; small figures may be magnified up to this factor.
+VLM_CROP_MAX_ZOOM = 4.0
 
 # Form page render DPI (higher for forms to preserve detail)
 FORM_PAGE_DPI = 200
+
+
+def should_cache_enrichment(result: Any) -> bool:
+    """Cache only clean successes. Salvaged/truncated outputs (needs_review)
+    must not persist across runs, or one bad reply poisons every rerun."""
+    return bool(getattr(result, "success", False) and not getattr(result, "needs_review", False))
 
 
 @dataclass
@@ -521,14 +531,15 @@ class EnrichStage:
                     stats["vlm_total_duration_seconds"] += result.duration_seconds or 0
                     stats["vlm_total_tokens"] += result.tokens_used or 0
 
-                    # Cache the result
-                    await self.cache_manager.set_enrich_cache(
-                        doc_id=doc_id,
-                        block_id=block.block_id,
-                        vlm_config_hash=vlm_config_hash,
-                        prompt_version=prompt_version,
-                        output=result.output,
-                    )
+                    # Cache the result (clean successes only; salvaged output must retry)
+                    if should_cache_enrichment(result):
+                        await self.cache_manager.set_enrich_cache(
+                            doc_id=doc_id,
+                            block_id=block.block_id,
+                            vlm_config_hash=vlm_config_hash,
+                            prompt_version=prompt_version,
+                            output=result.output,
+                        )
 
                     # Build evidence from result or block
                     evidence_dict = {
@@ -2267,7 +2278,7 @@ class EnrichStage:
             width = x1 - x0
             height = y1 - y0
             max_dim = max(width, height)
-            zoom = min(2.0, max_size / max_dim) if max_dim > 0 else 2.0
+            zoom = min(VLM_CROP_MAX_ZOOM, max_size / max_dim) if max_dim > 0 else VLM_CROP_MAX_ZOOM
 
             mat = fitz.Matrix(zoom, zoom)
             pix = page.get_pixmap(matrix=mat, clip=clip_rect)

@@ -694,6 +694,9 @@ class VLMAdapter:
             base_url=self.config.base_url,
             api_key=self.config.api_key,
             timeout=self.config.request_timeout_seconds,
+            # Recovery is explicit in _create_with_recovery; auto-retrying a
+            # timed-out long-generation call just doubles the wall-clock loss.
+            max_retries=0,
         )
         self._probe_cache: ProbeResult | None = None
 
@@ -921,16 +924,54 @@ class VLMAdapter:
             "form_guide": 8192,
             "org_chart_edges": 2048,
             "quality_audit": 2048,
-            "semantic_repair": 12288,
+            # 8192: a 12288 budget was unfinishable within the request timeout
+            # on thinking models (observed 600s timeout on a 35B MoE reviewer).
+            "semantic_repair": 8192,
             "structured_table_records": 4096,
         }
-        configured = self.config.decode_params.max_tokens
-        return min(configured, task_caps.get(kind, 2048))
+        # Per-task budgets are authoritative. Capping them with the global
+        # decode default silently collapsed every task to 1024 tokens and
+        # truncated dense form/repair replies mid-JSON.
+        cap = task_caps.get(kind)
+        return cap if cap is not None else self.config.decode_params.max_tokens
 
+    TRUNCATION_RETRY_MAX_TOKENS = 16384
+
+    async def _create_with_recovery(self, api_kwargs: dict[str, Any]) -> Any:
+        """Call the chat API with two recovery paths that keep quality failures loud:
+        providers that reject the JSON-schema constraint get one unconstrained retry,
+        and length-truncated replies get one retry with a doubled token budget."""
+        try:
+            response = await self.client.chat.completions.create(**api_kwargs)
+        except Exception:
+            if "response_format" not in api_kwargs:
+                raise
+            import logging
+
+            logging.warning(
+                "VLM provider rejected response_format for %s; retrying unconstrained",
+                api_kwargs.get("model"),
+            )
+            api_kwargs.pop("response_format", None)
+            response = await self.client.chat.completions.create(**api_kwargs)
+
+        if self._finish_reason(response) == "length":
+            api_kwargs["max_tokens"] = min(
+                api_kwargs["max_tokens"] * 2, self.TRUNCATION_RETRY_MAX_TOKENS
+            )
+            response = await self.client.chat.completions.create(**api_kwargs)
+        return response
+
+    @staticmethod
+    def _finish_reason(response: Any) -> str | None:
+        try:
+            return response.choices[0].finish_reason
+        except Exception:
+            return None
 
     async def _enrich(
         self,
-        image_path: Path,
+        image_path: Path | None,
         kind: str,
         context: str = "",
         doc_id: str | None = None,
@@ -1052,7 +1093,7 @@ class VLMAdapter:
                     # Fall back to no constraint
 
             # Call VLM
-            response = await self.client.chat.completions.create(**api_kwargs)
+            response = await self._create_with_recovery(api_kwargs)
 
             duration = time.time() - start_time
             raw_response = self._message_text(response.choices[0].message)
@@ -1063,6 +1104,10 @@ class VLMAdapter:
 
             # Extract needs_review from output
             needs_review = output.pop("needs_review", False) if isinstance(output, dict) else False
+            if self._finish_reason(response) == "length":
+                # Still truncated after the retry: never let a cut-off reply
+                # masquerade as a clean extraction.
+                needs_review = True
 
             # Build evidence
             evidence = VLMEvidence(
@@ -1101,6 +1146,11 @@ class VLMAdapter:
         run_id: str | None = None,
     ) -> str:
         """Build image URL based on configured mode."""
+        if self.config.api_mode == VLMApiMode.OLLAMA:
+            # Ollama's OpenAI-compatible endpoint only accepts base64 data URIs;
+            # it never fetches remote URLs, so STATIC_URL would mean the model
+            # silently answers without ever seeing the image.
+            return self._encode_image_as_data_uri(image_path)
         if self.config.image_mode == VLMImageMode.STATIC_URL:
             # Use static URL from backend
             if doc_id and run_id:

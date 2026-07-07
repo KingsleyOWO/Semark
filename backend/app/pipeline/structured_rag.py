@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from app.models.document_ir import BlockType, DocumentIR
+from app.pipeline.corpus_rules import get_rules as get_corpus_rules
 from app.pipeline.semantic.language import (
     display_form_section,
     form_template_sections,
@@ -400,10 +401,11 @@ def plan_document(document_ir: DocumentIR) -> DocumentPlan:
     )
     evidence_text = f"{context}\n{table_headers}"
 
+    corpus_rules = get_corpus_rules()
     is_allowance = (
-        ("生活費" in evidence_text or "日支" in evidence_text)
-        and ("地區" in evidence_text or "國家" in evidence_text or "城市" in evidence_text)
-        and re.search(r"日支[數数]?[額额]|美元|USD", evidence_text)
+        any(term in evidence_text for term in corpus_rules.keyword_list("daily_allowance_amount_terms"))
+        and any(term in evidence_text for term in corpus_rules.keyword_list("daily_allowance_location_terms"))
+        and re.search("|".join(corpus_rules.keyword_list("daily_allowance_rate_patterns")), evidence_text)
     )
     is_domestic_expense_rate = _looks_like_domestic_expense_rate_table(evidence_text)
 
@@ -2331,7 +2333,7 @@ def _looks_like_noisy_header_text(text: str) -> bool:
     compact = re.sub(r"\s+", "", text)
     if not compact:
         return True
-    if compact in {"示範研究院", "DemoResearchInstitute"}:
+    if compact in get_corpus_rules().marker_list("noisy_header_exact"):
         return True
     if re.fullmatch(r"[年月日飛機其他雜費幣別匯率]+", compact):
         return True
@@ -2570,7 +2572,7 @@ def _infer_form_fields(rows: list[list[str]]) -> list[dict[str, Any]]:
                 continue
             if re.match(r"^\d+[.．、]", text):
                 continue
-            if text in {"一、出差核定", "二、費用核銷", "三、變更申請"}:
+            if text in get_corpus_rules().marker_list("form_section_skip_headings"):
                 continue
             lower_text = text.lower()
             if (
@@ -2610,25 +2612,12 @@ def _clean_inferred_field_label(value: str) -> str:
     text = re.sub(r"\s*\(Dept Specific$", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\.\s*If\b.*$", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\.\s*Note\b.*$", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"^CERTF?TION\s+", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"^Bill attach ConnexUC Itinerary\)\s*", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"^\(If Direct Bill attach ConnexUC Itinerary\)\s*", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"^Form\s+[A-Z0-9-]+\s+on behalf of the taxpayer.*$", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"Phone Number \(or Address\)\s+Phone Number \(or Address\)", "Phone Number or Address", text, flags=re.IGNORECASE)
-    text = re.sub(r"SSNBirthday", "SSN / Birthday", text, flags=re.IGNORECASE)
-    text = re.sub(r"\bWhose Records to be Disclosed NAME\b.*$", "Name", text, flags=re.IGNORECASE)
-    if re.search(r"\bsecond social security number\b", text, re.IGNORECASE):
-        text = "Second social security number"
-    elif re.search(r"\bfirst social security number\b", text, re.IGNORECASE):
-        text = "First social security number"
-    if re.search(r"\bGuardian representative \(explain\)", text, re.IGNORECASE):
-        text = "Guardian representative"
-    if re.search(r"\bAccounting Approval\b", text, re.IGNORECASE):
-        text = "Accounting Approval"
-    if re.search(r"\bPreferred Contact Info\b", text, re.IGNORECASE):
-        text = "Preferred Contact Info"
-    if re.search(r"\bAirfare Amount\b", text, re.IGNORECASE):
-        text = "Airfare Amount"
+    corpus_rules = get_corpus_rules()
+    for label_fix in corpus_rules.field_label_fixes:
+        text = label_fix.sub(text)
+    for label_override in corpus_rules.field_label_overrides:
+        if label_override.pattern.search(text):
+            text = label_override.replacement
     text = re.sub(r"\s+", " ", text).strip(" -/:：.")
     return text
 
@@ -3854,12 +3843,12 @@ def _write_form_subdocument_outputs(
 
 def _looks_like_domestic_expense_rate_table(text: str) -> bool:
     compact = re.sub(r"\s+", "", text)
+    corpus_rules = get_corpus_rules()
     return bool(
-        ("職稱/職級別" in compact or "職稱職級別" in compact or "職級別" in compact)
-        and "交通費" in compact
-        and ("宿費" in compact or "住宿費" in compact)
-        and "雜費" in compact
-        and ("出差" in compact or "旅費" in compact)
+        any(term in compact for term in corpus_rules.keyword_list("domestic_rate_role_terms"))
+        and all(term in compact for term in corpus_rules.keyword_list("domestic_rate_required_terms"))
+        and any(term in compact for term in corpus_rules.keyword_list("domestic_rate_lodging_terms"))
+        and any(term in compact for term in corpus_rules.keyword_list("domestic_rate_travel_terms"))
     )
 
 

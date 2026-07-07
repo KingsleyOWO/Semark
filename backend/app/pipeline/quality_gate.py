@@ -43,6 +43,7 @@ _QUALITY_GATE_MESSAGES_EN = {
     "raw_parser_residue": "The final output appears to contain raw parser table markers and should be converted into semantic sentences or structured fields.",
     "ocr_title_noise": "The final output still appears to contain OCR noise in headings.",
     "english_noise_high": "A Traditional Chinese output contains an unusually high English ratio and may include untranslated VLM captions or summaries.",
+    "zh_noise_in_english": "An English output contains a high ratio of CJK characters (outside code blocks) and may include untranslated Chinese content.",
     "structured_output_empty": "The structured semantic output is empty even though source text exists.",
     "vlm_enrichment_parse_failed": "A VLM/LLM enrichment response could not be parsed, so semantic content may be missing.",
     "target_language_mismatch": "The semantic output contains text from the wrong output language.",
@@ -127,7 +128,7 @@ async def run_quality_gate(
     }
 
     issues.extend(_check_source_page_images(document_ir))
-    issues.extend(_check_structured_output_presence(document_ir, structured_output, structured_text, source_md))
+    issues.extend(_check_structured_output_presence(document_ir, structured_output, structured_text, source_md, enrichments))
     issues.extend(_check_enrichment_failures(enrichments))
     issues.extend(_check_table_classification(document_ir, assets_by_block))
     issues.extend(_check_table_notes(document_ir, source_text))
@@ -211,15 +212,42 @@ def _structured_semantic_text(structured_output: Any) -> str:
     return "\n".join(parts)
 
 
+def _structure_signals(document_ir: DocumentIR, enrichments: dict[str, dict[str, Any]] | None) -> list[str]:
+    """Collect evidence that the document carries structured content (tables, forms, figures).
+
+    Prose-only documents legitimately produce empty structured output, so the
+    structured_output_empty check should only fire when at least one signal exists.
+    """
+
+    signals: list[str] = []
+    if any(block.type == BlockType.TABLE for block in document_ir.blocks):
+        signals.append("table_block")
+    image_block_ids = {block.block_id for block in document_ir.blocks if block.type == BlockType.IMAGE}
+    for block_id, enrichment in (enrichments or {}).items():
+        if str(block_id) not in image_block_ids or not isinstance(enrichment, dict):
+            continue
+        kind = str(enrichment.get("kind") or "")
+        if kind.startswith(("form", "figure")):
+            signals.append("enriched_image_block")
+            break
+    if is_form_like_document(document_ir):
+        signals.append("form_like_text")
+    return signals
+
+
 def _check_structured_output_presence(
     document_ir: DocumentIR,
     structured_output: Any,
     structured_text: str,
     source_md: str,
+    enrichments: dict[str, dict[str, Any]] | None = None,
 ) -> list[QualityGateIssue]:
     if _compact(structured_text):
         return []
     if len(_compact(source_md)) < 40:
+        return []
+    structure_signals = _structure_signals(document_ir, enrichments)
+    if not structure_signals:
         return []
 
     plan = getattr(structured_output, "plan", None)
@@ -227,11 +255,10 @@ def _check_structured_output_presence(
     records = [record for record in getattr(structured_output, "records", []) or [] if isinstance(record, dict)]
     chunks = [chunk for chunk in getattr(structured_output, "chunks", []) or [] if isinstance(chunk, dict)]
     has_semantic_candidate = any(block.type in {BlockType.TABLE, BlockType.IMAGE} for block in document_ir.blocks)
-    severity = "high" if has_semantic_candidate or not records else "medium"
     return [
         QualityGateIssue(
             code="structured_output_empty",
-            severity=severity,
+            severity="high",
             message="來源已有可解析內容，但 structured_rag / structured_chunks 為空，最終語意輸出不可用。",
             evidence={
                 "source_text_length": len(_compact(source_md)),
@@ -239,6 +266,7 @@ def _check_structured_output_presence(
                 "record_count": len(records),
                 "chunk_count": len(chunks),
                 "has_table_or_image": has_semantic_candidate,
+                "structure_signals": structure_signals,
             },
         )
     ]
@@ -680,6 +708,7 @@ def _semantic_quality_stats(issues: list[QualityGateIssue]) -> dict[str, Any]:
         "possible_over_split_form",
         "form_signature_fields_missing",
         "english_noise_high",
+        "zh_noise_in_english",
         "structured_output_empty",
         "vlm_enrichment_parse_failed",
         "target_language_mismatch",
@@ -725,6 +754,14 @@ def _semantic_quality_stats(issues: list[QualityGateIssue]) -> dict[str, Any]:
     }
 
 
+def _cjk_count(text: str) -> int:
+    return sum(1 for ch in text if "一" <= ch <= "鿿")
+
+
+def _strip_code_fences(text: str) -> str:
+    return re.sub(r"```.*?(?:```|$)", " ", text or "", flags=re.DOTALL)
+
+
 def _check_language_noise(
     source_text: str,
     semantic_output_language: str = "zh-TW",
@@ -735,10 +772,10 @@ def _check_language_noise(
     if not check_text:
         return []
 
-    zh = sum(1 for ch in check_text if "一" <= ch <= "鿿")
+    zh = _cjk_count(check_text)
     ascii_letters = sum(1 for ch in check_text if ch.isascii() and ch.isalpha())
     if semantic_output_language == "zh-TW":
-        if zh >= 80 and ascii_letters > zh * 1.2:
+        if zh >= 40 and ascii_letters > zh * 0.6:
             return [
                 QualityGateIssue(
                     code="english_noise_high",
@@ -750,13 +787,14 @@ def _check_language_noise(
         return []
 
     if semantic_output_language == "en":
+        issues: list[QualityGateIssue] = []
         chinese_template_terms = [
             term
             for term in ("填寫規則", "申請", "簽核流程", "表單", "注意事項", "來源頁面")
             if term in check_text
         ]
         if zh >= 4 or chinese_template_terms:
-            return [
+            issues.append(
                 QualityGateIssue(
                     code="target_language_mismatch",
                     severity="medium",
@@ -767,7 +805,23 @@ def _check_language_noise(
                         "chinese_template_terms": chinese_template_terms[:10],
                     },
                 )
-            ]
+            )
+        noise_text = _compact(_strip_code_fences(structured_text)) if structured_text is not None else source_text
+        noise_zh = _cjk_count(noise_text)
+        if noise_text and noise_zh >= len(noise_text) * 0.15:
+            issues.append(
+                QualityGateIssue(
+                    code="zh_noise_in_english",
+                    severity="medium",
+                    message="英文語意輸出含有過高比例的中文字元（不含程式碼區塊），可能混入未翻譯的中文內容。",
+                    evidence={
+                        "chinese_chars": noise_zh,
+                        "total_chars": len(noise_text),
+                        "cjk_ratio": round(noise_zh / len(noise_text), 3),
+                    },
+                )
+            )
+        return issues
     return []
 
 

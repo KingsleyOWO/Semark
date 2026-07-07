@@ -34,6 +34,16 @@ from app.models.document_ir import (
 )
 from app.supported_files import SPREADSHEET_NATIVE_EXTENSIONS
 
+# MinerU page furniture types (running headers/footers, page numbers, margin
+# notes). Kept in the IR as tagged TEXT blocks; filtering is a downstream
+# (package-stage) decision.
+PAGE_FURNITURE_TYPES = frozenset({"header", "footer", "page_number", "page_footnote", "aside_text"})
+
+
+def is_page_furniture(block: Block) -> bool:
+    """Return True when a block originated from MinerU page furniture."""
+    return block.payload.get("origin") == "page_furniture"
+
 
 @dataclass
 class NormalizeStageResult:
@@ -197,15 +207,19 @@ class NormalizeStage:
         """Parse a MinerU content_list item into a Block."""
         item_type = item.get("type", "")
 
-        # Map MinerU types to BlockType
+        # Map MinerU types to BlockType.
+        # MinerU emits code/list content as plain text (code_body/list_items),
+        # and charts are image regions with optional extracted data text.
         type_map = {
             "text": BlockType.TEXT,
             "table": BlockType.TABLE,
             "image": BlockType.IMAGE,
             "equation": BlockType.EQUATION,
-            "code": BlockType.CODE,
-            "list": BlockType.LIST,
+            "code": BlockType.TEXT,
+            "list": BlockType.TEXT,
+            "chart": BlockType.IMAGE,
         }
+        type_map.update(dict.fromkeys(PAGE_FURNITURE_TYPES, BlockType.TEXT))
 
         block_type = type_map.get(item_type)
 
@@ -259,12 +273,47 @@ class NormalizeStage:
 
     def _build_payload(self, item: dict[str, Any], block_type: BlockType) -> dict[str, Any]:
         """Build type-specific payload from MinerU item."""
+        item_type = item.get("type", "")
+
         if block_type == BlockType.TEXT:
-            return {
+            if item_type == "code":
+                # MinerU 3.x puts code content under code_body
+                payload = {
+                    "text": item.get("code_body", item.get("code", item.get("text", ""))),
+                    "text_level": 0,
+                    "origin": "code",
+                }
+                if item.get("code_language"):
+                    payload["code_language"] = item["code_language"]
+                return payload
+            if item_type == "list":
+                # MinerU 3.x puts list content under list_items
+                items = item.get("list_items") or item.get("items") or []
+                text = "\n".join(items) if items else item.get("text", "")
+                return {
+                    "text": text,
+                    "text_level": 0,
+                    "origin": "list",
+                }
+            payload = {
                 "text": item.get("text", ""),
                 "text_level": item.get("text_level", 0),
             }
+            if item_type in PAGE_FURNITURE_TYPES:
+                payload["origin"] = "page_furniture"
+            return payload
         elif block_type == BlockType.IMAGE:
+            if item_type == "chart":
+                payload = {
+                    "img_path": item.get("img_path", ""),
+                    "caption": item.get("chart_caption"),
+                    "footnote": item.get("chart_footnote"),
+                    "origin": "chart",
+                }
+                # Chart data text extracted by MinerU (may be empty)
+                if item.get("content"):
+                    payload["chart_content"] = item["content"]
+                return payload
             payload = {
                 "img_path": item.get("img_path", ""),
                 "caption": item.get("img_caption"),
@@ -275,29 +324,18 @@ class NormalizeStage:
                 payload["origin"] = item["_origin"]
             return payload
         elif block_type == BlockType.TABLE:
-            return {
+            payload = {
                 "table_body": item.get("table_body", ""),
                 "table_caption": item.get("table_caption"),
             }
+            # Keep the table crop so the parsed HTML can be verified against it
+            if item.get("img_path"):
+                payload["img_path"] = item["img_path"]
+            return payload
         elif block_type == BlockType.EQUATION:
             return {
                 "latex": item.get("latex", item.get("text", "")),
                 "equation_type": item.get("equation_type"),
-            }
-        elif block_type == BlockType.CODE:
-            return {
-                "code": item.get("code", item.get("text", "")),
-                "language": item.get("language"),
-            }
-        elif block_type == BlockType.LIST:
-            # Handle list items
-            items = item.get("items", [])
-            if not items and "text" in item:
-                # Parse text as list items (split by newlines)
-                items = [line.strip() for line in item["text"].split("\n") if line.strip()]
-            return {
-                "items": items,
-                "list_type": item.get("list_type", "unordered"),
             }
         elif block_type == BlockType.UNKNOWN:
             # Unknown block - preserve original info for debugging
@@ -313,7 +351,7 @@ class NormalizeStage:
         """
         Remove duplicate blocks with overlapping bboxes on the same page.
 
-        Priority: IMAGE > TABLE > others
+        Priority: TABLE > IMAGE > others
         Uses IoU (Intersection over Union) > 0.9 as overlap threshold.
         """
         if not blocks:
@@ -338,11 +376,11 @@ class NormalizeStage:
                     continue
 
                 # Check overlap with already kept blocks
-                is_duplicate = False
+                handled_overlap = False
                 for kept_block in kept:
                     if self._compute_iou(block.bbox_norm, kept_block.bbox_norm) > 0.9:
                         # Overlap detected - decide which to keep
-                        # Priority: IMAGE > TABLE > others
+                        # Priority: TABLE > IMAGE > others
                         block_priority = self._get_block_priority(block.type)
                         kept_priority = self._get_block_priority(kept_block.type)
 
@@ -352,12 +390,12 @@ class NormalizeStage:
                             removed_ids.add(kept_block.block_id)
                             kept.append(block)
                         else:
-                            # Keep existing, mark current as duplicate
-                            is_duplicate = True
+                            # Keep existing, drop current as duplicate
                             removed_ids.add(block.block_id)
+                        handled_overlap = True
                         break
 
-                if not is_duplicate and block.block_id not in removed_ids:
+                if not handled_overlap:
                     kept.append(block)
 
             result.extend(kept)
@@ -397,9 +435,11 @@ class NormalizeStage:
 
     def _get_block_priority(self, block_type: BlockType) -> int:
         """Get priority for block type (higher = more important)."""
+        # TABLE outranks IMAGE: the parsed HTML carries the structure while an
+        # overlapping image is just a raster crop of the same region.
         priority_map = {
-            BlockType.IMAGE: 10,
-            BlockType.TABLE: 5,
+            BlockType.TABLE: 10,
+            BlockType.IMAGE: 5,
             BlockType.TEXT: 3,
             BlockType.EQUATION: 3,
             BlockType.CODE: 3,
@@ -459,6 +499,11 @@ class NormalizeStage:
                 page = doc[page_idx]
                 page_blocks = blocks_by_page.get(page_idx, [])
 
+                page_width = float(page.rect.width)
+                page_height = float(page.rect.height)
+                if page_width <= 0 or page_height <= 0:
+                    continue
+
                 # Extract text blocks from PDF
                 pdf_text_blocks = self._extract_pdf_text_blocks(page)
 
@@ -479,12 +524,21 @@ class NormalizeStage:
                     if self._is_inside_table_content(text, page_blocks):
                         continue
 
+                    # Convert PyMuPDF point coords to MinerU's 0-1000 space so
+                    # sorting and enrich crops share one coordinate system
+                    bbox_norm = [
+                        max(0, min(1000, int(bbox[0] * 1000 / page_width))),
+                        max(0, min(1000, int(bbox[1] * 1000 / page_height))),
+                        max(0, min(1000, int(bbox[2] * 1000 / page_width))),
+                        max(0, min(1000, int(bbox[3] * 1000 / page_height))),
+                    ]
+
                     # Create supplemented block
                     block = Block(
                         block_id=f"s{next_block_idx:06d}",  # "s" prefix for supplement
                         type=BlockType.TEXT,
                         page_idx=page_idx,
-                        bbox_norm=[int(v) for v in bbox],
+                        bbox_norm=bbox_norm,
                         reading_order=next_block_idx,
                         payload={
                             "text": text.strip(),
@@ -661,7 +715,11 @@ class NormalizeStage:
 
         # Check if text content already exists in ANY block
         for block in blocks:
-            block_text = (block.get_text() or "").strip().replace(" ", "").replace("\n", "")
+            block_text = block.get_text() or ""
+            if isinstance(block_text, list):
+                # IMAGE captions from MinerU are lists of strings
+                block_text = "\n".join(str(part) for part in block_text)
+            block_text = block_text.strip().replace(" ", "").replace("\n", "")
             if self._texts_overlap(target_text_clean, block_text):
                 return True
 

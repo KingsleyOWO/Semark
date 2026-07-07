@@ -72,7 +72,9 @@ class TokenBudgetTest(unittest.TestCase):
         # every task to the 1024 default and truncated dense forms.
         adapter = VLMAdapter(VLMConfig())
         self.assertEqual(adapter._max_tokens_for_kind("form_asset"), 8192)
-        self.assertEqual(adapter._max_tokens_for_kind("semantic_repair"), 12288)
+        # 12288 was unfinishable within the request timeout on thinking models
+        # (observed 2x600s timeout+retry on a 35B MoE); 8192 completes.
+        self.assertEqual(adapter._max_tokens_for_kind("semantic_repair"), 8192)
         self.assertEqual(adapter._max_tokens_for_kind("table_summary"), 512)
 
     def test_global_max_tokens_used_for_unknown_kinds(self):
@@ -230,3 +232,11 @@ class RenderResolutionTest(unittest.TestCase):
 class StructuredOutputDefaultTest(unittest.TestCase):
     def test_json_schema_constraint_enabled_by_default(self):
         self.assertTrue(VLMConfig().use_json_schema)
+
+
+class ClientRetryPolicyTest(unittest.TestCase):
+    def test_client_does_not_auto_retry_timed_out_requests(self):
+        # A timed-out 600s VLM call auto-retried by the OpenAI client doubles
+        # the waste (observed 1082s wall for one semantic_repair). Recovery is
+        # handled explicitly in _create_with_recovery instead.
+        self.assertEqual(VLMAdapter().client.max_retries, 0)

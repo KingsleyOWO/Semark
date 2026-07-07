@@ -694,6 +694,9 @@ class VLMAdapter:
             base_url=self.config.base_url,
             api_key=self.config.api_key,
             timeout=self.config.request_timeout_seconds,
+            # Recovery is explicit in _create_with_recovery; auto-retrying a
+            # timed-out long-generation call just doubles the wall-clock loss.
+            max_retries=0,
         )
         self._probe_cache: ProbeResult | None = None
 
@@ -921,7 +924,9 @@ class VLMAdapter:
             "form_guide": 8192,
             "org_chart_edges": 2048,
             "quality_audit": 2048,
-            "semantic_repair": 12288,
+            # 8192: a 12288 budget was unfinishable within the request timeout
+            # on thinking models (observed 600s timeout on a 35B MoE reviewer).
+            "semantic_repair": 8192,
             "structured_table_records": 4096,
         }
         # Per-task budgets are authoritative. Capping them with the global

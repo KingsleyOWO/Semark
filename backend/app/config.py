@@ -172,6 +172,11 @@ class EnrichConfig(BaseModel):
     )
     min_text_ratio_for_vlm: float = 0.3  # pages with less text are candidates
 
+    # Scanned visual pages (pages dominated by IMAGE blocks with little
+    # machine text, e.g. fully scanned PDFs) are routed through the same
+    # full-page form_asset VLM flow as detected form pages.
+    scanned_page_vlm_budget: int = 8  # Max scanned pages enriched per document (0 disables)
+
     # VLM gating for tables (only when vlm_enrich_tables=True)
     table_vlm_budget: int = 10  # Max tables to process per document (0=unlimited)
     table_min_cells: int = 4  # Skip tiny tables (rows*cols < this)

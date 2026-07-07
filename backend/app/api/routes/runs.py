@@ -100,6 +100,7 @@ def _apply_runtime_settings(
 ) -> None:
     """Apply DB/env settings that are shared across profiles."""
     merged_config["mineru"]["backend"] = mineru_settings["backend"]
+    merged_config["mineru"]["effort"] = mineru_settings.get("effort")
     merged_config["mineru"]["lang"] = mineru_settings["lang"]
     merged_config["mineru"]["table"] = mineru_settings["table"]
     merged_config["mineru"]["api_url"] = mineru_settings["api_url"]

@@ -38,6 +38,8 @@ from app.pipeline.package_utils import (
 )
 from app.pipeline.quality_gate import (
     _resolve_page_image as resolve_quality_gate_page_image,
+)
+from app.pipeline.quality_gate import (
     run_quality_gate,
     write_quality_gate,
 )

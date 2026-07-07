@@ -29,6 +29,7 @@ from app.models.org_chart import (
     OrgGroup,
     OrgNode,
 )
+from app.pipeline.corpus_rules import get_rules as get_corpus_rules
 from app.pipeline.package_utils import (
     caption_text,
     clean_html_table,
@@ -2698,7 +2699,7 @@ class PackageStage:
         title = self._clean_export_title(value)
         title = re.sub(r"\s*(?:第\s*\d+\s*頁|Page\s*\d+)\s*(?:表格|Table)\s*\d+\s*$", "", title, flags=re.IGNORECASE)
         title = re.sub(r"\s*(?:表格|Table)\s*\d+\s*$", "", title, flags=re.IGNORECASE)
-        for marker in ("檔案分類及保存年限區分表", "保存年限區分表"):
+        for marker in get_corpus_rules().marker_list("table_collection_title_markers"):
             idx = title.find(marker)
             if idx >= 0:
                 title = title[: idx + len(marker)]
@@ -3127,10 +3128,8 @@ class PackageStage:
         text = re.sub(r"^(\s*[-*]\s+)(\d{1,3})([A-Z])", r"\1\2 \3", text)
         text = re.sub(r"^(\s*)(\d{1,3})([A-Z])", r"\1\2 \3", text)
         text = re.sub(r"^(\s*[a-z])(?=(Check|direct deposit|paper check)\b)", r"\1 ", text, flags=re.IGNORECASE)
-        text = re.sub(r"\bNR(?=Part-year\b)", "NR ", text)
-        text = re.sub(r"(IL-\d{4}-V)(Staple)", r"\1 \2", text)
-        text = re.sub(r"(?<=[a-z])(?=Firm[’']s phone)", " ", text)
-        text = re.sub(r"\s+DR\.?\s+AP\.?\s+RR\s+DC\s+IR\s+ID\s*$", "", text)
+        for text_fix in get_corpus_rules().text_fixes:
+            text = text_fix.sub(text)
         text = re.sub(r"[ \t]{2,}", " ", text)
         return text.rstrip()
 
@@ -3327,19 +3326,10 @@ class PackageStage:
         text = re.sub(r"\s+", " ", source_md or "").strip()
         if not text:
             return ""
-        transcript_match = re.search(
-            r"\b(?:Form\s+)?(4506-T\s+Request for Transcript of Tax Return)(?:\s+Form)?\b",
-            text,
-            re.IGNORECASE,
-        )
-        if transcript_match:
-            return self._clean_export_title(f"Form {transcript_match.group(1)}")
-        english_match = re.search(
-            r"([A-Z][A-Za-z]+ Department of Revenue\s+20\d{2}\s+Form\s+[A-Z0-9-]+\s+[A-Za-z ]{8,80}?Return)",
-            text,
-        )
-        if english_match:
-            return self._clean_export_title(english_match.group(1))
+        for title_fix in get_corpus_rules().title_fixes:
+            title_match = title_fix.pattern.search(text)
+            if title_match:
+                return self._clean_export_title(title_match.expand(title_fix.replacement))
         title_candidate = self._best_source_title_candidate(source_md)
         if title_candidate:
             return title_candidate
@@ -3402,9 +3392,11 @@ class PackageStage:
         for term in title_terms:
             if term in compact:
                 score += 18
-        if re.search(r"(檔案分類|保存年限|性騷擾|申訴處理|著作權|補助案)", compact):
+        topic_terms = get_corpus_rules().marker_list("title_topic_score_terms")
+        if topic_terms and re.search("(" + "|".join(topic_terms) + ")", compact):
             score += 12
-        if re.search(r"(行政院|政府|文化局|智慧財產局|台灣|臺灣|花蓮縣|臺中市|台中市)", compact):
+        org_terms = get_corpus_rules().marker_list("title_org_score_terms")
+        if org_terms and re.search("(" + "|".join(org_terms) + ")", compact):
             score += 6
         lowered = cls._clean_export_title(title).lower()
         english_terms = (
@@ -3729,19 +3721,7 @@ class PackageStage:
     @staticmethod
     def _normalize_zh_visual_label(value: str) -> str:
         text = str(value or "")
-        replacements = [
-            (r"Government\s+Agency\s+A\s*\(甲\)", "政府機關甲"),
-            (r"政府機關\s*甲\s*\(Government\s+Agency\s+A\)", "政府機關甲"),
-            (r"Vendor\s+B\s*\(乙\)", "廠商乙"),
-            (r"廠商\s*乙\s*\(Vendor\s+B\)", "廠商乙"),
-            (r"Lecturer\s+B\s*\(乙\)", "講座乙"),
-            (r"講座\s*乙\s*\(Lecturer\s+B\)", "講座乙"),
-            (r"Authorize\s*\(授權\)", "授權"),
-            (r"Entrusted(?:/Contracted)?\s*\(委辦\)", "委辦"),
-            (r"No\s+need\s+to\s+deliver\s*\(不須交付\)", "不須交付"),
-            (r"不須交付\s*\(No\s+need\s+to\s+deliver\)", "不須交付"),
-        ]
-        for pattern, replacement in replacements:
+        for pattern, replacement in get_corpus_rules().visual_label_map.items():
             text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
         text = re.sub(r"\((?:yes|y)\)", "（是）", text, flags=re.IGNORECASE)
         text = re.sub(r"\((?:no|n)\)", "（否）", text, flags=re.IGNORECASE)
@@ -3824,17 +3804,7 @@ class PackageStage:
 
         roles: list[str] = []
         if language != "en":
-            role_candidates = (
-                "受理單位(人事)",
-                "被害人",
-                "行為人之雇主",
-                "院長",
-                "調查小組",
-                "處理單位",
-                "申訴人",
-                "被申訴人",
-                "地方主管機關",
-            )
+            role_candidates = get_corpus_rules().flow_role_terms
             role_source = " ".join(nodes + all_text_lines)
             for role in role_candidates:
                 if role in role_source and role not in roles:

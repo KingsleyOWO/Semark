@@ -32,6 +32,17 @@ class MinerUBackend(StrEnum):
     VLM_HTTP_CLIENT = "vlm-http-client"
 
 
+class MinerUEffort(StrEnum):
+    """Parsing effort for MinerU hybrid-* backends (`mineru --effort`).
+
+    Hybrid-backend-only knob (mineru >= 3.3). MEDIUM (MinerU's own default)
+    skips image/chart analysis; HIGH enables it for maximum quality.
+    """
+
+    MEDIUM = "medium"
+    HIGH = "high"
+
+
 class SemanticOutputLanguage(StrEnum):
     """Language for generated semantic/RAG scaffolding."""
 
@@ -45,6 +56,9 @@ class MinerUConfig(BaseModel):
 
     method: MinerUMethod = MinerUMethod.AUTO
     backend: MinerUBackend = MinerUBackend.HYBRID_AUTO_ENGINE
+    # Hybrid-backend-only (`--effort`, mineru >= 3.3): None omits the flag so
+    # MinerU applies its own default (medium). Ignored for non-hybrid backends.
+    effort: MinerUEffort | None = None
     lang: str = "chinese_cht"
     table: bool = True
     formula: bool = True

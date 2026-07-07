@@ -16,6 +16,7 @@ from app.adapters.mineru import MinerUAdapter
 from app.config import (
     PROFILES,
     MinerUBackend,
+    MinerUEffort,
     MinerUMethod,
     ProfileName,
     SemanticOutputLanguage,
@@ -279,6 +280,7 @@ class MinerUSettingsUpdate(BaseModel):
 
     method: str | None = None
     backend: str | None = None
+    effort: str | None = None  # Hybrid-* backends only (medium | high)
     lang: str | None = None
     table: bool | None = None
     formula: bool | None = None
@@ -306,9 +308,12 @@ async def get_mineru_config(db: Database) -> dict[str, Any]:
     if backend == "vlm":
         backend = MinerUBackend.VLM_AUTO_ENGINE.value
 
+    default_effort = default_mineru.effort.value if default_mineru.effort else None
+
     return {
         "method": db_settings.get("method", default_mineru.method.value),
         "backend": backend,
+        "effort": db_settings.get("effort", default_effort),
         "lang": db_settings.get("lang", default_mineru.lang),
         "table": db_settings.get("table", default_mineru.table),
         "formula": db_settings.get("formula", default_mineru.formula),
@@ -344,6 +349,7 @@ async def get_mineru_settings(
     Returns:
         - method: auto | txt | ocr
         - backend: pipeline | vlm
+        - effort: Hybrid-* backend parsing effort (medium | high; None = MinerU default)
         - lang: OCR language (e.g., chinese_cht)
         - table: Enable table parsing
         - formula: Enable formula parsing
@@ -355,6 +361,7 @@ async def get_mineru_settings(
         - table_merge_enable: Enable table cell merging
         - available_methods: List of valid method values
         - available_backends: List of valid backend values
+        - available_efforts: List of valid effort values
     """
     config = await get_mineru_config(db)
 
@@ -362,6 +369,7 @@ async def get_mineru_settings(
         **config,
         "available_methods": [m.value for m in MinerUMethod],
         "available_backends": [b.value for b in MinerUBackend],
+        "available_efforts": [e.value for e in MinerUEffort],
     }
 
 
@@ -389,6 +397,11 @@ async def update_mineru_settings(
         if backend not in [b.value for b in MinerUBackend]:
             raise HTTPException(400, f"Invalid backend: {update.backend}")
         current["backend"] = backend
+
+    if update.effort is not None:
+        if update.effort not in [e.value for e in MinerUEffort]:
+            raise HTTPException(400, f"Invalid effort: {update.effort}")
+        current["effort"] = update.effort
 
     if update.lang is not None:
         current["lang"] = update.lang

@@ -180,7 +180,9 @@ The victim files a complaint, then the case is routed by scenario and party rela
     def test_semantic_repair_token_cap_allows_rewrite(self):
         adapter = VLMAdapter(VLMConfig(decode_params=VLMDecodeParams(max_tokens=128000)))
 
-        self.assertEqual(adapter._max_tokens_for_kind("semantic_repair"), 12288)
+        # 8192, not 12288: larger budgets were unfinishable within the request
+        # timeout on thinking-model reviewers (observed live on a 35B MoE).
+        self.assertEqual(adapter._max_tokens_for_kind("semantic_repair"), 8192)
 
 
 if __name__ == "__main__":

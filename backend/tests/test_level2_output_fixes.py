@@ -58,6 +58,20 @@ class SourceTextDumpTest(unittest.TestCase):
             )
         )
 
+    def test_blank_field_labels_do_not_keep_dump(self):
+        # A blank form's dump is just empty field labels (申請日期：年 月 日) —
+        # structure, not values. With dates covered by the guide it must be
+        # skipped, not retained as "來源抽取文字" noise.
+        emit = _should_emit_form_source_text_record(
+            language="zh-TW",
+            output={
+                "all_text": ["申請單位：", "申請日期： 年 月 日", "姓名(員工編號)： ( )", "版本 114.12.11"],
+                "filling_guide": "本表單版本日期 114.12.11，由申請單位與申請人填寫。",
+            },
+            fields=[{"name": "申請人"}, {"name": "申請單位"}],
+        )
+        self.assertFalse(emit)
+
 
 # --- B2: heading_path on the structured-repair/fallback chunk path -----------
 

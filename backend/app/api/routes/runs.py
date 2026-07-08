@@ -157,6 +157,7 @@ def _apply_runtime_settings(
         "decode_params"
     ]["repetition_penalty"]
     merged_config["review_vlm"]["image_mode"] = "data_uri"
+    merged_config["review_vlm"]["use_json_schema"] = review_vlm_settings.get("use_json_schema", True)
 
 
 async def _cancel_running_stages(db: Database, run_id: str) -> None:

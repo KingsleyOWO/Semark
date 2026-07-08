@@ -37,6 +37,7 @@ class VLMSettingsUpdate(BaseModel):
     model: str | None = None
     api_mode: str | None = None
     image_mode: str | None = None
+    use_json_schema: bool | None = None
     temperature: float | None = None
     top_p: float | None = None
     top_k: int | None = None
@@ -136,6 +137,9 @@ async def _get_vlm_config_from_settings_key(
             "request_timeout_seconds",
             defaults.get("request_timeout_seconds", default_vlm.request_timeout_seconds),
         ),
+        "use_json_schema": db_settings.get(
+            "use_json_schema", defaults.get("use_json_schema", default_vlm.use_json_schema)
+        ),
         "decode_params": {
             "temperature": db_settings.get(
                 "temperature", default_decode.get("temperature", default_vlm.decode_params.temperature)
@@ -223,6 +227,8 @@ async def _update_vlm_settings_key(
         current["repetition_penalty"] = update.repetition_penalty
     if update.request_timeout_seconds is not None:
         current["request_timeout_seconds"] = update.request_timeout_seconds
+    if update.use_json_schema is not None:
+        current["use_json_schema"] = update.use_json_schema
 
     await repo.set(settings_key, current)
     return current

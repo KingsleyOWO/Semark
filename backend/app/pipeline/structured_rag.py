@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from app.models.document_ir import BlockType, DocumentIR
+from app.pipeline.corpus_rules import get_rules as get_corpus_rules
 from app.pipeline.semantic.language import (
     display_form_section,
     form_template_sections,
@@ -400,10 +401,11 @@ def plan_document(document_ir: DocumentIR) -> DocumentPlan:
     )
     evidence_text = f"{context}\n{table_headers}"
 
+    corpus_rules = get_corpus_rules()
     is_allowance = (
-        ("生活費" in evidence_text or "日支" in evidence_text)
-        and ("地區" in evidence_text or "國家" in evidence_text or "城市" in evidence_text)
-        and re.search(r"日支[數数]?[額额]|美元|USD", evidence_text)
+        any(term in evidence_text for term in corpus_rules.keyword_list("daily_allowance_amount_terms"))
+        and any(term in evidence_text for term in corpus_rules.keyword_list("daily_allowance_location_terms"))
+        and re.search("|".join(corpus_rules.keyword_list("daily_allowance_rate_patterns")), evidence_text)
     )
     is_domestic_expense_rate = _looks_like_domestic_expense_rate_table(evidence_text)
 
@@ -2331,7 +2333,7 @@ def _looks_like_noisy_header_text(text: str) -> bool:
     compact = re.sub(r"\s+", "", text)
     if not compact:
         return True
-    if compact in {"示範研究院", "DemoResearchInstitute"}:
+    if compact in get_corpus_rules().marker_list("noisy_header_exact"):
         return True
     if re.fullmatch(r"[年月日飛機其他雜費幣別匯率]+", compact):
         return True
@@ -2570,7 +2572,7 @@ def _infer_form_fields(rows: list[list[str]]) -> list[dict[str, Any]]:
                 continue
             if re.match(r"^\d+[.．、]", text):
                 continue
-            if text in {"一、出差核定", "二、費用核銷", "三、變更申請"}:
+            if text in get_corpus_rules().marker_list("form_section_skip_headings"):
                 continue
             lower_text = text.lower()
             if (
@@ -2610,25 +2612,12 @@ def _clean_inferred_field_label(value: str) -> str:
     text = re.sub(r"\s*\(Dept Specific$", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\.\s*If\b.*$", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\.\s*Note\b.*$", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"^CERTF?TION\s+", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"^Bill attach ConnexUC Itinerary\)\s*", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"^\(If Direct Bill attach ConnexUC Itinerary\)\s*", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"^Form\s+[A-Z0-9-]+\s+on behalf of the taxpayer.*$", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"Phone Number \(or Address\)\s+Phone Number \(or Address\)", "Phone Number or Address", text, flags=re.IGNORECASE)
-    text = re.sub(r"SSNBirthday", "SSN / Birthday", text, flags=re.IGNORECASE)
-    text = re.sub(r"\bWhose Records to be Disclosed NAME\b.*$", "Name", text, flags=re.IGNORECASE)
-    if re.search(r"\bsecond social security number\b", text, re.IGNORECASE):
-        text = "Second social security number"
-    elif re.search(r"\bfirst social security number\b", text, re.IGNORECASE):
-        text = "First social security number"
-    if re.search(r"\bGuardian representative \(explain\)", text, re.IGNORECASE):
-        text = "Guardian representative"
-    if re.search(r"\bAccounting Approval\b", text, re.IGNORECASE):
-        text = "Accounting Approval"
-    if re.search(r"\bPreferred Contact Info\b", text, re.IGNORECASE):
-        text = "Preferred Contact Info"
-    if re.search(r"\bAirfare Amount\b", text, re.IGNORECASE):
-        text = "Airfare Amount"
+    corpus_rules = get_corpus_rules()
+    for label_fix in corpus_rules.field_label_fixes:
+        text = label_fix.sub(text)
+    for label_override in corpus_rules.field_label_overrides:
+        if label_override.pattern.search(text):
+            text = label_override.replacement
     text = re.sub(r"\s+", " ", text).strip(" -/:：.")
     return text
 
@@ -2998,23 +2987,24 @@ def _records_from_form_output(
         for item in output.get("all_text", [])
         if str(item).strip()
     ])
-    if all_text_items and _should_emit_form_source_text_record(
-        language=language,
-        output=output,
+    supplementary_lines = _form_supplementary_fact_lines(
+        all_text_items,
         fields=fields,
-    ):
+        output=output,
+    )
+    if supplementary_lines:
         if language == "en":
-            source_text_section = "Source Extracted Text"
+            source_text_section = "Supplementary References & Values"
             source_text_content = (
                 f"Form: {form_name}. Section: {source_text_section}. "
-                f"Source-extracted visible text and checklist lines: "
-                f"{_compact_text_no_ellipsis('; '.join(all_text_items), 3200)}"
+                f"Supplementary references and values from source: "
+                f"{_compact_text_no_ellipsis('; '.join(supplementary_lines), 3200)}"
             )
         else:
-            source_text_section = "來源抽取文字"
+            source_text_section = "補充法規依據與數值"
             source_text_content = (
                 f"表單：{form_name}。區塊：{source_text_section}。"
-                f"來源可見文字與檢核項目：{_compact_text_no_ellipsis('；'.join(all_text_items), 3200)}"
+                f"補充法規依據與數值：{_compact_text_no_ellipsis('；'.join(supplementary_lines), 3200)}"
             )
         records.append(
             {
@@ -3106,15 +3096,31 @@ def _records_from_form_output(
     return records
 
 
-def _should_emit_form_source_text_record(
+def _form_supplementary_fact_lines(
+    all_text_items: list[str],
     *,
-    language: str,
-    output: dict[str, Any],
     fields: list[dict[str, Any]],
-) -> bool:
-    if language == "en" and (fields or str(output.get("filling_guide") or "").strip()):
-        return False
-    return True
+    output: dict[str, Any],
+) -> list[str]:
+    # Keep only source-text lines that carry a value fact (number/date/amount or
+    # legal reference like 第八條) the extracted fields/guide do not already
+    # cover. Blank field labels (申請日期： 年 月 日) carry no value and are
+    # dropped, so a well-extracted form sheds the noisy "來源抽取文字" dump while
+    # a legal reference or amount seen only in the OCR text survives — under a
+    # semantic heading, not a residue label.
+    from app.pipeline.repair_guard import extract_value_tokens
+
+    lines = [str(item).strip() for item in (all_text_items or []) if str(item).strip()]
+    if not lines:
+        return []
+    guide = str(output.get("filling_guide") or "")
+    covered = extract_value_tokens(guide + " " + " ".join(str(field.get("name") or "") for field in fields))
+    kept: list[str] = []
+    for line in lines:
+        line_values = extract_value_tokens(line)
+        if line_values and (line_values - covered):
+            kept.append(line)
+    return kept
 
 
 def _clean_evidence_text(value: str) -> str:
@@ -3854,12 +3860,12 @@ def _write_form_subdocument_outputs(
 
 def _looks_like_domestic_expense_rate_table(text: str) -> bool:
     compact = re.sub(r"\s+", "", text)
+    corpus_rules = get_corpus_rules()
     return bool(
-        ("職稱/職級別" in compact or "職稱職級別" in compact or "職級別" in compact)
-        and "交通費" in compact
-        and ("宿費" in compact or "住宿費" in compact)
-        and "雜費" in compact
-        and ("出差" in compact or "旅費" in compact)
+        any(term in compact for term in corpus_rules.keyword_list("domestic_rate_role_terms"))
+        and all(term in compact for term in corpus_rules.keyword_list("domestic_rate_required_terms"))
+        and any(term in compact for term in corpus_rules.keyword_list("domestic_rate_lodging_terms"))
+        and any(term in compact for term in corpus_rules.keyword_list("domestic_rate_travel_terms"))
     )
 
 

@@ -832,6 +832,17 @@ class NormalizeStage:
         finally:
             shutil.rmtree(convert_dir, ignore_errors=True)
 
+    @staticmethod
+    def source_page_text_lengths(pdf_path: Path) -> list[int]:
+        """Per-page char count of the PDF's own text layer (0 = scanned page)."""
+        if not HAS_PYMUPDF:
+            return []
+        try:
+            with fitz.open(pdf_path) as doc:
+                return [len((page.get_text() or "").strip()) for page in doc]
+        except Exception:
+            return []
+
     def _render_pdf_pages(
         self,
         pdf_path: Path,
@@ -865,6 +876,7 @@ class NormalizeStage:
                         width_px=pix.width,
                         height_px=pix.height,
                         page_image_path=f"assets/pages/p{page.page_idx:04d}.{self.PAGE_RENDER_FORMAT}",
+                        source_text_chars=len((pdf_page.get_text() or "").strip()),
                     )
                 )
 

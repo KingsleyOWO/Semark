@@ -1,0 +1,18 @@
+{
+  "doc": {
+    "name": "10-3（掃描件）",
+    "source_pdf": "/home/tierit/Desktop/vd/10-3.pdf",
+    "notes": "4-page scanned PDF with no extractable text layer (PyMuPDF returns whitespace only), so no visible title or labels could be verified. must_include and fact_tokens are intentionally left empty until OCR-verified facts are curated; only parser-residue checks and a minimal chunk-count floor apply."
+  },
+  "expectations": {
+    "must_include": [],
+    "must_not_include": [
+      "來源抽取文字",
+      "<table",
+      "$\\square$"
+    ],
+    "fact_tokens": [],
+    "min_chunk_count": 1,
+    "max_chunk_tokens": null
+  }
+}

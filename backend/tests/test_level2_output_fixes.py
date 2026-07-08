@@ -7,7 +7,7 @@ import unittest
 from app.models.document_ir import Block, BlockType, DocumentIR, EngineInfo, PageInfo, SourceInfo
 from app.pipeline.quality_gate import _check_structured_output_presence
 from app.pipeline.stages.package import PackageStage
-from app.pipeline.structured_rag import _should_emit_form_source_text_record
+from app.pipeline.structured_rag import _form_supplementary_fact_lines
 
 
 def _doc(blocks, filename="x.pdf"):
@@ -25,52 +25,40 @@ def _doc(blocks, filename="x.pdf"):
 
 
 class SourceTextDumpTest(unittest.TestCase):
-    def test_redundant_dump_is_skipped(self):
-        # All the dump's facts already live in the guide → it is pure noise
-        # ("來源抽取文字" residue) and must be dropped from the shipped form.
-        emit = _should_emit_form_source_text_record(
-            language="zh-TW",
-            output={
-                "all_text": ["申請日期 114.12.11", "金額 500"],
-                "filling_guide": "版本日期 114.12.11，核銷金額 500 元由申請人填寫。",
-            },
-            fields=[{"name": "申請人"}],
-        )
-        self.assertFalse(emit)
-
-    def test_dump_with_uncovered_fact_is_kept(self):
-        # NT$100,000 appears only in the OCR text, not in fields/guide —
-        # dropping the dump would lose a real fact, so it must be kept.
-        emit = _should_emit_form_source_text_record(
-            language="zh-TW",
-            output={
-                "all_text": ["財力證明 NT$100,000"],
-                "filling_guide": "由申請人填寫基本資料。",
-            },
-            fields=[{"name": "申請人"}],
-        )
-        self.assertTrue(emit)
-
-    def test_no_all_text_is_not_emitted(self):
-        self.assertFalse(
-            _should_emit_form_source_text_record(
-                language="zh-TW", output={"all_text": [], "filling_guide": "x"}, fields=[{"name": "a"}]
-            )
+    def _lines(self, all_text, guide="", fields=("申請人",)):
+        return _form_supplementary_fact_lines(
+            all_text,
+            fields=[{"name": n} for n in fields],
+            output={"all_text": all_text, "filling_guide": guide},
         )
 
-    def test_blank_field_labels_do_not_keep_dump(self):
-        # A blank form's dump is just empty field labels (申請日期：年 月 日) —
-        # structure, not values. With dates covered by the guide it must be
-        # skipped, not retained as "來源抽取文字" noise.
-        emit = _should_emit_form_source_text_record(
-            language="zh-TW",
-            output={
-                "all_text": ["申請單位：", "申請日期： 年 月 日", "姓名(員工編號)： ( )", "版本 114.12.11"],
-                "filling_guide": "本表單版本日期 114.12.11，由申請單位與申請人填寫。",
-            },
-            fields=[{"name": "申請人"}, {"name": "申請單位"}],
+    def test_redundant_lines_are_dropped(self):
+        # Every value already in the guide → nothing worth keeping (no residue).
+        kept = self._lines(
+            ["申請日期 114.12.11", "金額 500"],
+            guide="版本日期 114.12.11，核銷金額 500 元由申請人填寫。",
         )
-        self.assertFalse(emit)
+        self.assertEqual(kept, [])
+
+    def test_uncovered_amount_line_is_kept(self):
+        # NT$100,000 is only in the OCR text — its line must survive.
+        kept = self._lines(["財力證明 NT$100,000"], guide="由申請人填寫基本資料。")
+        self.assertEqual(kept, ["財力證明 NT$100,000"])
+
+    def test_uncovered_legal_reference_line_is_kept(self):
+        # 第八條 the field extractor missed must survive (the real 2-12 case).
+        kept = self._lines(["依本院人員訓練辦法第八條規定辦理"], guide="由申請人填寫。")
+        self.assertEqual(kept, ["依本院人員訓練辦法第八條規定辦理"])
+
+    def test_blank_field_labels_are_dropped_but_facts_kept(self):
+        kept = self._lines(
+            ["申請單位：", "申請日期： 年 月 日", "姓名(員工編號)： ( )", "依第八條辦理", "版本 114.12.11"],
+            guide="本表單版本日期 114.12.11 由申請單位填寫。",
+        )
+        self.assertEqual(kept, ["依第八條辦理"])  # blank labels + covered date dropped
+
+    def test_no_all_text_returns_empty(self):
+        self.assertEqual(self._lines([], guide="x"), [])
 
 
 # --- B2: heading_path on the structured-repair/fallback chunk path -----------

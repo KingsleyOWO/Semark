@@ -142,6 +142,13 @@ async def run_quality_gate(
 
     candidates = _build_vlm_audit_candidates(document_ir, issues, max_candidates=max_vlm_audits)
     vlm_audits: list[dict[str, Any]] = []
+    # The VLM audit compares the page image against the text as ground truth;
+    # a text-only reviewer (image disabled) cannot do it, so skip rather than
+    # 404 on every page and raise a spurious vlm_audit_failed.
+    from app.config import settings as _app_settings
+
+    if not _app_settings.review_send_page_image:
+        candidates = []
     if vlm_adapter is not None and candidates:
         for candidate in candidates[:max_vlm_audits]:
             audit = await _run_vlm_audit(

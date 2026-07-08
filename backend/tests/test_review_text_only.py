@@ -40,5 +40,32 @@ class ReviewImageToggleTest(unittest.TestCase):
             self.assertFalse(spy_off.called)
 
 
+class AuditSkipTest(unittest.IsolatedAsyncioTestCase):
+    async def test_vlm_audit_skipped_for_text_only_reviewer(self):
+        from app.pipeline import quality_gate
+
+        doc = _doc_with_page_image()
+
+        class _Adapter:
+            def __init__(self):
+                self.called = False
+
+            async def enrich(self, **kwargs):
+                self.called = True
+                return {"success": False, "error": "should not be called"}
+
+        adapter = _Adapter()
+        with mock.patch("app.config.settings.review_send_page_image", False), \
+                mock.patch.object(quality_gate, "_build_vlm_audit_candidates",
+                                  return_value=[{"page_idx": 0, "page_image_path": "assets/pages/p0000.png", "reasons": []}]):
+            result = await quality_gate.run_quality_gate(
+                document_ir=doc, source_md="x" * 60, assets=[],
+                structured_output=None, enrichments={},
+                run_path=None, vlm_adapter=adapter,
+            )
+        self.assertFalse(adapter.called)
+        self.assertEqual(result.vlm_audits, [])
+
+
 if __name__ == "__main__":
     unittest.main()

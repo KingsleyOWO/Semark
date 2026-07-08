@@ -18,7 +18,12 @@ from __future__ import annotations
 import re
 from typing import Any
 
-__all__ = ["MIN_SURVIVAL_RATIO", "extract_fact_tokens", "repair_preserves_facts"]
+__all__ = [
+    "MIN_SURVIVAL_RATIO",
+    "extract_fact_tokens",
+    "extract_value_tokens",
+    "repair_preserves_facts",
+]
 
 MIN_SURVIVAL_RATIO = 0.9
 
@@ -77,6 +82,21 @@ def extract_fact_tokens(text: str) -> set[str]:
         label = match.group(1).strip(_LABEL_STRIP_CHARS)
         if label and _CJK_CHAR_RE.search(label):
             tokens.add(label)
+    for match in _LEGAL_REF_RE.finditer(normalized):
+        tokens.add(f"第{match.group(1)}{match.group(2)}")
+    return tokens
+
+
+def extract_value_tokens(text: str) -> set[str]:
+    """Extract only *value* facts — numbers/dates/amounts/percentages and legal
+    references — excluding CJK field labels. A blank form's labels (申請日期：)
+    are structure already captured as fields, not values worth preserving, so
+    the source-text-dump coverage decision must not treat them as facts.
+    """
+    normalized = _normalize(text)
+    tokens: set[str] = set()
+    for match in _NUMBER_RE.finditer(normalized):
+        tokens.add(match.group(0))
     for match in _LEGAL_REF_RE.finditer(normalized):
         tokens.add(f"第{match.group(1)}{match.group(2)}")
     return tokens

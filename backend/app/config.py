@@ -312,6 +312,9 @@ class Settings(BaseSettings):
     review_vlm_base_url: str | None = Field(default=None, validation_alias=semark_env("REVIEW_VLM_BASE_URL"))
     review_vlm_api_key: str | None = Field(default=None, validation_alias=semark_env("REVIEW_VLM_API_KEY"))
     review_vlm_model: str | None = Field(default=None, validation_alias=semark_env("REVIEW_VLM_MODEL"))
+    # Text-only reviewer models (e.g. DeepSeek-V4) reject image input; set false
+    # so the semantic-repair reviewer runs on text evidence alone.
+    review_send_page_image: bool = Field(default=True, validation_alias=semark_env("REVIEW_SEND_PAGE_IMAGE"))
 
     @property
     def store_path(self) -> Path:

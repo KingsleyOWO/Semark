@@ -3312,6 +3312,11 @@ class PackageStage:
         Mirrors the evidence-page selection of `_semantic_repair_source_evidence`
         and returns None when no rendered page image exists (text-only fallback).
         """
+        from app.config import settings as app_settings
+
+        if not app_settings.review_send_page_image:
+            # Text-only reviewer (e.g. DeepSeek-V4 rejects image input).
+            return None
 
         selected_pages = list(page_indices) or self._document_page_indices(document_ir)[:4]
         for page_idx in selected_pages:

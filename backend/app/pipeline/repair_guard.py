@@ -18,7 +18,12 @@ from __future__ import annotations
 import re
 from typing import Any
 
-__all__ = ["MIN_SURVIVAL_RATIO", "extract_fact_tokens", "repair_preserves_facts"]
+__all__ = [
+    "MIN_SURVIVAL_RATIO",
+    "extract_fact_tokens",
+    "extract_value_tokens",
+    "repair_preserves_facts",
+]
 
 MIN_SURVIVAL_RATIO = 0.9
 
@@ -82,6 +87,21 @@ def extract_fact_tokens(text: str) -> set[str]:
     return tokens
 
 
+def extract_value_tokens(text: str) -> set[str]:
+    """Extract only *value* facts — numbers/dates/amounts/percentages and legal
+    references — excluding CJK field labels. A blank form's labels (申請日期：)
+    are structure already captured as fields, not values worth preserving, so
+    the source-text-dump coverage decision must not treat them as facts.
+    """
+    normalized = _normalize(text)
+    tokens: set[str] = set()
+    for match in _NUMBER_RE.finditer(normalized):
+        tokens.add(match.group(0))
+    for match in _LEGAL_REF_RE.finditer(normalized):
+        tokens.add(f"第{match.group(1)}{match.group(2)}")
+    return tokens
+
+
 def _token_survives(token: str, repaired_normalized: str, repaired_compact: str) -> bool:
     if token in repaired_normalized:
         return True
@@ -104,7 +124,13 @@ def repair_preserves_facts(
     repair. Documents without fact tokens always pass.
     """
 
-    original_tokens = extract_fact_tokens(original_md)
+    from app.pipeline.corpus_rules import get_rules
+
+    # Template scaffolding labels (主要欄位分組:, 常見查詢關鍵字:, …) are
+    # renderer output, not document facts; the reviewer is explicitly asked
+    # to remove template filler, so their removal must not count as loss.
+    template_labels = set(get_rules().marker_list("template_section_labels"))
+    original_tokens = extract_fact_tokens(original_md) - template_labels
     evidence_tokens = extract_fact_tokens(evidence_text)
     repaired_normalized = _normalize(repaired_md)
     repaired_compact = _compact(repaired_normalized)

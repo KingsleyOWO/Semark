@@ -237,6 +237,34 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_parser.add_argument("--sample-id", required=True)
     run_parser.add_argument("--parser-id", default="mineru3_pipeline")
+    golden_parser = subparsers.add_parser(
+        "golden",
+        help="Score a run's outputs directory against a golden manifest",
+    )
+    golden_parser.add_argument(
+        "--manifest",
+        type=Path,
+        required=True,
+        help="Golden manifest JSON path (see backend/examples/eval/golden/)",
+    )
+    golden_parser.add_argument(
+        "--run-dir",
+        type=Path,
+        required=True,
+        help="Run outputs directory (<run>/outputs) to score",
+    )
+    golden_parser.add_argument(
+        "--baseline-dir",
+        type=Path,
+        default=None,
+        help="Optional baseline outputs directory to diff the run against",
+    )
+    golden_parser.add_argument(
+        "--json",
+        type=Path,
+        default=None,
+        help="Optional path for the JSON report",
+    )
     return parser
 
 
@@ -310,6 +338,26 @@ def main(argv: list[str] | None = None) -> int:
         print(f"parser run json: {paths['json']}")
         print(f"parser run aggregate json: {paths['aggregate_json']}")
         print(f"parser run markdown: {paths['markdown']}")
+
+    if args.command == "golden":
+        from app.eval.golden import (
+            compare_runs,
+            load_manifest,
+            render_comparison_markdown,
+            render_markdown,
+            score_run,
+        )
+
+        manifest = load_manifest(args.manifest)
+        report = score_run(manifest, args.run_dir)
+        print(render_markdown(report))
+        comparison = None
+        if args.baseline_dir is not None:
+            comparison = compare_runs(manifest, args.baseline_dir, args.run_dir)
+            print(render_comparison_markdown(comparison))
+        if args.json is not None:
+            write_json(args.json, {"report": report.to_dict(), "comparison": comparison})
+            print(f"golden json: {args.json}")
 
     return 0
 

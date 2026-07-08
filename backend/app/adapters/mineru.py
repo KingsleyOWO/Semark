@@ -6,6 +6,7 @@ Wraps the `mineru` CLI tool and handles its output.
 
 import asyncio
 import json
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -13,6 +14,13 @@ from typing import Any
 from urllib.parse import urlparse
 
 from app.config import MinerUConfig, settings
+
+logger = logging.getLogger(__name__)
+
+# MinerU's `--effort` flag only applies to the hybrid-* backends
+# (hybrid-engine / hybrid-http-client; "hybrid-auto-engine" is a legacy
+# alias that mineru >= 3.4 normalizes to "hybrid-engine").
+_HYBRID_BACKEND_PREFIX = "hybrid-"
 
 
 @dataclass
@@ -176,6 +184,18 @@ class MinerUAdapter:
         # Backend
         if config.backend:
             args.extend(["-b", config.backend.value])
+
+        # Hybrid-only quality knob (`--effort medium|high`, mineru >= 3.3).
+        # None means "let MinerU use its own default (medium)".
+        if config.effort is not None:
+            if config.backend and config.backend.value.startswith(_HYBRID_BACKEND_PREFIX):
+                args.extend(["--effort", config.effort.value])
+            else:
+                logger.debug(
+                    "Ignoring MinerU effort=%s: backend %r is not a hybrid-* variant",
+                    config.effort.value,
+                    config.backend.value if config.backend else None,
+                )
 
         if config.vlm_url:
             args.extend(["-u", config.vlm_url])

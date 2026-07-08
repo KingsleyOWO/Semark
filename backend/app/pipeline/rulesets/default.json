@@ -1,0 +1,217 @@
+{
+  "title_fixes": [
+    {
+      "pattern": "\\b(?:Form\\s+)?(4506-T\\s+Request for Transcript of Tax Return)(?:\\s+Form)?\\b",
+      "replacement": "Form \\1",
+      "flags": "IGNORECASE"
+    },
+    {
+      "pattern": "([A-Z][A-Za-z]+ Department of Revenue\\s+20\\d{2}\\s+Form\\s+[A-Z0-9-]+\\s+[A-Za-z ]{8,80}?Return)",
+      "replacement": "\\1",
+      "flags": ""
+    }
+  ],
+  "text_fixes": [
+    {
+      "pattern": "\\bNR(?=Part-year\\b)",
+      "replacement": "NR ",
+      "flags": ""
+    },
+    {
+      "pattern": "(IL-\\d{4}-V)(Staple)",
+      "replacement": "\\1 \\2",
+      "flags": ""
+    },
+    {
+      "pattern": "(?<=[a-z])(?=Firm[’']s phone)",
+      "replacement": " ",
+      "flags": ""
+    },
+    {
+      "pattern": "\\s+DR\\.?\\s+AP\\.?\\s+RR\\s+DC\\s+IR\\s+ID\\s*$",
+      "replacement": "",
+      "flags": ""
+    }
+  ],
+  "field_label_fixes": [
+    {
+      "pattern": "^CERTF?TION\\s+",
+      "replacement": "",
+      "flags": "IGNORECASE"
+    },
+    {
+      "pattern": "^Bill attach ConnexUC Itinerary\\)\\s*",
+      "replacement": "",
+      "flags": "IGNORECASE"
+    },
+    {
+      "pattern": "^\\(If Direct Bill attach ConnexUC Itinerary\\)\\s*",
+      "replacement": "",
+      "flags": "IGNORECASE"
+    },
+    {
+      "pattern": "^Form\\s+[A-Z0-9-]+\\s+on behalf of the taxpayer.*$",
+      "replacement": "",
+      "flags": "IGNORECASE"
+    },
+    {
+      "pattern": "Phone Number \\(or Address\\)\\s+Phone Number \\(or Address\\)",
+      "replacement": "Phone Number or Address",
+      "flags": "IGNORECASE"
+    },
+    {
+      "pattern": "SSNBirthday",
+      "replacement": "SSN / Birthday",
+      "flags": "IGNORECASE"
+    },
+    {
+      "pattern": "\\bWhose Records to be Disclosed NAME\\b.*$",
+      "replacement": "Name",
+      "flags": "IGNORECASE"
+    }
+  ],
+  "field_label_overrides": [
+    {
+      "pattern": "\\bsecond social security number\\b",
+      "replacement": "Second social security number",
+      "flags": "IGNORECASE"
+    },
+    {
+      "pattern": "\\bfirst social security number\\b",
+      "replacement": "First social security number",
+      "flags": "IGNORECASE"
+    },
+    {
+      "pattern": "\\bGuardian representative \\(explain\\)",
+      "replacement": "Guardian representative",
+      "flags": "IGNORECASE"
+    },
+    {
+      "pattern": "\\bAccounting Approval\\b",
+      "replacement": "Accounting Approval",
+      "flags": "IGNORECASE"
+    },
+    {
+      "pattern": "\\bPreferred Contact Info\\b",
+      "replacement": "Preferred Contact Info",
+      "flags": "IGNORECASE"
+    },
+    {
+      "pattern": "\\bAirfare Amount\\b",
+      "replacement": "Airfare Amount",
+      "flags": "IGNORECASE"
+    }
+  ],
+  "visual_label_map": {
+    "Government\\s+Agency\\s+A\\s*\\(甲\\)": "政府機關甲",
+    "政府機關\\s*甲\\s*\\(Government\\s+Agency\\s+A\\)": "政府機關甲",
+    "Vendor\\s+B\\s*\\(乙\\)": "廠商乙",
+    "廠商\\s*乙\\s*\\(Vendor\\s+B\\)": "廠商乙",
+    "Lecturer\\s+B\\s*\\(乙\\)": "講座乙",
+    "講座\\s*乙\\s*\\(Lecturer\\s+B\\)": "講座乙",
+    "Authorize\\s*\\(授權\\)": "授權",
+    "Entrusted(?:/Contracted)?\\s*\\(委辦\\)": "委辦",
+    "No\\s+need\\s+to\\s+deliver\\s*\\(不須交付\\)": "不須交付",
+    "不須交付\\s*\\(No\\s+need\\s+to\\s+deliver\\)": "不須交付"
+  },
+  "flow_role_terms": [
+    "受理單位(人事)",
+    "被害人",
+    "行為人之雇主",
+    "院長",
+    "調查小組",
+    "處理單位",
+    "申訴人",
+    "被申訴人",
+    "地方主管機關"
+  ],
+  "document_markers": {
+    "table_collection_title_markers": [
+      "檔案分類及保存年限區分表",
+      "保存年限區分表"
+    ],
+    "noisy_header_exact": [
+      "示範研究院",
+      "DemoResearchInstitute"
+    ],
+    "form_section_skip_headings": [
+      "一、出差核定",
+      "二、費用核銷",
+      "三、變更申請"
+    ],
+    "title_topic_score_terms": [
+      "檔案分類",
+      "保存年限",
+      "性騷擾",
+      "申訴處理",
+      "著作權",
+      "補助案"
+    ],
+    "title_org_score_terms": [
+      "行政院",
+      "政府",
+      "文化局",
+      "智慧財產局",
+      "台灣",
+      "臺灣",
+      "花蓮縣",
+      "臺中市",
+      "台中市"
+    ],
+    "template_section_labels": [
+      "主要欄位分組",
+      "來源可見文字與檢核項目",
+      "常見查詢關鍵字",
+      "用途與填寫重點",
+      "注意事項包含",
+      "申請/基本資料",
+      "簽核/用印",
+      "表單欄位",
+      "費用/報支資訊",
+      "進修/訓練資訊",
+      "保證人/商號資料",
+      "來源",
+      "表單名稱",
+      "表單用途",
+      "適用場景",
+      "表單結構",
+      "填寫重點",
+      "注意事項",
+      "來源抽取文字",
+      "文件類型"
+    ]
+  },
+  "plan_keywords": {
+    "daily_allowance_amount_terms": [
+      "生活費",
+      "日支"
+    ],
+    "daily_allowance_location_terms": [
+      "地區",
+      "國家",
+      "城市"
+    ],
+    "daily_allowance_rate_patterns": [
+      "日支[數数]?[額额]",
+      "美元",
+      "USD"
+    ],
+    "domestic_rate_role_terms": [
+      "職稱/職級別",
+      "職稱職級別",
+      "職級別"
+    ],
+    "domestic_rate_required_terms": [
+      "交通費",
+      "雜費"
+    ],
+    "domestic_rate_lodging_terms": [
+      "宿費",
+      "住宿費"
+    ],
+    "domestic_rate_travel_terms": [
+      "出差",
+      "旅費"
+    ]
+  }
+}

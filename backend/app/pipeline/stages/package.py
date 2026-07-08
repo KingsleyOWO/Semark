@@ -29,6 +29,7 @@ from app.models.org_chart import (
     OrgGroup,
     OrgNode,
 )
+from app.pipeline.corpus_rules import get_rules as get_corpus_rules
 from app.pipeline.package_utils import (
     caption_text,
     clean_html_table,
@@ -1429,7 +1430,7 @@ class PackageStage:
         append: bool = False,
     ) -> None:
         target_path.parent.mkdir(parents=True, exist_ok=True)
-        sections = self._split_repair_markdown_into_chunks(markdown)
+        sections = self._heading_sections(markdown)
         if not sections:
             return
         safe_id = re.sub(r"[^0-9A-Za-z_:-]+", "_", str(subdoc_id or form_id or "structured_rag")).strip("_") or "structured_rag"
@@ -1441,7 +1442,7 @@ class PackageStage:
         with open(target_path, mode, encoding="utf-8") as f:
             if needs_leading_newline:
                 f.write("\n")
-            for section_idx, section in enumerate(sections):
+            for section_idx, (section, heading_path) in enumerate(sections):
                 chunk = {
                     "chunk_id": f"sr_fallback_{safe_id}_{section_idx:04d}",
                     "doc_id": str(subdoc_id or form_id or document_ir.doc_id),
@@ -1459,6 +1460,7 @@ class PackageStage:
                         "subdoc_id": subdoc_id,
                         "logical_doc_id": logical_doc_id,
                         "parent_doc_id": document_ir.doc_id,
+                        "heading_path": heading_path,
                         "auto_rag_ready": False,
                         "needs_review": True,
                         "semantic_repair_status": "fallback_retained",
@@ -2043,9 +2045,9 @@ class PackageStage:
         chunks: list[dict[str, Any]] = []
         for item in repaired_items:
             form_id = str(item.get("form_id") or "semantic_repair")
-            sections = self._split_repair_markdown_into_chunks(str(item.get("markdown") or ""))
+            sections = self._heading_sections(str(item.get("markdown") or ""))
             page_indices = self._safe_page_indices(item.get("page_indices"))
-            for section_idx, section in enumerate(sections):
+            for section_idx, (section, heading_path) in enumerate(sections):
                 chunks.append(
                     {
                         "chunk_id": f"sr_repair_{form_id}_{section_idx:04d}",
@@ -2064,6 +2066,7 @@ class PackageStage:
                             "subdoc_id": item.get("subdoc_id"),
                             "logical_doc_id": item.get("logical_doc_id"),
                             "parent_doc_id": document_ir.doc_id,
+                            "heading_path": heading_path,
                             "repaired_by": "review_vlm",
                             "applied_repairs": item.get("applied_repairs", []),
                             "confidence": item.get("confidence"),
@@ -2205,36 +2208,69 @@ class PackageStage:
                 return True
         return False
 
-    def _split_repair_markdown_into_chunks(self, markdown: str, max_chars: int = 2400) -> list[str]:
+    @staticmethod
+    def _heading_sections(markdown: str, max_chars: int = 2400) -> list[tuple[str, list[str]]]:
+        """Split repaired/fallback markdown into chunk-sized sections, each
+        tagged with its heading path (ancestor headings down to the section's
+        own heading) so retrievers can situate a chunk. Sub-splits of an
+        oversized section inherit that section's path.
+        """
         lines = markdown.strip().splitlines()
-        sections: list[str] = []
+        stack: list[tuple[int, str]] = []  # (level, title) ancestor chain
+
+        def path_now() -> list[str]:
+            return [title for _, title in stack]
+
+        def push(line: str) -> None:
+            m = re.match(r"^(#{1,6})\s+(.*)$", line)
+            if not m:
+                return
+            level = len(m.group(1))
+            title = m.group(2).strip()
+            while stack and stack[-1][0] >= level:
+                stack.pop()
+            stack.append((level, title))
+
+        sections: list[tuple[str, list[str]]] = []
         current: list[str] = []
+        current_path: list[str] = []
         for line in lines:
-            if re.match(r"^#{1,3}\s+", line) and current and len("\n".join(current)) >= 240:
-                sections.append("\n".join(current).strip())
+            is_split_heading = bool(re.match(r"^#{1,3}\s+", line))
+            if is_split_heading and current and len("\n".join(current)) >= 240:
+                sections.append(("\n".join(current).strip(), current_path))
+                push(line)
                 current = [line]
+                current_path = path_now()
             else:
+                if re.match(r"^#{1,6}\s+", line):
+                    push(line)
+                    # Track the deepest heading context within the section so a
+                    # chunk holding "## 第一條 …" is tagged […,第一條], not just root.
+                    current_path = path_now()
                 current.append(line)
         if current:
-            sections.append("\n".join(current).strip())
+            sections.append(("\n".join(current).strip(), current_path))
 
-        chunks: list[str] = []
-        for section in sections:
+        out: list[tuple[str, list[str]]] = []
+        for section, path in sections:
             if len(section) <= max_chars:
-                chunks.append(section)
+                out.append((section, path))
                 continue
             paragraphs = re.split(r"\n\s*\n", section)
             buffer: list[str] = []
             for paragraph in paragraphs:
                 candidate = "\n\n".join(buffer + [paragraph]).strip()
                 if buffer and len(candidate) > max_chars:
-                    chunks.append("\n\n".join(buffer).strip())
+                    out.append(("\n\n".join(buffer).strip(), path))
                     buffer = [paragraph]
                 else:
                     buffer.append(paragraph)
             if buffer:
-                chunks.append("\n\n".join(buffer).strip())
-        return [chunk for chunk in chunks if chunk]
+                out.append(("\n\n".join(buffer).strip(), path))
+        return [(section, path) for section, path in out if section]
+
+    def _split_repair_markdown_into_chunks(self, markdown: str, max_chars: int = 2400) -> list[str]:
+        return [section for section, _ in self._heading_sections(markdown, max_chars)]
 
     @staticmethod
     def _safe_page_indices(value: Any) -> list[int]:
@@ -2698,7 +2734,7 @@ class PackageStage:
         title = self._clean_export_title(value)
         title = re.sub(r"\s*(?:第\s*\d+\s*頁|Page\s*\d+)\s*(?:表格|Table)\s*\d+\s*$", "", title, flags=re.IGNORECASE)
         title = re.sub(r"\s*(?:表格|Table)\s*\d+\s*$", "", title, flags=re.IGNORECASE)
-        for marker in ("檔案分類及保存年限區分表", "保存年限區分表"):
+        for marker in get_corpus_rules().marker_list("table_collection_title_markers"):
             idx = title.find(marker)
             if idx >= 0:
                 title = title[: idx + len(marker)]
@@ -3127,10 +3163,8 @@ class PackageStage:
         text = re.sub(r"^(\s*[-*]\s+)(\d{1,3})([A-Z])", r"\1\2 \3", text)
         text = re.sub(r"^(\s*)(\d{1,3})([A-Z])", r"\1\2 \3", text)
         text = re.sub(r"^(\s*[a-z])(?=(Check|direct deposit|paper check)\b)", r"\1 ", text, flags=re.IGNORECASE)
-        text = re.sub(r"\bNR(?=Part-year\b)", "NR ", text)
-        text = re.sub(r"(IL-\d{4}-V)(Staple)", r"\1 \2", text)
-        text = re.sub(r"(?<=[a-z])(?=Firm[’']s phone)", " ", text)
-        text = re.sub(r"\s+DR\.?\s+AP\.?\s+RR\s+DC\s+IR\s+ID\s*$", "", text)
+        for text_fix in get_corpus_rules().text_fixes:
+            text = text_fix.sub(text)
         text = re.sub(r"[ \t]{2,}", " ", text)
         return text.rstrip()
 
@@ -3327,19 +3361,10 @@ class PackageStage:
         text = re.sub(r"\s+", " ", source_md or "").strip()
         if not text:
             return ""
-        transcript_match = re.search(
-            r"\b(?:Form\s+)?(4506-T\s+Request for Transcript of Tax Return)(?:\s+Form)?\b",
-            text,
-            re.IGNORECASE,
-        )
-        if transcript_match:
-            return self._clean_export_title(f"Form {transcript_match.group(1)}")
-        english_match = re.search(
-            r"([A-Z][A-Za-z]+ Department of Revenue\s+20\d{2}\s+Form\s+[A-Z0-9-]+\s+[A-Za-z ]{8,80}?Return)",
-            text,
-        )
-        if english_match:
-            return self._clean_export_title(english_match.group(1))
+        for title_fix in get_corpus_rules().title_fixes:
+            title_match = title_fix.pattern.search(text)
+            if title_match:
+                return self._clean_export_title(title_match.expand(title_fix.replacement))
         title_candidate = self._best_source_title_candidate(source_md)
         if title_candidate:
             return title_candidate
@@ -3402,9 +3427,11 @@ class PackageStage:
         for term in title_terms:
             if term in compact:
                 score += 18
-        if re.search(r"(檔案分類|保存年限|性騷擾|申訴處理|著作權|補助案)", compact):
+        topic_terms = get_corpus_rules().marker_list("title_topic_score_terms")
+        if topic_terms and re.search("(" + "|".join(topic_terms) + ")", compact):
             score += 12
-        if re.search(r"(行政院|政府|文化局|智慧財產局|台灣|臺灣|花蓮縣|臺中市|台中市)", compact):
+        org_terms = get_corpus_rules().marker_list("title_org_score_terms")
+        if org_terms and re.search("(" + "|".join(org_terms) + ")", compact):
             score += 6
         lowered = cls._clean_export_title(title).lower()
         english_terms = (
@@ -3729,19 +3756,7 @@ class PackageStage:
     @staticmethod
     def _normalize_zh_visual_label(value: str) -> str:
         text = str(value or "")
-        replacements = [
-            (r"Government\s+Agency\s+A\s*\(甲\)", "政府機關甲"),
-            (r"政府機關\s*甲\s*\(Government\s+Agency\s+A\)", "政府機關甲"),
-            (r"Vendor\s+B\s*\(乙\)", "廠商乙"),
-            (r"廠商\s*乙\s*\(Vendor\s+B\)", "廠商乙"),
-            (r"Lecturer\s+B\s*\(乙\)", "講座乙"),
-            (r"講座\s*乙\s*\(Lecturer\s+B\)", "講座乙"),
-            (r"Authorize\s*\(授權\)", "授權"),
-            (r"Entrusted(?:/Contracted)?\s*\(委辦\)", "委辦"),
-            (r"No\s+need\s+to\s+deliver\s*\(不須交付\)", "不須交付"),
-            (r"不須交付\s*\(No\s+need\s+to\s+deliver\)", "不須交付"),
-        ]
-        for pattern, replacement in replacements:
+        for pattern, replacement in get_corpus_rules().visual_label_map.items():
             text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
         text = re.sub(r"\((?:yes|y)\)", "（是）", text, flags=re.IGNORECASE)
         text = re.sub(r"\((?:no|n)\)", "（否）", text, flags=re.IGNORECASE)
@@ -3824,17 +3839,7 @@ class PackageStage:
 
         roles: list[str] = []
         if language != "en":
-            role_candidates = (
-                "受理單位(人事)",
-                "被害人",
-                "行為人之雇主",
-                "院長",
-                "調查小組",
-                "處理單位",
-                "申訴人",
-                "被申訴人",
-                "地方主管機關",
-            )
+            role_candidates = get_corpus_rules().flow_role_terms
             role_source = " ".join(nodes + all_text_lines)
             for role in role_candidates:
                 if role in role_source and role not in roles:

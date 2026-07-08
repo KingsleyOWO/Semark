@@ -1,0 +1,43 @@
+{
+  "doc": {
+    "name": "示範研究院人員請假辦法",
+    "source_pdf": "/data/golden/示範研究院人員請假辦法.pdf",
+    "notes": "12-page text-layer regulation (26 articles). Fact tokens verified against the PDF text layer via PyMuPDF."
+  },
+  "expectations": {
+    "must_include": [
+      "示範研究院人員請假辦法",
+      "特別休假",
+      "普通傷病假"
+    ],
+    "must_not_include": [
+      "來源抽取文字",
+      "<table",
+      "$\\square$"
+    ],
+    "fact_tokens": [
+      "示範研究院人員請假辦法",
+      "範-03",
+      "112.06.20",
+      "112.08.01",
+      "80.03.15",
+      "110.05.04",
+      "本院人員管理辦法第十九條",
+      "第二十二條",
+      "每年合計給假天數十八日",
+      "婚假八日",
+      "產假八週",
+      "產檢假七日",
+      "喪假十四日",
+      "加至三十四日為止",
+      "法定特別休假",
+      "福利假",
+      "遞延特別休假",
+      "防災假",
+      "天然災害停止辦公及上課作業辦法",
+      "行政機關辦公日曆表"
+    ],
+    "min_chunk_count": 5,
+    "max_chunk_tokens": 1024
+  }
+}

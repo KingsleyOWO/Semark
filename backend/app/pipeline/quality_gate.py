@@ -230,6 +230,14 @@ def _structure_signals(document_ir: DocumentIR, enrichments: dict[str, dict[str,
         if kind.startswith(("form", "figure")):
             signals.append("enriched_image_block")
             break
+    for block_id, enrichment in (enrichments or {}).items():
+        if not isinstance(enrichment, dict):
+            continue
+        # Full-page form/scan enrichments are keyed form_page_* and have no IR
+        # image block, but they are hard evidence of structured content.
+        if str(block_id).startswith("form_page_") and str(enrichment.get("kind") or "").startswith("form"):
+            signals.append("form_page_enrichment")
+            break
     if is_form_like_document(document_ir):
         signals.append("form_like_text")
     return signals

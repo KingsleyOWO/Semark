@@ -3101,8 +3101,26 @@ def _should_emit_form_source_text_record(
     output: dict[str, Any],
     fields: list[dict[str, Any]],
 ) -> bool:
-    if language == "en" and (fields or str(output.get("filling_guide") or "").strip()):
+    # The raw source-text dump ("來源抽取文字") is parser residue that makes
+    # shipped forms look dumpy, but it is also the fallback for facts the field
+    # extractor missed. Emit it only when it carries facts the fields/guide do
+    # not already cover — so well-extracted forms stay clean while nothing like
+    # an amount seen only in the OCR text is silently dropped.
+    from app.pipeline.repair_guard import extract_fact_tokens
+
+    all_text_items = [str(item).strip() for item in (output.get("all_text") or []) if str(item).strip()]
+    if not all_text_items:
         return False
+
+    guide = str(output.get("filling_guide") or "")
+    covered_text = guide + " " + " ".join(str(field.get("name") or "") for field in fields)
+    dump_facts = extract_fact_tokens(" ".join(all_text_items))
+    covered_facts = extract_fact_tokens(covered_text)
+
+    if dump_facts and not (dump_facts - covered_facts):
+        return False  # every fact already structured — the dump is pure noise
+    if not dump_facts and (fields or guide.strip()):
+        return False  # no facts to preserve and we already have structure
     return True
 
 

@@ -74,8 +74,14 @@ class VLMResponseParsingTest(unittest.TestCase):
 
 
     def test_form_token_cap_allows_complex_forms_when_configured_high(self):
+        # form_asset is a long-output task: a raised global budget lifts it
+        # (ceilinged at 32768) so complex forms are not truncated.
         adapter = VLMAdapter(VLMConfig(decode_params=VLMDecodeParams(max_tokens=128000)))
 
+        self.assertEqual(adapter._max_tokens_for_kind("form_asset"), 32768)
+
+    def test_form_token_cap_defaults_to_8192(self):
+        adapter = VLMAdapter(VLMConfig())
         self.assertEqual(adapter._max_tokens_for_kind("form_asset"), 8192)
 
 
@@ -178,11 +184,12 @@ The victim files a complaint, then the case is routed by scenario and party rela
 
 
     def test_semantic_repair_token_cap_allows_rewrite(self):
-        adapter = VLMAdapter(VLMConfig(decode_params=VLMDecodeParams(max_tokens=128000)))
-
-        # 8192, not 12288: larger budgets were unfinishable within the request
-        # timeout on thinking-model reviewers (observed live on a 35B MoE).
-        self.assertEqual(adapter._max_tokens_for_kind("semantic_repair"), 8192)
+        # Default budget stays 8192 (local thinking reviewers time out above it),
+        # but an operator-raised budget lifts semantic_repair for fast reasoning
+        # reviewers (e.g. DeepSeek-V4 that spend most of the budget reasoning).
+        self.assertEqual(VLMAdapter(VLMConfig())._max_tokens_for_kind("semantic_repair"), 8192)
+        raised = VLMAdapter(VLMConfig(decode_params=VLMDecodeParams(max_tokens=128000)))
+        self.assertEqual(raised._max_tokens_for_kind("semantic_repair"), 32768)
 
 
 if __name__ == "__main__":

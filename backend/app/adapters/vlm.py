@@ -929,11 +929,19 @@ class VLMAdapter:
             "semantic_repair": 8192,
             "structured_table_records": 4096,
         }
-        # Per-task budgets are authoritative. Capping them with the global
-        # decode default silently collapsed every task to 1024 tokens and
-        # truncated dense form/repair replies mid-JSON.
+        # Per-task budgets are authoritative (capping them with the global
+        # default collapsed every task to 1024 and truncated dense JSON). But
+        # long-output tasks must be able to scale up: a reasoning reviewer
+        # (DeepSeek-V4) spends most of its budget on internal reasoning, so an
+        # operator-raised max_tokens lifts these — small tasks stay capped.
+        scalable_kinds = {"semantic_repair", "form_asset", "form_guide"}
+        configured = self.config.decode_params.max_tokens
         cap = task_caps.get(kind)
-        return cap if cap is not None else self.config.decode_params.max_tokens
+        if cap is None:
+            return configured
+        if kind in scalable_kinds and configured > cap:
+            return min(configured, 32768)
+        return cap
 
     TRUNCATION_RETRY_MAX_TOKENS = 16384
 

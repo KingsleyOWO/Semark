@@ -83,6 +83,20 @@ class TokenBudgetTest(unittest.TestCase):
         )
         self.assertEqual(adapter._max_tokens_for_kind("custom_experiment"), 4096)
 
+    def test_long_output_tasks_scale_with_raised_budget(self):
+        # A reasoning reviewer needs headroom past 8192; an operator-raised
+        # max_tokens lifts long-output tasks (capped at 32768).
+        adapter = VLMAdapter(VLMConfig(decode_params=VLMDecodeParams(max_tokens=24000)))
+        self.assertEqual(adapter._max_tokens_for_kind("semantic_repair"), 24000)
+        self.assertEqual(adapter._max_tokens_for_kind("form_asset"), 24000)
+        # small tasks stay capped regardless of the raised global budget
+        self.assertEqual(adapter._max_tokens_for_kind("table_summary"), 512)
+        self.assertEqual(adapter._max_tokens_for_kind("figure_caption"), 2048)
+
+    def test_long_output_scaling_is_ceilinged(self):
+        adapter = VLMAdapter(VLMConfig(decode_params=VLMDecodeParams(max_tokens=100000)))
+        self.assertEqual(adapter._max_tokens_for_kind("semantic_repair"), 32768)
+
 
 class _FakeCompletions:
     def __init__(self, responses):

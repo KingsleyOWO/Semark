@@ -2987,23 +2987,24 @@ def _records_from_form_output(
         for item in output.get("all_text", [])
         if str(item).strip()
     ])
-    if all_text_items and _should_emit_form_source_text_record(
-        language=language,
-        output=output,
+    supplementary_lines = _form_supplementary_fact_lines(
+        all_text_items,
         fields=fields,
-    ):
+        output=output,
+    )
+    if supplementary_lines:
         if language == "en":
-            source_text_section = "Source Extracted Text"
+            source_text_section = "Supplementary References & Values"
             source_text_content = (
                 f"Form: {form_name}. Section: {source_text_section}. "
-                f"Source-extracted visible text and checklist lines: "
-                f"{_compact_text_no_ellipsis('; '.join(all_text_items), 3200)}"
+                f"Supplementary references and values from source: "
+                f"{_compact_text_no_ellipsis('; '.join(supplementary_lines), 3200)}"
             )
         else:
-            source_text_section = "來源抽取文字"
+            source_text_section = "補充法規依據與數值"
             source_text_content = (
                 f"表單：{form_name}。區塊：{source_text_section}。"
-                f"來源可見文字與檢核項目：{_compact_text_no_ellipsis('；'.join(all_text_items), 3200)}"
+                f"補充法規依據與數值：{_compact_text_no_ellipsis('；'.join(supplementary_lines), 3200)}"
             )
         records.append(
             {
@@ -3095,36 +3096,31 @@ def _records_from_form_output(
     return records
 
 
-def _should_emit_form_source_text_record(
+def _form_supplementary_fact_lines(
+    all_text_items: list[str],
     *,
-    language: str,
-    output: dict[str, Any],
     fields: list[dict[str, Any]],
-) -> bool:
-    # The raw source-text dump ("來源抽取文字") is parser residue that makes
-    # shipped forms look dumpy, but it is also the fallback for facts the field
-    # extractor missed. Emit it only when it carries facts the fields/guide do
-    # not already cover — so well-extracted forms stay clean while nothing like
-    # an amount seen only in the OCR text is silently dropped.
+    output: dict[str, Any],
+) -> list[str]:
+    # Keep only source-text lines that carry a value fact (number/date/amount or
+    # legal reference like 第八條) the extracted fields/guide do not already
+    # cover. Blank field labels (申請日期： 年 月 日) carry no value and are
+    # dropped, so a well-extracted form sheds the noisy "來源抽取文字" dump while
+    # a legal reference or amount seen only in the OCR text survives — under a
+    # semantic heading, not a residue label.
     from app.pipeline.repair_guard import extract_value_tokens
 
-    all_text_items = [str(item).strip() for item in (output.get("all_text") or []) if str(item).strip()]
-    if not all_text_items:
-        return False
-
+    lines = [str(item).strip() for item in (all_text_items or []) if str(item).strip()]
+    if not lines:
+        return []
     guide = str(output.get("filling_guide") or "")
-    covered_text = guide + " " + " ".join(str(field.get("name") or "") for field in fields)
-    # Compare only value facts (numbers/dates/amounts/legal refs); blank field
-    # labels are structure already captured as fields, not a reason to keep the
-    # dump — otherwise every blank form retains the noisy "來源抽取文字" section.
-    dump_facts = extract_value_tokens(" ".join(all_text_items))
-    covered_facts = extract_value_tokens(covered_text)
-
-    if dump_facts and not (dump_facts - covered_facts):
-        return False  # every fact already structured — the dump is pure noise
-    if not dump_facts and (fields or guide.strip()):
-        return False  # no facts to preserve and we already have structure
-    return True
+    covered = extract_value_tokens(guide + " " + " ".join(str(field.get("name") or "") for field in fields))
+    kept: list[str] = []
+    for line in lines:
+        line_values = extract_value_tokens(line)
+        if line_values and (line_values - covered):
+            kept.append(line)
+    return kept
 
 
 def _clean_evidence_text(value: str) -> str:

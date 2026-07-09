@@ -47,3 +47,6 @@ backend/docs/dgx_*.md
 
 # Local golden manifests for real (non-public) corpus docs
 backend/examples/eval/golden/local/
+
+# Local corpus ruleset with real (non-public) institution identity
+backend/app/pipeline/rulesets/local.json

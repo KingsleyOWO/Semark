@@ -16,3 +16,4 @@ frontend/dist
 *.sha256
 .claude
 .rollback_snapshots
+backend/app/pipeline/rulesets/local.json

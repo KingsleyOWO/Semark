@@ -28,11 +28,14 @@ workspace/
 # Local Docker overrides
 docker-compose.local-ollama.yml
 docker-compose.override.yml
+docker-compose.deploy.local.yml
 
 # Local tooling and release artifacts
 CLAUDE_CODE_LSP_SETUP.md
 DGX_SPARK_HANDOFF.md
 RELEASE_NOTES_*.md
+PROJECT_STATUS*.md
+docs/PROJECT_STATUS*.md
 backend/docs/dgx_*.md
 .claude/
 .rollback_snapshots/

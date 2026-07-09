@@ -920,20 +920,24 @@ class VLMAdapter:
             "table_summary": 512,
             "figure_caption": 2048,
             "figure_description": 2048,
-            "form_asset": 8192,
-            "form_guide": 8192,
+            # Long-output kinds (see scalable_kinds): 24000 floors a whole-
+            # document rewrite / dense form JSON so it is not truncated. An 8192
+            # budget dropped ~20% of facts on an 8-page zh-TW doc (prod 2-10:
+            # fact_survival 0.79 -> reviewer repair rejected by the fact guard).
+            # The earlier 8192 was to dodge a 2x600s retry timeout; the client
+            # now runs with max_retries=0, so 24000 completes on the 35B MoE.
+            "form_asset": 24000,
+            "form_guide": 24000,
             "org_chart_edges": 2048,
             "quality_audit": 2048,
-            # 8192: a 12288 budget was unfinishable within the request timeout
-            # on thinking models (observed 600s timeout on a 35B MoE reviewer).
-            "semantic_repair": 8192,
+            "semantic_repair": 24000,
             "structured_table_records": 4096,
         }
         # Per-task budgets are authoritative (capping them with the global
-        # default collapsed every task to 1024 and truncated dense JSON). But
-        # long-output tasks must be able to scale up: a reasoning reviewer
-        # (DeepSeek-V4) spends most of its budget on internal reasoning, so an
-        # operator-raised max_tokens lifts these — small tasks stay capped.
+        # default collapsed every task to 1024 and truncated dense JSON). The
+        # long-output kinds carry a generous default cap so they never truncate
+        # out-of-the-box, and an operator-raised max_tokens lifts them further
+        # (up to a hard 32768) — small tasks stay tightly capped either way.
         scalable_kinds = {"semantic_repair", "form_asset", "form_guide"}
         configured = self.config.decode_params.max_tokens
         cap = task_caps.get(kind)

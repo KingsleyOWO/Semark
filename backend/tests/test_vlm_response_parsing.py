@@ -80,9 +80,11 @@ class VLMResponseParsingTest(unittest.TestCase):
 
         self.assertEqual(adapter._max_tokens_for_kind("form_asset"), 32768)
 
-    def test_form_token_cap_defaults_to_8192(self):
+    def test_form_token_cap_defaults_to_adequate_budget(self):
+        # Dense form JSON truncates at a small budget; the default must fit a
+        # full extraction without an operator hand-raising max_tokens.
         adapter = VLMAdapter(VLMConfig())
-        self.assertEqual(adapter._max_tokens_for_kind("form_asset"), 8192)
+        self.assertEqual(adapter._max_tokens_for_kind("form_asset"), 24000)
 
 
     def test_semantic_repair_json_is_validated(self):
@@ -184,10 +186,10 @@ The victim files a complaint, then the case is routed by scenario and party rela
 
 
     def test_semantic_repair_token_cap_allows_rewrite(self):
-        # Default budget stays 8192 (local thinking reviewers time out above it),
-        # but an operator-raised budget lifts semantic_repair for fast reasoning
-        # reviewers (e.g. DeepSeek-V4 that spend most of the budget reasoning).
-        self.assertEqual(VLMAdapter(VLMConfig())._max_tokens_for_kind("semantic_repair"), 8192)
+        # A whole-document rewrite must not truncate: the default floors at 24000
+        # (8192 dropped ~20% of facts on an 8-page zh-TW doc, prod 2-10), and an
+        # operator-raised budget lifts it up to the 32768 hard max.
+        self.assertEqual(VLMAdapter(VLMConfig())._max_tokens_for_kind("semantic_repair"), 24000)
         raised = VLMAdapter(VLMConfig(decode_params=VLMDecodeParams(max_tokens=128000)))
         self.assertEqual(raised._max_tokens_for_kind("semantic_repair"), 32768)
 

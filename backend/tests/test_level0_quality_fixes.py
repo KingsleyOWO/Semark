@@ -69,12 +69,26 @@ class ImageModeDefaultsTest(unittest.TestCase):
 class TokenBudgetTest(unittest.TestCase):
     def test_task_caps_apply_with_default_global_config(self):
         # Per-kind caps are authoritative; the old min(global, cap) collapsed
-        # every task to the 1024 default and truncated dense forms.
-        adapter = VLMAdapter(VLMConfig())
-        self.assertEqual(adapter._max_tokens_for_kind("form_asset"), 8192)
-        # 12288 was unfinishable within the request timeout on thinking models
-        # (observed 2x600s timeout+retry on a 35B MoE); 8192 completes.
-        self.assertEqual(adapter._max_tokens_for_kind("semantic_repair"), 8192)
+        # every task above the 1024 default back to 1024 and truncated dense
+        # forms. Caps above the default must survive (scalable long-output
+        # kinds are covered separately below).
+        adapter = VLMAdapter(VLMConfig())  # default max_tokens = 1024
+        self.assertEqual(adapter._max_tokens_for_kind("figure_caption"), 2048)
+        self.assertEqual(adapter._max_tokens_for_kind("structured_table_records"), 4096)
+        self.assertEqual(adapter._max_tokens_for_kind("table_summary"), 512)
+
+    def test_scalable_kinds_get_adequate_budget_at_default_config(self):
+        # Regression (prod 2-10, 2026-07-08): at the small default max_tokens the
+        # scalable long-output kinds were capped at 8192, which truncated a
+        # whole-document rewrite of an 8-page zh-TW doc and dropped ~20% of facts
+        # (fact_survival 0.79 -> reviewer repair rejected by the fact guard).
+        # These kinds must floor at a budget that fits a multi-page rewrite
+        # without requiring the operator to hand-raise max_tokens.
+        adapter = VLMAdapter(VLMConfig())  # default max_tokens = 1024
+        self.assertGreaterEqual(adapter._max_tokens_for_kind("semantic_repair"), 24000)
+        self.assertGreaterEqual(adapter._max_tokens_for_kind("form_asset"), 24000)
+        self.assertGreaterEqual(adapter._max_tokens_for_kind("form_guide"), 24000)
+        # non-scalable small tasks stay tightly capped
         self.assertEqual(adapter._max_tokens_for_kind("table_summary"), 512)
 
     def test_global_max_tokens_used_for_unknown_kinds(self):
@@ -84,11 +98,11 @@ class TokenBudgetTest(unittest.TestCase):
         self.assertEqual(adapter._max_tokens_for_kind("custom_experiment"), 4096)
 
     def test_long_output_tasks_scale_with_raised_budget(self):
-        # A reasoning reviewer needs headroom past 8192; an operator-raised
-        # max_tokens lifts long-output tasks (capped at 32768).
-        adapter = VLMAdapter(VLMConfig(decode_params=VLMDecodeParams(max_tokens=24000)))
-        self.assertEqual(adapter._max_tokens_for_kind("semantic_repair"), 24000)
-        self.assertEqual(adapter._max_tokens_for_kind("form_asset"), 24000)
+        # Above the default floor, an operator-raised max_tokens lifts the
+        # long-output kinds further (capped at 32768); small tasks stay capped.
+        adapter = VLMAdapter(VLMConfig(decode_params=VLMDecodeParams(max_tokens=30000)))
+        self.assertEqual(adapter._max_tokens_for_kind("semantic_repair"), 30000)
+        self.assertEqual(adapter._max_tokens_for_kind("form_asset"), 30000)
         # small tasks stay capped regardless of the raised global budget
         self.assertEqual(adapter._max_tokens_for_kind("table_summary"), 512)
         self.assertEqual(adapter._max_tokens_for_kind("figure_caption"), 2048)

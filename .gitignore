@@ -44,3 +44,6 @@ backend/docs/dgx_*.md
 *.tar.gz
 *.tgz
 *.sha256
+
+# Local golden manifests for real (non-public) corpus docs
+backend/examples/eval/golden/local/

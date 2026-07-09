@@ -3374,7 +3374,7 @@ class PackageStage:
         if title_candidate:
             return title_candidate
         match = re.search(
-            r"(?P<org>(?:財團法人)?(?:台灣|臺灣)[\u4e00-\u9fff]{2,30}?)(?:（以下簡稱本院）|\(以下簡稱本院\))(?P<subject>[\u4e00-\u9fff]{2,20})[，,].{0,120}?特訂定本(?P<kind>制度|辦法|規程|要點|準則)",
+            r"(?P<org>財團法人[\u4e00-\u9fff]{2,30}?)(?:（以下簡稱本院）|\(以下簡稱本院\))(?P<subject>[\u4e00-\u9fff]{2,20})[，,].{0,120}?特訂定本(?P<kind>制度|辦法|規程|要點|準則)",
             text,
         )
         if match:

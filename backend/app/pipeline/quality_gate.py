@@ -15,6 +15,7 @@ from typing import Any
 
 from app.adapters.vlm import VLMAdapter
 from app.models.document_ir import Block, BlockType, DocumentIR
+from app.pipeline.corpus_rules import get_rules as get_corpus_rules
 from app.pipeline.semantic.language import (
     form_template_sections,
     prompt_form_sections,
@@ -49,6 +50,10 @@ _QUALITY_GATE_MESSAGES_EN = {
     "target_language_mismatch": "The semantic output contains text from the wrong output language.",
     "vlm_audit_failed": "The VLM audit failed, so rule-based quality findings were preserved.",
     "vlm_audit_missing_items": "After comparing the source page, the VLM audit reported possible omissions in the final semantic document.",
+    "broken_image_embed": "The final semantic output contains Markdown image links, which downstream RAG consumers cannot read (broken images).",
+    "authored_text_dropped": "Authored source text paragraphs are missing from the final semantic output and may have been silently dropped during rendering.",
+    "watermark_term_leak": "The final semantic output contains background-watermark strings that should have been filtered during rendering.",
+    "figure_semantics_language_mismatch": "A figure's semantic retrieval text is not in the target output language, which may reduce retrieval quality.",
 }
 
 
@@ -139,6 +144,10 @@ async def run_quality_gate(
     issues.extend(_check_form_signatures(document_ir, source_text, enrichments))
     issues.extend(_check_rag_readiness(structured_output, final_text))
     issues.extend(_check_language_noise(source_text, language, structured_text=structured_text))
+    issues.extend(_check_broken_image_embeds(final_text))
+    issues.extend(_check_authored_text_survival(document_ir, structured_output, final_text))
+    issues.extend(_check_watermark_leak(final_text))
+    issues.extend(_check_figure_semantics_language(assets, language))
 
     candidates = _build_vlm_audit_candidates(document_ir, issues, max_candidates=max_vlm_audits)
     vlm_audits: list[dict[str, Any]] = []
@@ -267,6 +276,14 @@ def _check_structured_output_presence(
 
     plan = getattr(structured_output, "plan", None)
     document_type = str(getattr(plan, "document_type", "") or "")
+    # A generic (prose) document weaves figure enrichments into the RAG markdown
+    # body rather than into structured records, so an enriched image alone is not
+    # evidence that structured output should exist (e.g. a photo/screenshot-based
+    # operation guide whose content is delivered as rag.md). Tables and form-like
+    # structure still legitimately require records, so they keep firing.
+    non_figure_signals = [signal for signal in structure_signals if signal != "enriched_image_block"]
+    if document_type == "generic_document" and not non_figure_signals:
+        return []
     records = [record for record in getattr(structured_output, "records", []) or [] if isinstance(record, dict)]
     chunks = [chunk for chunk in getattr(structured_output, "chunks", []) or [] if isinstance(chunk, dict)]
     has_semantic_candidate = any(block.type in {BlockType.TABLE, BlockType.IMAGE} for block in document_ir.blocks)
@@ -294,7 +311,9 @@ def _check_enrichment_failures(enrichments: dict[str, dict[str, Any]]) -> list[Q
         if not isinstance(output, dict):
             continue
         error = str(output.get("_error") or "")
-        if "JSON_PARSE_FAILED" not in error:
+        if not error.strip():
+            # Salvaged replies carry other markers too (e.g. UNKNOWN_ERROR when the
+            # model returned plain-text reasoning instead of JSON) — flag them all.
             continue
         evidence = dict(enrichment.get("evidence") or {})
         input_info = dict(enrichment.get("input") or {})
@@ -838,6 +857,147 @@ def _check_language_noise(
             )
         return issues
     return []
+
+
+def _check_broken_image_embeds(final_text: str) -> list[QualityGateIssue]:
+    """Markdown image links in the final semantic text are unreadable downstream.
+
+    Every renderer converts figures to searchable text (圖轉文字/拿掉連結); a
+    surviving ``![alt](url)`` means some path bypassed that policy (observed:
+    the reviewer-success rewrite reintroduced MinerU-native embeds).
+    """
+    embeds = re.findall(r"!\[[^\]]*\]\([^)]*\)", final_text)
+    if not embeds:
+        return []
+    return [
+        QualityGateIssue(
+            code="broken_image_embed",
+            severity="high",
+            message="最終語意輸出含 Markdown 圖片連結，下游 RAG 無法讀圖（破圖）。",
+            evidence={"embed_count": len(embeds), "samples": embeds[:3]},
+        )
+    ]
+
+
+def _looks_like_authored_prose_text(text: str) -> bool:
+    """Mirror of PackageStage._looks_like_authored_prose (kept local: importing the
+    package stage here would be circular — package imports this module)."""
+    stripped = (text or "").strip()
+    if not stripped:
+        return False
+    if re.match(r"^(?:\d+|[一二三四五六七八九十百]+|[A-Za-z]|[（(]\d+[)）]|[①-⑳])\s*[.、)）:：]", stripped):
+        return True
+    if re.match(r"^(?:提醒|注意|附註|備註|說明|步驟|注意事項|重點|補充|例)", stripped):
+        return True
+    if re.search(r"[，。！？；：、「」『』（）()!?;]", stripped):
+        return True
+    return False
+
+
+def _check_authored_text_survival(
+    document_ir: DocumentIR,
+    structured_output: Any,
+    final_text: str,
+) -> list[QualityGateIssue]:
+    """Completeness guard: authored prose in the IR must survive into the output.
+
+    Scoped to generic documents, whose rag.md is expected to be a faithful render
+    of the IR (form/table docs legitimately restructure). Catches the silent
+    block-drop failure class (observed: a how-to guide lost steps 5-7 and both
+    提醒 reminders from every output while they stayed in document_ir.json).
+    Note: a reviewer rewrite that heavily paraphrases may also trip this — that
+    is accepted; verbatim-lossy rewrites of generic guides deserve human review.
+    """
+    plan = getattr(structured_output, "plan", None)
+    document_type = str(getattr(plan, "document_type", "") or "")
+    if document_type != "generic_document":
+        return []
+    normalized_output = re.sub(r"\s+", "", final_text or "")
+    total = 0
+    missing: list[str] = []
+    for block in document_ir.blocks:
+        if block.type != BlockType.TEXT:
+            continue
+        text = str(block.payload.get("text", "") or "").strip()
+        normalized = re.sub(r"\s+", "", text)
+        if len(normalized) < 10:
+            continue
+        if not _looks_like_authored_prose_text(text):
+            continue
+        total += 1
+        if normalized not in normalized_output:
+            missing.append(text[:60])
+    if total < 3:
+        return []
+    survival = (total - len(missing)) / total
+    if survival >= 0.85:
+        return []
+    severity = "high" if survival < 0.6 else "medium"
+    return [
+        QualityGateIssue(
+            code="authored_text_dropped",
+            severity=severity,
+            message=f"來源有 {len(missing)}/{total} 段作者撰寫文字未出現在最終語意輸出，可能在渲染時被靜默丟棄。",
+            evidence={
+                "survival_ratio": round(survival, 4),
+                "missing_count": len(missing),
+                "checked_count": total,
+                "missing_samples": missing[:8],
+            },
+        )
+    ]
+
+
+def _check_watermark_leak(final_text: str) -> list[QualityGateIssue]:
+    """Regression guard for the render-side watermark filter (corpus-rules driven)."""
+    terms = [term for term in get_corpus_rules().marker_list("watermark_terms") if len(term) >= 2]
+    found = sorted({term for term in terms if term in (final_text or "")})
+    if not found:
+        return []
+    return [
+        QualityGateIssue(
+            code="watermark_term_leak",
+            severity="warning",
+            message="最終語意輸出含背景浮水印字樣，應由渲染層過濾。",
+            evidence={"terms": found[:5]},
+        )
+    ]
+
+
+def _check_figure_semantics_language(assets: list[Any], language: str) -> list[QualityGateIssue]:
+    """Flag figures whose retrieval text is not in the zh-TW target language.
+
+    The English-caption fallback (better than an empty description) and any VLM
+    language regression land here as warnings, so they surface for review
+    without blocking the run.
+    """
+    if language != "zh-TW":
+        return []
+    issues: list[QualityGateIssue] = []
+    for asset in assets:
+        if str(getattr(asset, "type", "")) != "figure_asset":
+            continue
+        text = str(getattr(asset, "retrieval_text", "") or "")
+        zh_chars = sum(1 for ch in text if "一" <= ch <= "鿿")
+        ascii_letters = sum(1 for ch in text if ch.isascii() and ch.isalpha())
+        if zh_chars < 4 and ascii_letters >= 20:
+            issues.append(
+                QualityGateIssue(
+                    code="figure_semantics_language_mismatch",
+                    severity="warning",
+                    message="圖片語意文字非目標語言（繁體中文），檢索效果可能下降。",
+                    page_idx=getattr(asset, "page_idx", None),
+                    block_id=str(getattr(asset, "block_id", "") or "") or None,
+                    evidence={
+                        "asset_id": str(getattr(asset, "asset_id", "") or ""),
+                        "zh_chars": zh_chars,
+                        "ascii_letters": ascii_letters,
+                    },
+                )
+            )
+        if len(issues) >= 4:
+            break
+    return issues
 
 
 def _build_vlm_audit_candidates(

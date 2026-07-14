@@ -459,6 +459,37 @@ Text
         self.assertNotIn("# 202408221407355384561.pdf", markdown)
 
 
+    def test_normalize_repaired_markdown_strips_broken_image_embeds(self):
+        """The reviewer's rewrite can reintroduce MinerU-native
+        ``![alt](images/<hash>.jpg)`` embeds pulled from source evidence; those
+        links are broken in every viewer and unreadable by the text-only
+        downstream model, so they must not reach rag.md / chunks. The alt caption
+        is kept as searchable text (圖轉文字 / 拿掉連結), matching the
+        ``_render_block_rag`` policy."""
+        stage = PackageStage()
+
+        markdown = stage._normalize_repaired_markdown(
+            "# 208 會議室環控操作說明\n\n"
+            "*   **外接筆電簡報**：筆電連接前方木桌上的 HDMI 線投影。\n"
+            "    *   ![外接筆電簡報連接示意](images/f7f05104b3e864a4c3f5295158bba40b.jpg)\n"
+            "*   **環控系統關閉**：會議結束後按系統關閉即可。\n"
+            "    *   ![](images/0baa18867106c3ca9d2d816a335c5223.jpg)\n",
+            "208 會議室環控操作說明",
+        )
+
+        # No broken image markup or links survive in the body.
+        self.assertNotIn("![", markdown)
+        self.assertNotIn("images/", markdown)
+        self.assertNotIn("asset://", markdown)
+        # The alt caption is preserved as searchable text.
+        self.assertIn("外接筆電簡報連接示意", markdown)
+        # Surrounding prose is untouched.
+        self.assertIn("HDMI 線投影", markdown)
+        self.assertIn("環控系統關閉", markdown)
+        # The empty-alt embed leaves no dangling bullet / stray hash.
+        self.assertNotIn("0baa18867106", markdown)
+
+
     def test_semantic_repair_rejects_ellipsis_in_final_markdown(self):
         repaired = (
             "# Visa Checklist\n\n"
@@ -656,6 +687,34 @@ Text
         self.assertNotIn("asset://", text)
         self.assertNotIn("Figure 2", text)
         self.assertNotRegex(text, r"^2$", msg=text)
+
+
+    def test_render_block_rag_image_emits_text_not_broken_asset_link(self):
+        """An IMAGE block that falls through to _render_block_rag must emit the figure's
+        semantic retrieval text — never a broken, model-unreadable asset:// image link."""
+        block = Block(
+            block_id="fig-a",
+            type=BlockType.IMAGE,
+            page_idx=0,
+            payload={"img_path": "fig-a.png", "caption": "下午12:03"},
+        )
+        asset = AssetEntry(
+            type="figure_asset",
+            asset_id="fig0002",
+            doc_id="doc-a",
+            run_id="run-a",
+            title="會議室設備照片",
+            page_idx=0,
+            asset_path="assets/figures/fig0002.jpg",
+            block_id="fig-a",
+            retrieval_text="會議室設備照片\n環控系統關閉\n系統關閉",
+        )
+
+        text = "\n".join(PackageStage()._render_block_rag(block, {"fig-a": asset}))
+
+        self.assertIn("環控系統關閉", text)
+        self.assertNotIn("asset://", text)
+        self.assertNotIn("![", text)
 
 
     def test_flowchart_summary_keeps_ocr_nodes_when_vlm_path_is_partial(self):
@@ -1127,6 +1186,35 @@ Text
 
         self.assertEqual(title, "性騷擾案件申訴處理作業流程指引")
 
+    def test_infer_source_title_prefers_howto_question_title_over_step_heading(self):
+        # How-to guides open with a plain-text question title; the only markdown
+        # heading MinerU produces is often a mid-procedure step line, which must
+        # never become the document title (it poisons form_name/heading_path on
+        # every reviewer-fallback chunk).
+        source_md = (
+            "如何幫信箱做封存？（以outlook2016為例）\n\n"
+            "1. 開啟 Outlook點選「檔案」(建立一個全新的封存檔案)\n\n"
+            "「檔案」標籤被紅框特別標示出來。\n\n"
+            "## 2. 點選「工具」點選「清理舊項目」\n\n"
+            "清空[删除的郵件]和封存，以管理信箱大小。\n"
+        )
+
+        title = PackageStage()._infer_source_title(source_md, "original.pdf")
+
+        self.assertEqual(title, "如何幫信箱做封存？（以outlook2016為例）")
+
+    def test_infer_source_title_never_falls_back_to_numbered_step_heading(self):
+        source_md = (
+            "點開設定頁面之後繼續下面的動作。\n\n"
+            "## 3. 按下「確定」即可完成\n\n"
+            "完成後即可關閉視窗。\n"
+        )
+
+        title = PackageStage()._infer_source_title(source_md, "guide-fixture.pdf")
+
+        self.assertNotEqual(title, "3. 按下「確定」即可完成")
+        self.assertEqual(title, "guide-fixture")
+
     def test_legal_representative_fields_are_not_travel_fields(self):
         self.assertEqual(_infer_field_section("法定代理人姓名"), "申請/基本資料")
         self.assertEqual(_infer_field_section("委任代理人"), "申請/基本資料")
@@ -1181,6 +1269,36 @@ Text
         )
 
         self.assertTrue(PackageStage._quality_gate_needs_semantic_repair(quality_gate))
+
+    def test_semantic_repair_not_triggered_by_warning_only_issues(self):
+        """Reviewer-trigger tuning: warning-severity cosmetics (ellipsis, parser
+        residue) must not launch the expensive reviewer rewrite. Observed live: a
+        gate-passing doc (0.95, ellipsis warning only) triggered a 74s reviewer run
+        every time, which fell back and stamped auto_rag_ready=False on complete,
+        clean content."""
+        quality_gate = SimpleNamespace(
+            issues=[
+                SimpleNamespace(code="summary_contains_ellipsis", severity="warning"),
+                SimpleNamespace(code="raw_parser_residue", severity="warning"),
+            ],
+            stats={},
+        )
+
+        self.assertFalse(PackageStage._quality_gate_needs_semantic_repair(quality_gate))
+
+    def test_semantic_repair_still_triggered_by_medium_and_high_issues(self):
+        for code, severity in (
+            ("semantic_output_too_short", "medium"),
+            ("structured_output_empty", "high"),
+        ):
+            quality_gate = SimpleNamespace(
+                issues=[SimpleNamespace(code=code, severity=severity)],
+                stats={},
+            )
+            self.assertTrue(
+                PackageStage._quality_gate_needs_semantic_repair(quality_gate),
+                code,
+            )
 
     def test_semantic_repair_normalization_removes_duplicate_title_heading(self):
         markdown = (

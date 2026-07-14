@@ -364,7 +364,7 @@ REFERENCE TEXT FROM DOCUMENT:
 {context}""",
     },
     "figure_caption": {
-        "version": "v4",
+        "version": "v6",
         "system": """You are a document analyst. Analyze images including diagrams, charts, and organizational structures.
 Your task is to:
 1. Accurately OCR all text in the image
@@ -384,6 +384,10 @@ IMPORTANT: You must respond ONLY with valid JSON.""",
   "needs_review": false
 }}
 
+Output language:
+{semantic_output_language_instruction}
+Write "semantic_caption" and every "facts" entry in the language stated above (for a Traditional Chinese document, write them in 繁體中文 — not English). Keep "all_text" verbatim as the exact characters visible in the image; do not translate it.
+
 CRITICAL: For org charts or flowcharts, use PATH NOTATION in structured_content:
 - Each item shows FULL hierarchical path: "Parent > Child > Grandchild (description)"
 - This makes each line self-explanatory for RAG retrieval
@@ -399,7 +403,8 @@ Example:
 Guidelines:
 - Read ALL text accurately, especially numbers and dates (e.g., "114.06.20" not "11.066.20")
 - ALWAYS use path notation for hierarchical structures
-- Use Traditional Chinese for Chinese content
+- Keep all_text in the original on-screen language; write semantic_caption and facts in the Output language stated above
+- Screenshots may catch incidental personal content unrelated to the document's instructions (an email inbox's subject lines and sender names, chat messages, personal appointments). Do NOT transcribe those items into all_text, facts, or structured_content — describe the region generically instead (e.g. 「收件匣郵件清單」). Still transcribe UI labels, buttons, menu items, and annotation callouts that the instructions refer to.
 - Set needs_review to true if unclear
 
 Context from document:
@@ -648,7 +653,11 @@ RULES:
         "alias": "form_asset",
     },
     "figure_description": {
-        "version": "v3",
+        # Bump when the aliased figure_caption prompt changes — the enrich cache is
+        # keyed on THIS version (enrich.py get_prompt_version("figure_description")),
+        # so a caption-prompt edit only invalidates cache if this moves.
+        # v4 = zh-TW language fix (caption v5); v5 = no-personal-content rule (caption v6).
+        "version": "v5",
         "alias": "figure_caption",
     },
 }
@@ -755,6 +764,7 @@ class VLMAdapter:
         page_idx: int | None = None,
         bbox: list[int] | None = None,
         page_thumbnail_path: Path | None = None,
+        extra_vars: dict[str, Any] | None = None,
     ) -> EnrichmentOutput:
         """
         Generate semantic caption for a figure/chart/diagram.
@@ -775,6 +785,7 @@ class VLMAdapter:
             page_idx=page_idx,
             bbox=bbox,
             page_thumbnail_path=page_thumbnail_path,
+            extra_vars=extra_vars,
         )
 
     async def enrich_table(
@@ -981,6 +992,13 @@ class VLMAdapter:
         except Exception:
             return None
 
+    @staticmethod
+    def _is_parse_failure(output: Any) -> bool:
+        """True when _parse_response fell back to salvage (any ``_error`` marker:
+        JSON_PARSE_FAILED, UNKNOWN_ERROR, ...) — a salvaged reply deserves the same
+        single resample regardless of which marker the salvage stamped."""
+        return isinstance(output, dict) and bool(str(output.get("_error") or "").strip())
+
     async def _enrich(
         self,
         image_path: Path | None,
@@ -1106,13 +1124,40 @@ class VLMAdapter:
 
             # Call VLM
             response = await self._create_with_recovery(api_kwargs)
+            raw_response = self._message_text(response.choices[0].message)
+            output = self._parse_response(raw_response, kind)
+
+            # A reply that will not parse as JSON gets one aimed retry. On ollama,
+            # thinking models can burn the whole token budget ruminating on a
+            # low-information crop — deterministically at temperature 0.1
+            # (b000031/fig0006: 9562 thinking chars, zero content, both samples
+            # identical), so a same-settings resample just replays the failure and
+            # the recovery's doubled budget gets eaten by more thinking. Asking for
+            # no reasoning is what actually recovers content (probe: 137-token
+            # valid JSON on the same image), and it covers the finish=length shape
+            # too. Non-ollama providers may reject the field, so they keep the
+            # plain resample (and still skip it after a length truncation).
+            if self._is_parse_failure(output):
+                ollama_no_think = self.config.api_mode == VLMApiMode.OLLAMA
+                if ollama_no_think or self._finish_reason(response) != "length":
+                    retry_kwargs = dict(api_kwargs)
+                    retry_response = None
+                    if ollama_no_think:
+                        retry_kwargs["extra_body"] = {"reasoning_effort": "none"}
+                        try:
+                            retry_response = await self.client.chat.completions.create(**retry_kwargs)
+                        except Exception:
+                            retry_response = None  # keep the salvaged output below
+                    else:
+                        retry_response = await self._create_with_recovery(retry_kwargs)
+                    if retry_response is not None:
+                        retry_raw = self._message_text(retry_response.choices[0].message)
+                        retry_output = self._parse_response(retry_raw, kind)
+                        if not self._is_parse_failure(retry_output):
+                            response, raw_response, output = retry_response, retry_raw, retry_output
 
             duration = time.time() - start_time
-            raw_response = self._message_text(response.choices[0].message)
             tokens_used = response.usage.total_tokens if response.usage else 0
-
-            # Parse response
-            output = self._parse_response(raw_response, kind)
 
             # Extract needs_review from output
             needs_review = output.pop("needs_review", False) if isinstance(output, dict) else False
@@ -1457,7 +1502,14 @@ class VLMAdapter:
 
         recovered = any([semantic_caption, structured_content, all_text, facts, keywords, image_type != "other"])
         if not semantic_caption and not recovered:
-            semantic_caption = self._strip_thinking_sections(raw)
+            # Last-ditch fallback: the reply had no extractable fields at all. Only
+            # accept it as a caption when it is caption-sized — a local VLM sometimes
+            # replies with plain-text chain-of-thought (no <think> tags, no JSON), and
+            # weaving that multi-KB reasoning dump into rag.md is far worse than an
+            # empty caption (observed live: a 9105-char dump shipped as a caption).
+            stripped_raw = self._strip_thinking_sections(raw).strip()
+            if len(stripped_raw) <= 400:
+                semantic_caption = stripped_raw
 
         return {
             "semantic_caption": semantic_caption,

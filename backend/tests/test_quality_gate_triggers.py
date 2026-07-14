@@ -151,9 +151,56 @@ def test_structured_output_empty_ignores_unenriched_decorative_image(tmp_path):
     assert result.status == "pass"
 
 
-def test_structured_output_empty_fires_for_image_with_figure_enrichment(tmp_path):
+def test_structured_output_empty_skipped_for_figure_enrichment_in_generic_document(tmp_path):
+    """A generic (prose) document weaves figure enrichments into the RAG
+    markdown body, not into structured records, so an enriched figure alone is
+    not evidence that structured output should exist. This is the 208-style
+    meeting-room operation guide (photos/screenshots + prose) that legitimately
+    has no rows; flagging it structured_output_empty is a false positive."""
     document_ir = _make_ir(
-        "sop-flowchart.pdf",
+        "208-meeting-room-operation.pdf",
+        "pdf",
+        [
+            Block(
+                block_id="t1",
+                type=BlockType.TEXT,
+                page_idx=0,
+                payload={"text": "會議室情境操作說明：請依畫面按鈕操作投影機與音響系統。"},
+            ),
+            Block(
+                block_id="fig",
+                type=BlockType.IMAGE,
+                page_idx=0,
+                payload={"img_path": "images/control-panel.jpg"},
+            ),
+        ],
+    )
+
+    result = _run_gate(
+        document_ir,
+        _empty_structured_output(),  # generic_document, empty records/chunks
+        source_md="會議室情境操作說明：請依畫面按鈕操作投影機與音響系統，包含情境模式、音量與黑幕升降控制。",
+        enrichments={
+            "fig": {
+                "kind": "figure_caption",
+                "input": {"page_idx": 0},
+                "output": {"semantic_caption": "會議室環控面板"},
+            }
+        },
+        tmp_path=tmp_path,
+    )
+
+    codes = {issue.code for issue in result.issues}
+    assert "structured_output_empty" not in codes
+    assert result.status == "pass"
+
+
+def test_structured_output_empty_fires_for_figure_enrichment_in_form_document(tmp_path):
+    """The enriched-figure structure signal still fires structured_output_empty
+    for form-type documents, where empty structured records really is a defect.
+    Only the generic/prose case is exempt; the figure-signal path is preserved."""
+    document_ir = _make_ir(
+        "signature-form-scan.pdf",
         "pdf",
         [
             Block(
@@ -173,7 +220,7 @@ def test_structured_output_empty_fires_for_image_with_figure_enrichment(tmp_path
 
     result = _run_gate(
         document_ir,
-        _empty_structured_output(),
+        _empty_structured_output("form_document"),
         source_md="各單位辦理性別平等教育宣導時，應依本流程辦理相關通報作業，並於期限內完成結案報告以利彙整。",
         enrichments={
             "fig": {
@@ -369,3 +416,131 @@ def test_form_page_enrichment_counts_as_structure_signal():
 
     assert [i.code for i in issues] == ["structured_output_empty"]
     assert "form_page_enrichment" in issues[0].evidence["structure_signals"]
+
+
+# ---------------------------------------------------------------------------
+# #7: former gate blind spots — broken embeds, silent text drop, watermark leak,
+# figure-semantics language. All four passed 0.95-1.0 on visibly broken outputs
+# before these checks existed.
+# ---------------------------------------------------------------------------
+
+def _prose_blocks(texts, page_idx=0):
+    return [
+        Block(block_id=f"t{i}", type=BlockType.TEXT, page_idx=page_idx, payload={"text": t})
+        for i, t in enumerate(texts)
+    ]
+
+
+_GUIDE_STEPS = [
+    "1. 開啟系統設定頁面，點選帳戶管理。",
+    "2. 於帳戶清單中選擇要調整的帳戶。",
+    "3. 點選權限分頁並修改角色設定。",
+    "4. 儲存變更後重新登入系統。",
+    "提醒：變更權限後三十分鐘內生效。",
+]
+
+
+def test_broken_image_embed_fires_on_markdown_image_link(tmp_path):
+    ir = _make_ir("guide.pdf", "pdf", _prose_blocks(["操作說明如下，請依序執行。"]))
+    result = _run_gate(
+        ir,
+        _empty_structured_output(),
+        "# 說明\n\n![外接示意](images/abc123.jpg)\n\n操作說明如下，請依序執行。",
+        tmp_path=tmp_path,
+    )
+    codes = {issue.code: issue.severity for issue in result.issues}
+    assert codes.get("broken_image_embed") == "high", codes
+
+
+def test_authored_text_dropped_fires_when_steps_missing_from_output(tmp_path):
+    ir = _make_ir("guide.pdf", "pdf", _prose_blocks(_GUIDE_STEPS))
+    # Output silently kept only step 1 (the mailbox-archive failure shape).
+    result = _run_gate(
+        ir,
+        _empty_structured_output(),
+        "# 指南\n\n1. 開啟系統設定頁面，點選帳戶管理。",
+        tmp_path=tmp_path,
+    )
+    hits = [issue for issue in result.issues if issue.code == "authored_text_dropped"]
+    assert hits, [issue.code for issue in result.issues]
+    assert hits[0].severity == "high"
+    assert hits[0].evidence["survival_ratio"] < 0.6
+
+
+def test_authored_text_survival_passes_when_all_steps_present(tmp_path):
+    ir = _make_ir("guide.pdf", "pdf", _prose_blocks(_GUIDE_STEPS))
+    result = _run_gate(
+        ir,
+        _empty_structured_output(),
+        "# 指南\n\n" + "\n\n".join(_GUIDE_STEPS),
+        tmp_path=tmp_path,
+    )
+    assert not [issue for issue in result.issues if issue.code == "authored_text_dropped"]
+
+
+def test_watermark_term_leak_fires_when_configured_term_in_output(tmp_path, monkeypatch):
+    from app.pipeline.corpus_rules import CorpusRules
+
+    monkeypatch.setattr(
+        "app.pipeline.quality_gate.get_corpus_rules",
+        lambda: CorpusRules(document_markers={"watermark_terms": ("示範40",)}),
+    )
+    ir = _make_ir("guide.pdf", "pdf", _prose_blocks(["操作說明如下，請依序執行。"]))
+    result = _run_gate(
+        ir,
+        _empty_structured_output(),
+        "操作說明如下，請依序執行。\n\n示範40",
+        tmp_path=tmp_path,
+    )
+    codes = {issue.code: issue.severity for issue in result.issues}
+    assert codes.get("watermark_term_leak") == "warning", codes
+
+
+def test_figure_semantics_language_mismatch_fires_for_english_only_figure(tmp_path):
+    ir = _make_ir("guide.pdf", "pdf", _prose_blocks(["操作說明如下，請依序執行。"]))
+    asset = SimpleNamespace(
+        type="figure_asset",
+        block_id="fig-a",
+        asset_id="fig0000",
+        page_idx=0,
+        title="Figure 1",
+        retrieval_text="The rear panel has a rocker power switch below the arrow sticker.",
+        needs_review=False,
+    )
+    result = asyncio.run(
+        run_quality_gate(
+            document_ir=ir,
+            source_md="操作說明如下，請依序執行。",
+            assets=[asset],
+            structured_output=_empty_structured_output(),
+            enrichments={},
+            run_path=tmp_path,
+            vlm_adapter=None,
+            max_vlm_audits=0,
+            semantic_output_language="zh-TW",
+        )
+    )
+    codes = {issue.code: issue.severity for issue in result.issues}
+    assert codes.get("figure_semantics_language_mismatch") == "warning", codes
+
+
+def test_enrichment_failure_check_flags_unknown_error(tmp_path):
+    """UNKNOWN_ERROR salvages slipped past the JSON_PARSE_FAILED-only filter
+    (observed live: a reasoning-dump enrichment with _error=UNKNOWN_ERROR shipped
+    into rag.md with a passing gate)."""
+    ir = _make_ir("guide.pdf", "pdf", _prose_blocks(["操作說明如下，請依序執行。"]))
+    result = _run_gate(
+        ir,
+        _empty_structured_output(),
+        "操作說明如下，請依序執行。",
+        enrichments={
+            "b000009": {
+                "kind": "figure_description",
+                "input": {"page_idx": 0},
+                "output": {"semantic_caption": "", "_error": "UNKNOWN_ERROR"},
+            }
+        },
+        tmp_path=tmp_path,
+    )
+    codes = {issue.code: issue.severity for issue in result.issues}
+    assert codes.get("vlm_enrichment_parse_failed") == "high", codes

@@ -1909,6 +1909,7 @@ class EnrichStage:
                 image_path, context,
                 doc_id=doc_id, run_id=run_id, page_idx=page_idx, bbox=bbox,
                 page_thumbnail_path=page_thumbnail_path,
+                extra_vars={"semantic_output_language": self._semantic_output_language},
             )
         elif kind == "table_summary":
             # Pass MinerU table data to reduce hallucination

@@ -189,7 +189,9 @@ class TruncationRetryTest(unittest.IsolatedAsyncioTestCase):
 
         result = await adapter._enrich(None, "table_summary", context="ctx")
 
-        self.assertEqual(len(fake.calls), 2)
+        # recovery pair + the ollama no-thinking parse retry (fake replays the
+        # truncated reply, so the salvage path still wins and stays flagged)
+        self.assertEqual(len(fake.calls), 3)
         self.assertTrue(result.needs_review)
 
 
@@ -220,6 +222,137 @@ class JsonSchemaFallbackTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(fake.calls), 2)
         self.assertIn("response_format", fake.calls[0])
         self.assertNotIn("response_format", fake.calls[1])
+
+
+class ParseFailureRetryTest(unittest.IsolatedAsyncioTestCase):
+    def _adapter_with(self, responses) -> tuple[VLMAdapter, _FakeCompletions]:
+        adapter = VLMAdapter(VLMConfig())
+        fake = _FakeCompletions(responses)
+        adapter.client = SimpleNamespace(chat=SimpleNamespace(completions=fake))
+        return adapter, fake
+
+    async def test_unparseable_json_reply_gets_one_parse_retry_then_succeeds(self):
+        """A completed reply that is not valid JSON (finish_reason=stop, i.e. not
+        a length truncation) triggers exactly one fresh attempt; the clean retry
+        output is adopted instead of degrading to salvage text with _error. This
+        is the b000014 vlm_enrichment_parse_failed class of intermittent flake."""
+        valid = json.dumps({"summary_zh": "表格摘要", "keywords": ["假別"], "needs_review": False})
+        adapter, fake = self._adapter_with([
+            _fake_response("Sure! Here is the description, not JSON.", "stop"),
+            _fake_response(valid, "stop"),
+        ])
+
+        result = await adapter._enrich(None, "table_summary", context="ctx")
+
+        self.assertEqual(len(fake.calls), 2)
+        self.assertTrue(result.success)
+        self.assertNotIn("_error", result.output)
+
+    async def test_persistent_unparseable_json_keeps_error_after_single_retry(self):
+        """If both attempts fail to parse, stop after one retry (no loop) and keep
+        the salvaged output flagged for review."""
+        adapter, fake = self._adapter_with([
+            _fake_response("still not json", "stop"),
+            _fake_response("also not json", "stop"),
+        ])
+
+        result = await adapter._enrich(None, "table_summary", context="ctx")
+
+        self.assertEqual(len(fake.calls), 2)
+        self.assertIn("_error", result.output)
+        self.assertIn("JSON_PARSE_FAILED", result.output["_error"])
+        self.assertTrue(result.needs_review)
+
+    async def test_parse_retry_disables_thinking_for_ollama(self):
+        """Local thinking models can burn the whole budget ruminating on a
+        low-information crop (deterministic at temperature 0.1 — b000031/fig0006:
+        9562 thinking chars, 0 content). A same-settings resample replays the same
+        failure, so the ollama-mode parse retry must ask for no reasoning instead."""
+        valid = json.dumps({"summary_zh": "表格摘要", "keywords": ["假別"], "needs_review": False})
+        adapter, fake = self._adapter_with([
+            _fake_response("这个请求要求我分析一张图片……(纯思考过程，无JSON)", "stop"),
+            _fake_response(valid, "stop"),
+        ])
+
+        result = await adapter._enrich(None, "table_summary", context="ctx")
+
+        self.assertEqual(len(fake.calls), 2)
+        self.assertEqual(fake.calls[1].get("extra_body"), {"reasoning_effort": "none"})
+        self.assertTrue(result.success)
+        self.assertNotIn("_error", result.output)
+
+    async def test_length_truncated_parse_failure_gets_thinking_disabled_retry(self):
+        """Rumination usually ends in finish_reason=length: recovery doubles the
+        budget once (thinking burns that too), then the ollama no-thinking retry
+        is the one that actually recovers content. Exactly one extra call, no loop."""
+        valid = json.dumps({"summary_zh": "表格摘要", "keywords": ["假別"], "needs_review": False})
+        adapter, fake = self._adapter_with([
+            _fake_response('{"summary_zh": "被截斷', "length"),
+            _fake_response('{"summary_zh": "還是被截斷', "length"),
+            _fake_response(valid, "stop"),
+        ])
+
+        result = await adapter._enrich(None, "table_summary", context="ctx")
+
+        self.assertEqual(len(fake.calls), 3)  # recovery pair + one no-thinking retry
+        self.assertEqual(fake.calls[2].get("extra_body"), {"reasoning_effort": "none"})
+        self.assertTrue(result.success)
+        self.assertNotIn("_error", result.output)
+
+    async def test_nothink_retry_failure_keeps_salvaged_output(self):
+        """If the no-thinking retry itself errors (e.g. a model that rejects the
+        reasoning_effort field), keep the salvaged first reply instead of losing
+        the enrichment to a hard failure."""
+
+        class _RetryRejectingCompletions(_FakeCompletions):
+            async def create(self, **kwargs):
+                self.calls.append(kwargs)
+                if "extra_body" in kwargs:
+                    raise RuntimeError("unknown field: reasoning_effort")
+                return _fake_response("still not json", "stop")
+
+        adapter = VLMAdapter(VLMConfig())
+        fake = _RetryRejectingCompletions([])
+        adapter.client = SimpleNamespace(chat=SimpleNamespace(completions=fake))
+
+        result = await adapter._enrich(None, "table_summary", context="ctx")
+
+        self.assertEqual(len(fake.calls), 2)
+        self.assertTrue(result.success)
+        self.assertIn("_error", result.output)
+        self.assertTrue(result.needs_review)
+
+    async def test_non_ollama_parse_retry_keeps_plain_resample(self):
+        """Cloud/vLLM providers may reject the reasoning_effort field outright, so
+        outside ollama mode the parse retry stays a plain same-settings resample
+        and still never fires on top of a length truncation."""
+        from app.config import VLMApiMode
+
+        valid = json.dumps({"summary_zh": "表格摘要", "keywords": ["假別"], "needs_review": False})
+        adapter = VLMAdapter(VLMConfig(api_mode=VLMApiMode.OPENAI))
+        fake = _FakeCompletions([
+            _fake_response("not json at all", "stop"),
+            _fake_response(valid, "stop"),
+        ])
+        adapter.client = SimpleNamespace(chat=SimpleNamespace(completions=fake))
+
+        result = await adapter._enrich(None, "table_summary", context="ctx")
+
+        self.assertEqual(len(fake.calls), 2)
+        self.assertNotIn("extra_body", fake.calls[1])
+        self.assertTrue(result.success)
+
+        adapter2 = VLMAdapter(VLMConfig(api_mode=VLMApiMode.OPENAI))
+        fake2 = _FakeCompletions([
+            _fake_response('{"summary_zh": "被截斷', "length"),
+            _fake_response('{"summary_zh": "還是被截斷', "length"),
+        ])
+        adapter2.client = SimpleNamespace(chat=SimpleNamespace(completions=fake2))
+
+        result2 = await adapter2._enrich(None, "table_summary", context="ctx")
+
+        self.assertEqual(len(fake2.calls), 2)  # recovery pair only, no extra retry
+        self.assertTrue(result2.needs_review)
 
 
 class EnrichCachePolicyTest(unittest.TestCase):
@@ -268,3 +401,77 @@ class ClientRetryPolicyTest(unittest.TestCase):
         # the waste (observed 1082s wall for one semantic_repair). Recovery is
         # handled explicitly in _create_with_recovery instead.
         self.assertEqual(VLMAdapter().client.max_retries, 0)
+
+
+class FigureEnrichmentLanguageTest(unittest.IsolatedAsyncioTestCase):
+    """#6: the figure-caption prompt must force the resolved output language, so the
+    local qwen VLM stops emitting English semantic_caption/facts for zh-TW documents
+    (observed on 204電子白板 / 信箱封存: every caption + fact came back in English)."""
+
+    def _adapter_with(self, responses) -> tuple[VLMAdapter, _FakeCompletions]:
+        adapter = VLMAdapter(VLMConfig())
+        fake = _FakeCompletions(responses)
+        adapter.client = SimpleNamespace(chat=SimpleNamespace(completions=fake))
+        return adapter, fake
+
+    async def test_figure_prompt_requests_traditional_chinese_when_zh_tw(self):
+        valid = json.dumps(
+            {"semantic_caption": "說明", "facts": [], "keywords": [], "needs_review": False}
+        )
+        adapter, fake = self._adapter_with([_fake_response(valid, "stop")])
+        await adapter._enrich(
+            None,
+            "figure_caption",
+            context="ctx",
+            extra_vars={"semantic_output_language": "zh-TW"},
+        )
+        sent = json.dumps(fake.calls[0]["messages"], ensure_ascii=False)
+        # The strong zh-TW directive from prompt_language_instruction must reach the model.
+        self.assertIn("繁體中文", sent)
+
+    async def test_enrich_figure_threads_output_language_into_prompt(self):
+        """The public enrich_figure path (used by the enrich stage) must forward the
+        resolved language, not silently default to the weak 'auto' instruction."""
+        valid = json.dumps(
+            {"semantic_caption": "說明", "facts": [], "keywords": [], "needs_review": False}
+        )
+        adapter, fake = self._adapter_with([_fake_response(valid, "stop")])
+        await adapter.enrich_figure(
+            None,  # type: ignore[arg-type]
+            context_text="ctx",
+            extra_vars={"semantic_output_language": "zh-TW"},
+        )
+        sent = json.dumps(fake.calls[0]["messages"], ensure_ascii=False)
+        self.assertIn("繁體中文", sent)
+
+    def test_salvage_never_uses_reasoning_dump_as_caption(self):
+        """A local VLM sometimes replies with plain-text chain-of-thought (no <think>
+        tags, no JSON). The salvage path used to put that WHOLE dump into
+        semantic_caption (observed live: a 9105-char simplified-Chinese reasoning dump
+        woven into rag.md). A caption that is just the raw reply must be dropped."""
+        dump = "这个任务需要我分析一张图片，并按照指定的JSON格式输出。" + "让我们仔细看Context里的文本，这些看起来像是界面元素。" * 60
+        adapter = VLMAdapter(VLMConfig())
+        result = adapter._salvage_figure_jsonish_response(dump, None)
+        self.assertEqual(result.get("semantic_caption", ""), "")
+        self.assertTrue(result.get("_error"))
+
+    def test_parse_failure_predicate_covers_unknown_error(self):
+        """UNKNOWN_ERROR salvages are parse failures too — they must get the same
+        single resample as JSON_PARSE_FAILED (observed live: an UNKNOWN_ERROR reply
+        skipped the retry because the predicate only matched JSON_PARSE_FAILED)."""
+        self.assertTrue(VLMAdapter._is_parse_failure({"_error": "UNKNOWN_ERROR"}))
+        self.assertTrue(VLMAdapter._is_parse_failure({"_error": "JSON_PARSE_FAILED: x"}))
+        self.assertFalse(VLMAdapter._is_parse_failure({"semantic_caption": "ok"}))
+
+    async def test_figure_prompt_forbids_transcribing_incidental_personal_content(self):
+        """#4 privacy: screenshots in how-to guides often catch incidental personal
+        content (an inbox's subjects/senders, chat messages). The prompt must tell the
+        VLM not to transcribe those items — observed leak: real email subjects and
+        senders from an Outlook inbox screenshot landed in the RAG corpus."""
+        valid = json.dumps(
+            {"semantic_caption": "說明", "facts": [], "keywords": [], "needs_review": False}
+        )
+        adapter, fake = self._adapter_with([_fake_response(valid, "stop")])
+        await adapter._enrich(None, "figure_caption", context="ctx")
+        sent = json.dumps(fake.calls[0]["messages"], ensure_ascii=False)
+        self.assertIn("incidental personal content", sent)

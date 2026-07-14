@@ -113,6 +113,9 @@ class ChunkStage:
     def __init__(self, config: PipelineConfig | None = None):
         self.config = config or PipelineConfig()
         self.package_config = self.config.package
+        # block_id -> figure retrieval text, loaded per run from assets_index.jsonl
+        # so image blocks chunk as searchable text instead of a bare placeholder.
+        self._asset_text: dict[str, str] = {}
 
     async def run(
         self,
@@ -141,6 +144,10 @@ class ChunkStage:
                 )
 
             chunks: list[Chunk] = []
+
+            # Figure enrichment text (written by the package stage before chunking)
+            # so image blocks become searchable body text, not a bare placeholder.
+            self._asset_text = self._load_asset_retrieval_text(run_path / "outputs")
 
             # Generate chunks from blocks
             rag_chunks = self._chunk_blocks(
@@ -182,6 +189,32 @@ class ChunkStage:
                 success=False,
                 error=str(e),
             )
+
+    def _load_asset_retrieval_text(self, outputs_dir: Path) -> dict[str, str]:
+        """Map block_id -> figure retrieval text from assets_index.jsonl.
+
+        The package stage writes assets_index.jsonl (one AssetEntry per line, each
+        carrying block_id + retrieval_text) before the chunk stage runs. Reusing it
+        keeps image chunks byte-for-byte consistent with the RAG markdown, which
+        renders the same retrieval_text for figures.
+        """
+        asset_text: dict[str, str] = {}
+        index_path = outputs_dir / "assets_index.jsonl"
+        if not index_path.exists():
+            return asset_text
+        try:
+            for line in index_path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                entry = json.loads(line)
+                block_id = entry.get("block_id", "")
+                text = (entry.get("retrieval_text") or "").strip()
+                if block_id and text:
+                    asset_text[block_id] = text
+        except Exception:
+            return {}
+        return asset_text
 
     def _load_structured_chunks(self, outputs_dir: Path) -> list[Chunk]:
         """Use row-level structured chunks when package stage generated them."""
@@ -565,6 +598,13 @@ class ChunkStage:
 
         elif block.type == BlockType.IMAGE:
             caption = block.payload.get("caption", "")
+            # Prefer the VLM figure retrieval text so the figure's information is
+            # searchable in the chunk body, rather than a model-unreadable
+            # ``[Image: caption]`` placeholder. Falls back to the placeholder when
+            # no enrichment text was produced for this block.
+            retrieval_text = self._asset_text.get(block.block_id, "")
+            if retrieval_text:
+                return retrieval_text
             return f"[Image: {caption}]" if caption else "[Image]"
 
         elif block.type == BlockType.EQUATION:

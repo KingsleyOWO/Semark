@@ -63,6 +63,75 @@ def test_structured_chunks_replace_raw_block_chunks(tmp_path):
     assert len(chunks_text.splitlines()) == 1
 
 
+def test_image_block_chunk_carries_figure_retrieval_text_not_placeholder(tmp_path):
+    """Default block chunks weave the VLM figure retrieval text (searchable)
+    instead of the bare ``[Image: caption]`` placeholder, reading the
+    ``assets_index.jsonl`` the package stage writes before chunking runs."""
+    run_path = tmp_path / "run"
+    outputs = run_path / "outputs"
+    outputs.mkdir(parents=True)
+    # Package stage writes assets_index.jsonl with per-figure retrieval_text keyed by block_id.
+    (outputs / "assets_index.jsonl").write_text(
+        json.dumps(
+            {
+                "type": "figure_asset",
+                "asset_id": "fig0000",
+                "doc_id": "doc",
+                "run_id": "run",
+                "title": "會議室環控面板",
+                "page_idx": 0,
+                "asset_path": "assets/figures/fig0000.jpg",
+                "block_id": "img0",
+                "retrieval_text": "會議室環控面板\n投影機 開關\nHDMI 訊號切換\n黑幕 升降控制",
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    document_ir = DocumentIR(
+        doc_id="doc",
+        run_id="run",
+        source=SourceInfo(path="208.pdf", ext="pdf", sha256="abc", size_bytes=100),
+        engine=EngineInfo(backend="pipeline", method="auto"),
+        pages=[PageInfo(page_idx=0)],
+        blocks=[
+            Block(
+                block_id="h0",
+                type=BlockType.TEXT,
+                page_idx=0,
+                payload={"text": "208 會議室操作", "text_level": 1},
+            ),
+            Block(
+                block_id="img0",
+                type=BlockType.IMAGE,
+                page_idx=0,
+                payload={"img_path": "figures/fig0000.jpg", "caption": "控制面板"},
+            ),
+        ],
+    )
+
+    result = asyncio.run(ChunkStage().run("doc", "run", document_ir, run_path))
+
+    assert result.success
+    chunks = [
+        json.loads(line)
+        for line in (outputs / "chunks.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    image_chunks = [c for c in chunks if "img0" in c["block_ids"]]
+    assert image_chunks, "expected a chunk covering the image block"
+    content = "\n".join(c["content"] for c in image_chunks)
+    # Figure information is now retrievable as body text.
+    assert "投影機" in content
+    assert "HDMI" in content
+    assert "黑幕" in content
+    # The impoverished placeholder no longer stands in for the figure.
+    assert "[Image:" not in content
+    # No broken internal image link leaks into the searchable body.
+    assert "asset://" not in content
+
+
 def test_empty_structured_chunks_fall_back_to_raw_block_chunks(tmp_path):
     run_path = tmp_path / "run"
     outputs = run_path / "outputs"

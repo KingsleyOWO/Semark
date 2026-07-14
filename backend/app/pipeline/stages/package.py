@@ -730,7 +730,16 @@ class PackageStage:
             "vlm_audit_missing_items",
         }
         for issue in getattr(quality_gate, "issues", []) or []:
-            if getattr(issue, "code", None) in repair_codes:
+            # Only medium/high issues justify the reviewer rewrite. Warning-severity
+            # cosmetics (ellipsis, parser residue, OCR title noise: 0.05 penalty)
+            # used to launch a slow reviewer pass that — with the local model —
+            # usually fell back and stamped auto_rag_ready=False onto complete,
+            # clean content. Warnings stay visible on the gate; they just no longer
+            # trigger a rewrite.
+            if (
+                getattr(issue, "code", None) in repair_codes
+                and str(getattr(issue, "severity", "")) in ("high", "medium")
+            ):
                 return True
 
         stats = dict(getattr(quality_gate, "stats", {}) or {})
@@ -2099,6 +2108,7 @@ class PackageStage:
         text = render_vlm_text(markdown)
         text = re.sub(r"^```(?:markdown|md)?\s*", "", text.strip(), flags=re.IGNORECASE)
         text = re.sub(r"\s*```$", "", text.strip())
+        text = self._strip_markdown_image_links(text)
         text = re.sub(r"\n{3,}", "\n\n", text).strip()
         clean_title = self._clean_export_title(title or "")
         if clean_title and not re.match(r"^#\s+", text):
@@ -2110,6 +2120,27 @@ class PackageStage:
                 text = re.sub(r"^#\s+[^\n]+", f"# {clean_title}", text, count=1)
         text = self._remove_duplicate_repair_heading(text, clean_title)
         return text.strip() + "\n"
+
+    @staticmethod
+    def _strip_markdown_image_links(text: str) -> str:
+        """Remove Markdown image embeds ``![alt](url)`` from reviewer-rewritten
+        markdown, keeping the alt caption as plain searchable text.
+
+        The semantic-repair reviewer weaves figure information into prose but can
+        reintroduce MinerU-native ``![](images/<hash>.jpg)`` links from the source
+        evidence. Those links are broken in every viewer and unreadable by the
+        text-only downstream model, so they must never reach rag.md or the chunks
+        — mirroring the ``_render_block_rag`` 圖轉文字/拿掉連結 policy.
+        """
+        # Replace each image embed with its alt caption (may be empty).
+        text = re.sub(r"!\[([^\]]*)\]\([^)]*\)", lambda m: m.group(1).strip(), text)
+        # Drop lines that are now just a list marker / whitespace (empty-alt embeds).
+        kept = [
+            line
+            for line in text.splitlines()
+            if not re.fullmatch(r"\s*(?:[-*+]|\d+[.)])\s*", line)
+        ]
+        return "\n".join(kept)
 
     @classmethod
     def _remove_duplicate_repair_heading(cls, markdown: str, title: str) -> str:
@@ -3352,6 +3383,8 @@ class PackageStage:
                 continue
             if title.startswith(("標 號", "修改歷程", "頁碼", "ROW:", "COLUMNS:", "...(", "[[asset:")):
                 continue
+            if self._is_numbered_step_heading(title):
+                continue
             if self._is_unreliable_export_title(title) or self._is_toc_like_display_line(title):
                 continue
             if source_ext in {".xls", ".xlsx", ".ods"} and self._is_weak_spreadsheet_source_title(title):
@@ -3384,6 +3417,15 @@ class PackageStage:
             return self._clean_export_title(f"{org}{subject}{kind}")
         return ""
 
+    @staticmethod
+    def _is_numbered_step_heading(title: str) -> bool:
+        """Mid-procedure step lines (「2. 點選『工具』…」) that MinerU sometimes
+        promotes to markdown headings. They are actions, never document titles —
+        picking one poisons form_name/heading_path on every fallback chunk.
+        A dot followed by a digit (「50.34 version 2.0」) is a section/version
+        code, not a step marker."""
+        return bool(re.match(r"^\d{1,3}\s*(?:[、)）]|\.(?!\d))\s*\S", title))
+
     def _best_source_title_candidate(self, source_md: str) -> str:
         candidates: list[tuple[int, int, str]] = []
         for order, raw_line in enumerate((source_md or "").splitlines()[:180]):
@@ -3397,6 +3439,8 @@ class PackageStage:
             title = self._clean_export_title(line)
             compact = re.sub(r"\s+", "", title)
             if not compact or len(compact) < 6 or len(compact) > 80:
+                continue
+            if self._is_numbered_step_heading(title):
                 continue
             if self._is_unreliable_export_title(title) or self._is_toc_like_display_line(title):
                 continue
@@ -3432,6 +3476,10 @@ class PackageStage:
         for term in title_terms:
             if term in compact:
                 score += 18
+        # How-to guide titles (「如何幫信箱做封存？」) carry no 辦法/要點-style
+        # term, but a leading 如何 on a short line is an unambiguous title shape.
+        if re.match(r"^如何", compact):
+            score += 20
         topic_terms = get_corpus_rules().marker_list("title_topic_score_terms")
         if topic_terms and re.search("(" + "|".join(topic_terms) + ")", compact):
             score += 12
@@ -3769,6 +3817,22 @@ class PackageStage:
         text = re.sub(r"(政府機關|廠商|講座)\s+([甲乙丙丁])", r"\1\2", text)
         return text
 
+    @staticmethod
+    def _strip_watermark_lines(lines: list[str]) -> list[str]:
+        """Drop lines carrying corpus watermark terms (``document_markers.watermark_terms``).
+
+        Photos/screenshots of on-site equipment often catch the organization's
+        background watermark; the VLM dutifully OCRs it into all_text/facts/keywords,
+        polluting retrieval text with identity strings that carry no semantics. Terms
+        live in the corpus ruleset (real terms belong in the local, non-committed
+        ruleset). A line containing a term is dropped whole — watermark-adjacent prose
+        (e.g. a fact *describing* the watermark) is noise too.
+        """
+        terms = [term for term in get_corpus_rules().marker_list("watermark_terms") if len(term) >= 2]
+        if not terms:
+            return lines
+        return [line for line in lines if not any(term in line for term in terms)]
+
     def _render_visual_semantic_content(
         self,
         title: str,
@@ -3780,7 +3844,7 @@ class PackageStage:
         language = "en" if semantic_output_language == "en" else "zh-TW"
         output = coerce_visual_vlm_output(output)
         structured_lines = split_vlm_lines(output.get("structured_content", ""))
-        all_text_lines = split_vlm_lines(output.get("all_text", ""))
+        all_text_lines = self._strip_watermark_lines(split_vlm_lines(output.get("all_text", "")))
         facts = []
         for line in split_vlm_lines(output.get("facts", [])):
             if language == "en":
@@ -3791,17 +3855,52 @@ class PackageStage:
             ascii_count = sum(1 for ch in line if ch.isascii() and ch.isalpha())
             if zh_count >= 8 and zh_count >= ascii_count:
                 facts.append(line)
-        keywords = split_vlm_lines(output.get("keywords", []))
+        facts = self._strip_watermark_lines(facts)
+        keywords = self._strip_watermark_lines(split_vlm_lines(output.get("keywords", [])))
         image_type = str(output.get("image_type", "")).lower()
 
-        is_flow = image_type == "flowchart" or any(" > " in line for line in structured_lines)
+        # PATH-notation lines in a SCREENSHOT/PHOTO are UI menus or folder trees the
+        # VLM happened to transcribe — not a workflow. Flow-templating them fabricates
+        # 語意摘要/詳細流程路徑 sections and amplifies incidental content (observed: an
+        # Outlook folder tree rendered as a fake "flow" repeating the account address
+        # dozens of times). Only genuine chart types get the flow template; screenshots
+        # and photos render as plain searchable lines below.
+        is_flow = image_type in ("flowchart", "org_chart") or (
+            image_type not in ("screenshot", "photo")
+            and any(" > " in line for line in structured_lines)
+        )
         if not is_flow:
             parts = []
             if facts:
                 parts.extend(facts)
             if structured_lines:
                 parts.extend(structured_lines)
-            return "\n".join(parts or all_text_lines).strip()
+            if parts:
+                # Chinese-language semantic content survived the filter; append the
+                # figure's visible OCR text (deduped) as extra searchable labels and
+                # keep raw English out of the zh-TW corpus.
+                for line in all_text_lines:
+                    if line not in parts:
+                        parts.append(line)
+                return "\n".join(parts).strip()
+            # No zh semantic content. If the figure carries real Chinese OCR, use it
+            # as-is (respecting the "no English caption leak" policy). Otherwise the
+            # figure is a photo/icon whose only description is the VLM caption/facts —
+            # fall back to those rather than collapse it to a useless OCR fragment
+            # (regression: the 204 reboot photo rendered as just "JECTOR" while the
+            # VLM had captured the rear rocker power switch). English is acceptable
+            # here — a real description is searchable, and #6 upgrades it to zh-TW.
+            zh_char_count = sum(1 for ch in "".join(all_text_lines) if "一" <= ch <= "鿿")
+            if zh_char_count >= 4:
+                return "\n".join(all_text_lines).strip()
+            caption = render_vlm_text(output.get("semantic_caption", ""))
+            raw_facts = self._strip_watermark_lines(split_vlm_lines(output.get("facts", [])))
+            fallback_parts: list[str] = []
+            for line in [caption, *raw_facts, *all_text_lines]:
+                line = line.strip()
+                if line and line not in fallback_parts:
+                    fallback_parts.append(line)
+            return "\n".join(fallback_parts).strip()
 
         path_lines = [line for line in structured_lines if " > " in line]
         if language != "en":
@@ -4289,7 +4388,7 @@ class PackageStage:
                         )
                         retrieval_parts = [title, semantic_retrieval]
                         if keywords:
-                            retrieval_parts.extend(keywords)
+                            retrieval_parts.extend(self._strip_watermark_lines(list(keywords)))
                         retrieval_text = "\n".join(part for part in retrieval_parts if part).strip()
 
                         asset = AssetEntry(
@@ -4660,6 +4759,32 @@ class PackageStage:
 
         return lines
 
+    @staticmethod
+    def _looks_like_authored_prose(text: str) -> bool:
+        """Tell the document's authored prose apart from bare OCR fragments.
+
+        On a "visually structured" page (one whose figure carries transcribed
+        ``structured_content``) the page's loose text is normally dropped as
+        redundant with the figure — but authored prose (numbered how-to steps,
+        ``提醒``/``注意`` paragraphs, or any punctuated sentence) is real content
+        that must survive. Bare noun-phrase fragments (flowchart box labels the
+        VLM already captured) return ``False`` and stay eligible for dropping.
+        """
+        stripped = (text or "").strip()
+        if not stripped:
+            return False
+        # Numbered / lettered / CJK-numeral list markers introduce authored steps.
+        if re.match(r"^(?:\d+|[一二三四五六七八九十百]+|[A-Za-z]|[（(]\d+[)）]|[①-⑳])\s*[.、)）:：]", stripped):
+            return True
+        # Explicit note/step labels used by how-to guides.
+        if re.match(r"^(?:提醒|注意|附註|備註|說明|步驟|注意事項|重點|補充|例)", stripped):
+            return True
+        # Sentence-like content: CJK or ASCII sentence punctuation (excluding the
+        # bare ASCII dot, which appears in URLs/emails/version fragments).
+        if re.search(r"[，。！？；：、「」『』（）()!?;]", stripped):
+            return True
+        return False
+
     def _render_rag_md(
         self,
         document_ir: DocumentIR,
@@ -4718,9 +4843,20 @@ class PackageStage:
             if page_idx in excluded_page_indices:
                 continue
 
+            # A figure's non-empty ``structured_content`` marks its page "visually
+            # structured", which suppresses the page's loose text to avoid duplicating
+            # the figure's own OCR (e.g. flowchart box labels the VLM already
+            # transcribed into structured_content). But this must NEVER drop the
+            # document's authored prose: numbered how-to steps and 提醒 paragraphs live
+            # in TEXT blocks, and suppressing them silently deletes the actual
+            # instructions (regression: the mailbox-archive guide lost steps 5-7 and
+            # both reminders from every output while they stayed in the IR). Keep the
+            # leading title and any authored-prose TEXT; drop only bare OCR fragments.
             if page_idx in visual_structured_pages and block.type != BlockType.IMAGE:
                 text = str(block.payload.get("text", "")).strip() if block.type == BlockType.TEXT else ""
-                if not (block.reading_order == 0 and len(text) >= 10):
+                is_title = block.reading_order == 0 and len(text) >= 10
+                is_authored_prose = block.type == BlockType.TEXT and self._looks_like_authored_prose(text)
+                if not (is_title or is_authored_prose):
                     continue
 
             # Check if this block's page has a form enrichment
@@ -4796,24 +4932,26 @@ class PackageStage:
                 # Skip ALL original blocks for form pages since VLM content is more complete
                 continue
 
-            # Check if this block has a figure enrichment with structured_content
+            # Weave figure enrichment into the RAG body as searchable text.
+            # Fire whenever the VLM produced any renderable semantic text (structured_content,
+            # all_text, or facts) — not only structured_content — so photos/screenshots whose
+            # information lives in all_text are captured as body text instead of emitting a
+            # broken, model-unreadable asset:// image link.
             block_enrichment = enrichments.get(block.block_id, {})
             if block_enrichment.get("kind") in ("figure_caption", "figure_description"):
-                structured_content = block_enrichment.get("output", {}).get("structured_content", "")
-                if structured_content:
-                    asset = asset_map.get(block.block_id)
-                    if asset and self._is_decorative_figure_asset(asset):
-                        continue
-                    fallback_title = "Flowchart" if semantic_output_language == "en" else "流程圖"
-                    asset_title = asset.title if asset else fallback_title
-                    content = (
-                        self._render_visual_semantic_content(
-                            asset_title,
-                            block_enrichment.get("output", {}),
-                            semantic_output_language=semantic_output_language,
-                        )
-                        + "\n\n"
-                    )
+                asset = asset_map.get(block.block_id)
+                if asset and self._is_decorative_figure_asset(asset):
+                    # Decorative figure (arrow/icon/no-text): drop it entirely, as before.
+                    continue
+                fallback_title = "Flowchart" if semantic_output_language == "en" else "流程圖"
+                asset_title = asset.title if asset else fallback_title
+                visual_content = self._render_visual_semantic_content(
+                    asset_title,
+                    block_enrichment.get("output", {}),
+                    semantic_output_language=semantic_output_language,
+                ).strip()
+                if visual_content:
+                    content = visual_content + "\n\n"
                     lines.append(content)
                     char_pos += len(content)
 
@@ -4824,6 +4962,7 @@ class PackageStage:
                     )
                     anchors.append(anchor)
                     continue
+                # No renderable semantic text — fall through to default block rendering.
 
             # Default: render block normally
             block_lines = self._render_block_rag(
@@ -5104,21 +5243,23 @@ class PackageStage:
                 return []
 
             if asset:
-                # Use exported asset path
-                alt_text = caption or asset.title
-                lines.append(f"![{alt_text}](asset://{asset.asset_path})")
+                # Emit the figure's semantic retrieval text (RAG-searchable) rather than a
+                # broken, model-unreadable asset:// image link.
+                body = (
+                    render_vlm_text(asset.retrieval_text)
+                    or render_vlm_text(asset.semantic_caption)
+                    or caption
+                    or asset.title
+                )
+                if body:
+                    lines.append(body)
 
-                if caption:
-                    lines.append(f"*{caption}*")
-
-                # Add asset reference as explicit token
+                # Keep the internal asset reference token for provenance/backlink.
                 lines.append(f"[[asset:{asset.asset_id}]]")
             else:
-                # Fallback to original path
-                img_path = block.payload.get("img_path", "")
-                if img_path:
-                    alt_text = caption or "Image"
-                    lines.append(f"![{alt_text}]({img_path})")
+                # No exported asset: keep any caption text but do not emit a broken image link.
+                if caption:
+                    lines.append(caption)
 
         elif block.type == BlockType.EQUATION:
             latex = block.payload.get("latex", "")

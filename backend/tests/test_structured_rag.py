@@ -819,6 +819,284 @@ def test_render_rag_md_accepts_list_structured_content():
     assert "正式受理申訴案 > 通知地方主管機關" in markdown
 
 
+def test_render_rag_md_weaves_figure_all_text_and_drops_asset_link():
+    """A figure whose information lives in ``all_text`` (e.g. a UI screenshot with an
+    empty ``structured_content``) must be woven into the RAG body as searchable text,
+    and the RAG markdown must not contain a broken internal ``asset://`` image link.
+    """
+    document_ir = DocumentIR(
+        doc_id="doc-a",
+        run_id="run-a",
+        source=SourceInfo(path="guide.pdf", ext="pdf", sha256="abc", size_bytes=1),
+        engine=EngineInfo(backend="pipeline", method="auto"),
+        blocks=[
+            Block(
+                block_id="fig-a",
+                type=BlockType.IMAGE,
+                page_idx=0,
+                payload={"img_path": "fig-a.png", "caption": "下午12:03 9月7日 週三"},
+            ),
+        ],
+    )
+    asset = AssetEntry(
+        type="figure_asset",
+        asset_id="fig0000",
+        doc_id="doc-a",
+        run_id="run-a",
+        title="投影機控制畫面",
+        page_idx=0,
+        asset_path="assets/figures/fig0000.jpg",
+        block_id="fig-a",
+        retrieval_text="投影機控制畫面",
+        semantic_caption="A screenshot of an iPad control panel.",
+        structured_content="",
+        keywords=["投影機", "HDMI"],
+    )
+
+    markdown, _ = PackageStage()._render_rag_md(
+        document_ir=document_ir,
+        asset_map={"fig-a": asset},
+        enrichments={
+            "fig-a": {
+                "kind": "figure_description",
+                "output": {
+                    "semantic_caption": "A screenshot of an iPad control panel.",
+                    "image_type": "screenshot",
+                    "structured_content": "",
+                    "all_text": [
+                        "情境模式",
+                        "音量控制",
+                        "投影機",
+                        "系統關閉",
+                        "ON",
+                        "OFF",
+                        "HDMI",
+                        "黑幕",
+                        "升降",
+                    ],
+                    "facts": ["The interface is a control panel for room equipment."],
+                    "keywords": ["投影機", "HDMI"],
+                },
+            },
+        },
+    )
+
+    # The screenshot's visible Chinese UI labels become searchable body text.
+    assert "投影機" in markdown
+    assert "HDMI" in markdown
+    assert "黑幕" in markdown
+    assert "升降" in markdown
+    # No broken internal image link should remain in the RAG markdown.
+    assert "asset://" not in markdown
+
+
+def test_render_rag_md_keeps_prose_steps_on_visual_structured_page():
+    """Regression: authored prose (numbered steps / 提醒 paragraphs) on a page that
+    also carries a figure with non-empty ``structured_content`` must NOT be dropped.
+
+    A figure's ``structured_content`` marks its page "visually structured", which
+    previously suppressed *every* non-image block on that page except the first
+    reading-order heading — silently deleting the document's actual instructions.
+    Observed live on the mailbox-archive guide: steps 5-7 and both 提醒 reminders
+    vanished from every packaged output while remaining present in the IR.
+    """
+    document_ir = DocumentIR(
+        doc_id="doc-a",
+        run_id="run-a",
+        source=SourceInfo(path="guide.pdf", ext="pdf", sha256="abc", size_bytes=1),
+        engine=EngineInfo(backend="pipeline", method="auto"),
+        blocks=[
+            Block(
+                block_id="title",
+                type=BlockType.TEXT,
+                page_idx=0,
+                reading_order=0,
+                payload={"text": "信箱封存操作說明", "text_level": 1},
+            ),
+            Block(
+                block_id="fig",
+                type=BlockType.IMAGE,
+                page_idx=0,
+                reading_order=1,
+                payload={"img_path": "fig.png", "caption": "封存對話框"},
+            ),
+            Block(
+                block_id="step6",
+                type=BlockType.TEXT,
+                page_idx=0,
+                reading_order=2,
+                payload={"text": "6. 封存時，outlook 右下角顯示「正在封存」"},
+            ),
+            Block(
+                block_id="remind",
+                type=BlockType.TEXT,
+                page_idx=0,
+                reading_order=3,
+                payload={"text": "提醒：封存後郵件移至本機硬碟，電腦重灌時該檔案需一併備份。"},
+            ),
+        ],
+    )
+
+    markdown, _ = PackageStage()._render_rag_md(
+        document_ir=document_ir,
+        asset_map={},
+        enrichments={
+            "fig": {
+                "kind": "figure_description",
+                "output": {
+                    # Non-empty structured_content marks page 0 "visual-structured".
+                    "structured_content": "封存 > 封存此資料夾及所有的子資料夾",
+                    "all_text": ["封存", "確定", "取消"],
+                    "keywords": ["封存"],
+                },
+            },
+        },
+    )
+
+    # The authored prose steps/reminders must survive alongside the figure content.
+    assert "正在封存" in markdown, markdown
+    assert "重灌" in markdown, markdown
+    assert "一併備份" in markdown, markdown
+
+
+def test_visual_semantic_falls_back_to_caption_when_no_chinese_text():
+    """A photo whose only usable description lives in the VLM caption/facts (no
+    Chinese OCR; English facts stripped by the zh-TW language filter) must still
+    produce a searchable description — not collapse to the bare OCR fragment.
+
+    Regression: the 204 電子白板 reboot photo rendered as just "JECTOR" while the
+    VLM had captured the rear rocker power switch in semantic_caption + facts.
+    """
+    rendered = PackageStage()._render_visual_semantic_content(
+        "Figure 7",
+        {
+            "semantic_caption": "The rear panel has a rocker power switch below the arrow sticker.",
+            "image_type": "photo",
+            "structured_content": "",
+            "all_text": ["JECTOR"],
+            "facts": ["The power switch is a rocker switch located below the rear arrow sticker."],
+            "keywords": ["power switch", "restart"],
+        },
+        semantic_output_language="zh-TW",
+    )
+    assert "rocker" in rendered.lower(), rendered
+    assert "power switch" in rendered.lower(), rendered
+    # Must not collapse to the useless bare OCR token.
+    assert rendered.strip() != "JECTOR", rendered
+
+
+def test_visual_semantic_keeps_chinese_ocr_without_leaking_english_caption():
+    """Guard: when a figure carries real Chinese OCR, the (English) caption must
+    NOT be injected into the zh-TW corpus — the visible Chinese text is used as-is.
+    """
+    rendered = PackageStage()._render_visual_semantic_content(
+        "Figure 1",
+        {
+            "semantic_caption": "A close-up photo of a control panel with buttons.",
+            "image_type": "photo",
+            "structured_content": "",
+            "all_text": ["電源", "訊號切換／筆電:HDMI2"],
+            "facts": ["The left label reads Power."],
+            "keywords": ["電源"],
+        },
+        semantic_output_language="zh-TW",
+    )
+    assert "電源" in rendered, rendered
+    assert "訊號切換" in rendered, rendered
+    assert "control panel" not in rendered.lower(), rendered
+
+
+def test_visual_semantic_screenshot_paths_render_plain_not_flow_template():
+    """#4: PATH-notation lines in a SCREENSHOT are UI menus/folder trees the VLM
+    transcribed — not a workflow. Flow-templating them fabricates 語意摘要/詳細流程路徑
+    sections (observed: an Outlook folder tree rendered as a fake "flow" that repeated
+    the account address dozens of times). Screenshots must render as plain lines.
+    """
+    rendered = PackageStage()._render_visual_semantic_content(
+        "訊號源設定",
+        {
+            "semantic_caption": "設定介面截圖。",
+            "image_type": "screenshot",
+            "structured_content": "訊號源設定 > HDMI1(PC)\n訊號源設定 > HDMI2(SideInput)",
+            "all_text": ["訊號源設定", "HDMI1(PC)", "HDMI2(SideInput)"],
+            "facts": ["紅框特別標示了兩個常用的輸入來源選項，需要重點關注。"],
+            "keywords": ["訊號源設定", "HDMI1"],
+        },
+        semantic_output_language="zh-TW",
+    )
+    assert "語意摘要" not in rendered, rendered
+    assert "詳細流程路徑" not in rendered, rendered
+    assert "常見查詢主題" not in rendered, rendered
+    # Content must still be searchable as plain lines.
+    assert "訊號源設定 > HDMI1(PC)" in rendered, rendered
+    assert "重點關注" in rendered, rendered
+
+
+def test_visual_semantic_filters_corpus_watermark_terms(monkeypatch):
+    """#5: on-screen background watermarks get OCR'd by the VLM into
+    all_text/facts/keywords, polluting retrieval text with identity strings.
+    Terms come from the corpus ruleset (``document_markers.watermark_terms``);
+    real terms live only in the local, non-committed ruleset.
+    """
+    from app.pipeline.corpus_rules import CorpusRules
+
+    monkeypatch.setattr(
+        "app.pipeline.stages.package.get_corpus_rules",
+        lambda: CorpusRules(document_markers={"watermark_terms": ("示範40", "深耕示範")}),
+    )
+    stage = PackageStage()
+    rendered = stage._render_visual_semantic_content(
+        "訊號源設定",
+        {
+            "semantic_caption": "設定介面截圖。",
+            "image_type": "screenshot",
+            "structured_content": "",
+            "all_text": ["訊號源設定", "示範40", "深耕示範·邁向國際"],
+            "facts": ["背景有「示範40」的浮水印文字。", "紅框標示了常用的輸入來源選項。"],
+            "keywords": ["訊號源設定", "示範40"],
+        },
+        semantic_output_language="zh-TW",
+    )
+    assert "示範40" not in rendered, rendered
+    assert "深耕示範" not in rendered, rendered
+    assert "訊號源設定" in rendered, rendered
+    assert "輸入來源" in rendered, rendered
+
+    # Flow path too: watermark keywords must not surface in 常見查詢主題.
+    flow_rendered = stage._render_visual_semantic_content(
+        "作業流程圖",
+        {
+            "semantic_caption": "",
+            "image_type": "flowchart",
+            "structured_content": "受理單位 > 正式受理申訴案",
+            "all_text": ["示範40"],
+            "facts": [],
+            "keywords": ["申訴", "示範40"],
+        },
+        semantic_output_language="zh-TW",
+    )
+    assert "示範40" not in flow_rendered, flow_rendered
+    assert "申訴" in flow_rendered, flow_rendered
+
+
+def test_visual_semantic_flowchart_still_gets_flow_template():
+    """Guard for #4: genuine flowcharts keep the semantic flow template."""
+    rendered = PackageStage()._render_visual_semantic_content(
+        "申訴流程圖",
+        {
+            "semantic_caption": "",
+            "image_type": "flowchart",
+            "structured_content": "受理單位 > 正式受理申訴案",
+            "all_text": [],
+            "facts": [],
+            "keywords": ["申訴"],
+        },
+        semantic_output_language="zh-TW",
+    )
+    assert "語意摘要" in rendered, rendered
+    assert "受理單位 > 正式受理申訴案" in rendered, rendered
+
+
 def test_write_document_exports_ignores_missing_forms_index(tmp_path):
     document_ir = DocumentIR(
         doc_id="doc-a",
@@ -1325,7 +1603,7 @@ def test_quality_gate_flags_form_like_document_without_form_structure(tmp_path):
 
 
 
-def test_quality_gate_flags_empty_structured_output_even_when_source_exists(tmp_path):
+def test_quality_gate_flags_empty_structured_output_for_form_document_when_source_exists(tmp_path):
     from types import SimpleNamespace
 
     document_ir = DocumentIR(
@@ -1350,7 +1628,7 @@ def test_quality_gate_flags_empty_structured_output_even_when_source_exists(tmp_
         ],
     )
     structured_output = SimpleNamespace(
-        plan=SimpleNamespace(document_type="generic_document"),
+        plan=SimpleNamespace(document_type="form_document"),
         records=[],
         chunks=[],
         rag_markdown="",
@@ -1363,8 +1641,10 @@ def test_quality_gate_flags_empty_structured_output_even_when_source_exists(tmp_
             assets=[],
             structured_output=structured_output,
             enrichments={
-                # The flowchart image was enriched as a figure, so the document has
-                # structure signals and empty structured output must be flagged.
+                # A form-type document with an enriched figure and empty structured
+                # output is a real defect (its rows should have been extracted), so
+                # it must be flagged. Generic/prose docs are exempt and covered
+                # separately in test_quality_gate_triggers.py.
                 "fig": {
                     "kind": "figure_caption",
                     "input": {"page_idx": 0},

@@ -456,6 +456,66 @@ class RepairGuardWiringTest(unittest.TestCase):
             self.assertEqual(stats["items"][0]["status"], "applied")
             self.assertIn("NT$3500", (outputs / "structured_rag.md").read_text(encoding="utf-8"))
 
+    def test_structured_reviewer_success_strips_broken_image_embeds_end_to_end(self):
+        """Integration guard for the reviewer-SUCCESS 破圖 path.
+
+        When the reviewer's own rewrite contains MinerU-native
+        ``![](images/<hash>.jpg)`` embeds (pulled from source evidence), the
+        written ``structured_rag.md`` AND ``structured_chunks.jsonl`` must come
+        out with no broken image markup; the alt caption survives as searchable
+        text. This drives the real ``_apply_semantic_repair`` end to end and only
+        stubs the uncontrollable VLM — i.e. it exercises the integration path the
+        unit test on ``_strip_markdown_image_links`` could not reach."""
+        reviewer_rewrite = (
+            "# 208 會議室環控操作說明\n\n"
+            "## 情境操作\n"
+            "- 外接筆電簡報：筆電連接前方木桌上的 HDMI 線投影。\n"
+            "  ![外接筆電簡報連接示意](images/f7f05104b3e864a4c3f5295158bba40b.jpg)\n"
+            "- 環控系統關閉：會議結束後按系統關閉即可。\n"
+            "  ![](images/0baa18867106c3ca9d2d816a335c5223.jpg)\n\n"
+            "## iPad 操作\n"
+            "環控 iPad 可操作投影機開關、黑幕及布幕升降，詳見下方介面。\n"
+            "![環控 iPad 介面](images/872b338cf413b60a9cd70db1e15c4860.jpg)\n"
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outputs = Path(tmpdir)
+            document_ir = _make_document_ir(
+                [PageInfo(page_idx=0)],
+                text="208 會議室環控操作，投影機黑幕布幕升降。",
+            )
+            adapter = RecordingRepairAdapter(reviewer_rewrite)
+            stats = asyncio.run(
+                PackageStage()._apply_semantic_repair(
+                    outputs_dir=outputs,
+                    document_ir=document_ir,
+                    source_md="# 208 會議室環控操作",
+                    structured_output=SimpleNamespace(
+                        plan=SimpleNamespace(document_type="generic_document", title="208 會議室環控操作"),
+                        records=[],
+                        chunks=[],
+                        rag_markdown="# 208 會議室環控操作\n\n投影機、黑幕、布幕升降操作說明。",
+                    ),
+                    quality_gate=FORM_QUALITY_GATE,
+                    enrichments={},
+                    semantic_output_language="zh-TW",
+                    review_adapter=adapter,
+                )
+            )
+
+            # The reviewer rewrite was accepted — this is the reviewer-SUCCESS path.
+            self.assertEqual(stats["items"][0]["status"], "applied")
+
+            rag_md = (outputs / "structured_rag.md").read_text(encoding="utf-8")
+            chunks = (outputs / "structured_chunks.jsonl").read_text(encoding="utf-8")
+
+            # No broken image markup / link survives in either ingested artifact.
+            for artifact in (rag_md, chunks):
+                self.assertNotIn("![", artifact)
+                self.assertNotIn("images/", artifact)
+            # The alt caption is kept as searchable text (圖轉文字).
+            self.assertIn("外接筆電簡報連接示意", rag_md)
+            self.assertIn("外接筆電簡報連接示意", chunks)
+
 
 CLEAN_REPAIRED_MARKDOWN = (
     "# Policy\n\n"

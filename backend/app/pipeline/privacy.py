@@ -41,6 +41,11 @@ _MAIL_SUBJECT_LINE_RE = re.compile(r"^\s*(?:RE|FW|回覆|轉寄)[:：]", re.IGNO
 _DOMAIN_ACCOUNT_RE = re.compile(
     r"(?<![A-Za-z0-9\\])([A-Za-z][A-Za-z0-9]{1,15}\\[A-Za-z])\d{4,6}(?![0-9])"
 )
+# The same personal id in email form (d23456@example.tw). Service aliases
+# without a numeric id (support@...) pass through.
+_EMAIL_ACCOUNT_RE = re.compile(
+    r"(?<![A-Za-z0-9._%+-])([A-Za-z][A-Za-z._%+-]*)\d{4,6}(?=@[A-Za-z0-9.-]+\.[A-Za-z]{2,})"
+)
 # Any line cropped by a screenshot edge (trailing ellipsis).
 _TRUNCATED_LINE_RE = re.compile(r"(?:\.{2,}|…)\s*$", re.MULTILINE)
 # Stable UI markers of a mail-client message-list pane. Everything short and
@@ -69,6 +74,7 @@ def scrub_transcribed_privacy(text: str) -> str:
         _MAIL_SENDER_LINE_RE.search(text)
         or _MAIL_SUBJECT_LINE_RE.search(text)
         or _DOMAIN_ACCOUNT_RE.search(text)
+        or _EMAIL_ACCOUNT_RE.search(text)
         or _TRUNCATED_LINE_RE.search(text)
         or any(_INBOX_REGION_MARKER_RE.match(line.strip()) for line in text.splitlines())
     ):
@@ -118,4 +124,5 @@ def scrub_transcribed_privacy(text: str) -> str:
             continue
         previous_dropped = False
         kept.append(line)
-    return _DOMAIN_ACCOUNT_RE.sub(r"\1*****", "\n".join(kept))
+    result = _DOMAIN_ACCOUNT_RE.sub(r"\1*****", "\n".join(kept))
+    return _EMAIL_ACCOUNT_RE.sub(r"\1*****", result)

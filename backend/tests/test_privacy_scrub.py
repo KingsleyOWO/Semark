@@ -208,3 +208,25 @@ def test_finalize_delivered_markdown_masks_parser_content():
     assert "[[asset:" not in out
     assert "d32755" not in out
     assert "DEMO\\d*****" in out
+
+
+def test_email_account_digits_masked():
+    # Live (web-drive guide): 「收件者為 d23456@demo.example.tw」 sailed through —
+    # the domain-account rule only knew the DOMAIN\x12345 shape, not emails.
+    text = "分享時收件者信箱填寫為 d23456@demo.example.tw，主旨會自動帶入。"
+
+    from app.pipeline.privacy import scrub_transcribed_privacy
+
+    out = scrub_transcribed_privacy(text)
+
+    assert "d23456" not in out
+    assert "d*****@demo.example.tw" in out
+    assert "主旨會自動帶入" in out
+
+
+def test_email_without_personal_numeric_id_untouched():
+    text = "問題請寄到 support@demo.example.tw 信箱，或洽分機一二三。"
+
+    from app.pipeline.privacy import scrub_transcribed_privacy
+
+    assert scrub_transcribed_privacy(text) == text

@@ -44,3 +44,21 @@ def test_mixed_text_converts_only_because_simplified_present():
     assert "步驟一：開啟設定頁面。" in out
     assert "該按鈕用於確認操作。" in out
     assert "该" not in out
+
+
+def test_particle_le_survives_conversion_roundtrip():
+    # opencc's s2t pass reads verb+了 as liǎo (展示了→展示瞭), so the detection
+    # gate itself trips on pure-traditional prose and hands it to s2twp, which
+    # ships the mangled particle (live: chunks carried 「展示瞭如何」 ×8).
+    text = "這張截圖展示了如何將檔案拖放到資料夾中。"
+
+    assert render_vlm_text(text) == text
+
+
+def test_genuine_liao_words_kept_after_conversion():
+    from app.pipeline.stages.package import _fix_opencc_liao
+
+    assert _fix_opencc_liao("展示瞭如何將檔案拖放到資料夾。") == "展示了如何將檔案拖放到資料夾。"
+    assert _fix_opencc_liao("設定一目瞭然，便於瞭解流程。") == "設定一目瞭然，便於瞭解流程。"
+    assert _fix_opencc_liao("站在瞭望台上對系統瞭如指掌。") == "站在瞭望台上對系統瞭如指掌。"
+    assert _fix_opencc_liao("說明相當明瞭。") == "說明相當明瞭。"

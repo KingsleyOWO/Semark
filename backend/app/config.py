@@ -199,6 +199,10 @@ class PackageConfig(BaseModel):
     generate_chunks: bool = True
     semantic_output_language: SemanticOutputLanguage = SemanticOutputLanguage.AUTO
     enable_semantic_repair: bool = True
+    # Deterministic masking of transcribed personal content (mail-list lines,
+    # domain-account ids) in VLM output. The enrichment prompt already asks
+    # the model to skip such content, but compliance is probabilistic.
+    scrub_private_info: bool = True
 
     # Chunk settings
     chunk_max_tokens: int = 512

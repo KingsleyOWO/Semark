@@ -7,6 +7,7 @@ risk and route to VLM audit instead of rewriting content blindly.
 
 from __future__ import annotations
 
+import html
 import json
 import re
 from dataclasses import dataclass, field
@@ -259,6 +260,39 @@ def _structure_signals(document_ir: DocumentIR, enrichments: dict[str, dict[str,
     return signals
 
 
+def _table_content_woven_into_text(document_ir: DocumentIR, source_md: str) -> bool:
+    """True when the tables' cell contents already live in the delivered text.
+
+    Requires near-total coverage (>= 0.9) of the distinctive cells so that a
+    prose sentence merely mentioning a few column words (「數量與單價均已列示
+    於上方表格中」) does not count as woven, while a renderer weave — which
+    emits every non-empty cell verbatim — does.
+    """
+    compact_source = re.sub(r"\s+", "", str(source_md or ""))
+    if not compact_source:
+        return False
+    sampled = 0
+    hits = 0
+    for block in document_ir.blocks:
+        if block.type != BlockType.TABLE:
+            continue
+        html_body = str(block.payload.get("table_body") or "")
+        for cell in re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", html_body, re.S | re.I):
+            text = re.sub(r"\s+", "", html.unescape(re.sub(r"<[^>]+>", " ", cell)))
+            if len(text) < 2 or text in {"●", "○", "◎", "✓", "✔"}:
+                continue
+            sampled += 1
+            if text[:60] in compact_source:
+                hits += 1
+            if sampled >= 40:
+                break
+        if sampled >= 40:
+            break
+    if sampled < 3:
+        return False
+    return hits / sampled >= 0.9
+
+
 def _check_structured_output_presence(
     document_ir: DocumentIR,
     structured_output: Any,
@@ -283,6 +317,15 @@ def _check_structured_output_presence(
     # structure still legitimately require records, so they keep firing.
     non_figure_signals = [signal for signal in structure_signals if signal != "enriched_image_block"]
     if document_type == "generic_document" and not non_figure_signals:
+        return []
+    # The same applies to tables whose content the renderer wove into the
+    # rag.md body: the semantics are delivered, just not as records. Only
+    # tables whose cells are absent from the final text remain a defect.
+    if (
+        document_type == "generic_document"
+        and set(non_figure_signals) <= {"table_block"}
+        and _table_content_woven_into_text(document_ir, source_md)
+    ):
         return []
     records = [record for record in getattr(structured_output, "records", []) or [] if isinstance(record, dict)]
     chunks = [chunk for chunk in getattr(structured_output, "chunks", []) or [] if isinstance(chunk, dict)]
@@ -435,7 +478,12 @@ def _check_assets_semantics(assets: list[Any], structured_record_blocks: set[str
                     evidence={"text_length": len(compact), "asset_type": asset_type},
                 )
             )
-        if asset_type in {"figure_asset", "form_asset"} and len(compact) < 120:
+        # Icon/step-marker crops legitimately produce ~85-107 char captions
+        # that answer retrieval fine (2026-07 content audit); only genuinely
+        # stub outputs are a defect for figures. Form assets carry fields and
+        # guidance, so they keep the higher bar.
+        min_semantic_chars = 64 if asset_type == "figure_asset" else 120
+        if asset_type in {"figure_asset", "form_asset"} and len(compact) < min_semantic_chars:
             if _is_low_value_empty_figure_asset(asset, retrieval_text):
                 continue
             issues.append(
@@ -867,13 +915,16 @@ def _check_broken_image_embeds(final_text: str) -> list[QualityGateIssue]:
     the reviewer-success rewrite reintroduced MinerU-native embeds).
     """
     embeds = re.findall(r"!\[[^\]]*\]\([^)]*\)", final_text)
+    # Unresolved internal asset anchors ([[asset:tbl0000]]) are the same
+    # failure class: a token the downstream reader cannot resolve.
+    embeds.extend(re.findall(r"\[\[asset:[^\]]+\]\]", final_text))
     if not embeds:
         return []
     return [
         QualityGateIssue(
             code="broken_image_embed",
             severity="high",
-            message="最終語意輸出含 Markdown 圖片連結，下游 RAG 無法讀圖（破圖）。",
+            message="最終語意輸出含 Markdown 圖片連結或未解析的資產佔位符，下游 RAG 無法讀取（破圖）。",
             evidence={"embed_count": len(embeds), "samples": embeds[:3]},
         )
     ]
@@ -1137,6 +1188,28 @@ def _issues_from_vlm_audit(audit: dict[str, Any]) -> list[QualityGateIssue]:
     return issues
 
 
+def _window_around_page(text: str, blocks: list[Block], limit: int) -> str:
+    """Slice ``text`` so the audited page's content is inside the window.
+
+    Long documents overflow the head-truncated budget, which re-created the
+    "this page is missing" false alarm for late pages. Anchor on a snippet of
+    the page's own block text when it can be found.
+    """
+    if len(text) <= limit:
+        return text
+    anchor = -1
+    for block in blocks:
+        snippet = _plain_block_text(block).strip()[:12]
+        if len(snippet) >= 6:
+            anchor = text.find(snippet)
+            if anchor >= 0:
+                break
+    if anchor < 0:
+        return text[:limit]
+    start = max(0, anchor - limit // 4)
+    return text[start : start + limit]
+
+
 def _audit_context(
     document_ir: DocumentIR,
     page_idx: int,
@@ -1146,7 +1219,14 @@ def _audit_context(
 ) -> str:
     blocks = document_ir.get_blocks_by_page(page_idx)
     mineru_text = "\n".join(_plain_block_text(block) for block in blocks)[:7000]
-    current_semantic = (structured_text or "").strip()[:9000]
+    # The audited text must be what the run actually delivers. For
+    # default-chunks documents structured_text is legitimately empty and the
+    # deliverable is rag.md (source_md); auditing an "(empty)" placeholder
+    # instead made the VLM report the whole page as missing.
+    current_semantic = (structured_text or "").strip()
+    if not current_semantic:
+        current_semantic = (source_md or "").strip()
+    current_semantic = _window_around_page(current_semantic, blocks, limit=9000)
     raw_source = (source_md or "").strip()[:3000]
     if not current_semantic:
         current_semantic = "(empty structured semantic output)"

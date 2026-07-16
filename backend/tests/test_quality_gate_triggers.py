@@ -119,6 +119,42 @@ def test_structured_output_empty_fires_for_table_document_with_empty_output(tmp_
     assert issue.evidence["has_table_or_image"] is True
 
 
+def test_structured_output_empty_skipped_when_table_content_is_woven_into_rag_body(tmp_path):
+    # A generic (default_chunks) document delivers table semantics inside
+    # rag.md, not as structured records — same rationale as the existing
+    # enriched-image exemption. Live: 5 slide-deck guides were pushed to
+    # needs_review 0.0-0.25 over tables whose content sat right there in
+    # rag.md.
+    document_ir = _make_ir(
+        "meeting-room-guide.pdf",
+        "pdf",
+        [
+            Block(
+                block_id="tbl",
+                type=BlockType.TABLE,
+                page_idx=0,
+                payload={
+                    "table_body": "<table><tr><td>項目</td><td>數量</td><td>單價</td></tr>"
+                    "<tr><td>紙張</td><td>10</td><td>50</td></tr></table>",
+                },
+            )
+        ],
+    )
+
+    result = _run_gate(
+        document_ir,
+        _empty_structured_output(),
+        source_md=(
+            "# 採購說明\n\n表格名稱：採購品項一覽\n\n### 紙張\n- 項目：紙張\n- 數量：10\n- 單價：50\n\n"
+            "以上供各單位查閱與比價使用。"
+        ),
+        tmp_path=tmp_path,
+    )
+
+    codes = {issue.code for issue in result.issues}
+    assert "structured_output_empty" not in codes
+
+
 def test_structured_output_empty_ignores_unenriched_decorative_image(tmp_path):
     document_ir = _make_ir(
         "campus-announcement.pdf",
@@ -452,6 +488,21 @@ def test_broken_image_embed_fires_on_markdown_image_link(tmp_path):
     assert codes.get("broken_image_embed") == "high", codes
 
 
+def test_unresolved_asset_token_fires_as_broken_embed(tmp_path):
+    # [[asset:...]] tokens are internal anchors; one that survives into the
+    # final semantic text is unreadable noise (observed: table placeholders
+    # in rag.md on gate-passing docs).
+    ir = _make_ir("guide.pdf", "pdf", _prose_blocks(["操作說明如下，請依序執行。"]))
+    result = _run_gate(
+        ir,
+        _empty_structured_output(),
+        "# 說明\n\n操作說明如下，請依序執行。\n\n[[asset:tbl0000]]\n\n後續內容。",
+        tmp_path=tmp_path,
+    )
+    codes = {issue.code: issue.severity for issue in result.issues}
+    assert codes.get("broken_image_embed") == "high", codes
+
+
 def test_authored_text_dropped_fires_when_steps_missing_from_output(tmp_path):
     ir = _make_ir("guide.pdf", "pdf", _prose_blocks(_GUIDE_STEPS))
     # Output silently kept only step 1 (the mailbox-archive failure shape).
@@ -544,3 +595,51 @@ def test_enrichment_failure_check_flags_unknown_error(tmp_path):
     )
     codes = {issue.code: issue.severity for issue in result.issues}
     assert codes.get("vlm_enrichment_parse_failed") == "high", codes
+
+
+# ---------------------------------------------------------------------------
+# VLM audit context must audit the delivered text
+# ---------------------------------------------------------------------------
+
+def test_audit_context_falls_back_to_delivered_rag_text_when_structured_empty():
+    # For default_chunks documents structured_text is legitimately empty; the
+    # deliverable is rag.md. Auditing an "(empty structured semantic output)"
+    # placeholder made the VLM (correctly) report everything as missing —
+    # confidence-1.0 false alarms worth -0.5 on the gate score.
+    from app.pipeline.quality_gate import _audit_context
+
+    document_ir = _make_ir("guide.pdf", "pdf", _prose_blocks(["會議室設備介紹頁。"]))
+
+    context = _audit_context(
+        document_ir,
+        0,
+        source_md="# 會議室設備使用說明\n\n電腦中心提供各會議室設備一覽。",
+        structured_text="",
+        reasons=["structured_output_empty"],
+    )
+
+    assert "(empty structured semantic output)" not in context
+    assert "會議室設備一覽" in context
+
+
+def test_audit_context_window_covers_the_audited_page_in_long_documents():
+    # The audited page's slice of the delivered text sits far beyond a
+    # head-truncated 9000-char window; the context must centre on it. The
+    # neighbour sentence exists only in source_md (not in IR blocks), so the
+    # MinerU-evidence section cannot satisfy this assertion.
+    from app.pipeline.quality_gate import _audit_context
+
+    page_marker = "第二十頁的獨特內容標記字串"
+    neighbour = "緊接著標記的補充敘述甲乙丙"
+    long_head = "前段內容。" * 4000  # far beyond the 9000-char head window
+    document_ir = _make_ir("guide.pdf", "pdf", _prose_blocks([page_marker]))
+
+    context = _audit_context(
+        document_ir,
+        0,
+        source_md=long_head + page_marker + neighbour + "。",
+        structured_text="",
+        reasons=["structured_output_empty"],
+    )
+
+    assert neighbour in context

@@ -87,6 +87,8 @@ def _convert_profile_overrides(overrides: dict[str, Any]) -> dict[str, Any]:
         result["package"]["chunk_overlap_tokens"] = overrides["chunk_overlap_tokens"]
     if "semantic_output_language" in overrides:
         result["package"]["semantic_output_language"] = overrides["semantic_output_language"]
+    if "scrub_private_info" in overrides:
+        result["package"]["scrub_private_info"] = overrides["scrub_private_info"]
 
     # Remove empty sections
     return {k: v for k, v in result.items() if v}

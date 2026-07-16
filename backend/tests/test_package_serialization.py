@@ -81,8 +81,121 @@ class PackageSerializationTest(unittest.TestCase):
         self.assertNotIn("TABLE:", text)
         self.assertNotIn("COLUMNS:", text)
 
+    def test_narrow_fragment_table_renders_as_plain_bullets_without_row_numbers(self):
+        # MinerU sometimes claims a phone-settings screenshot is a table; the
+        # 「第 N 列」 framing turns menu steps into fake table rows (live:
+        # iPhone 設定→一般→關於本機 degraded into 13 numbered rows). Narrow
+        # fragments are transcription lines, not rows.
+        html = (
+            "<table>"
+            "<tr><td>設定</td><td></td></tr>"
+            "<tr><td>一般</td><td>&gt;</td></tr>"
+            "<tr><td>關於本機</td><td>&gt;</td></tr>"
+            "<tr><td>Wi-Fi 位址</td><td>AA:BB</td></tr>"
+            "<tr><td>藍牙</td><td>CC:DD</td></tr>"
+            "</table>"
+        )
+
+        text = semantic_table_to_text(html, caption="手機設定畫面")
+
+        self.assertNotIn("第 1 列", text)
+        self.assertNotIn("第 2 列", text)
+        self.assertIn("- 設定", text)
+        self.assertIn("- 關於本機", text)
+        self.assertIn("Wi-Fi 位址；AA:BB", text)
+
+    def test_semantic_table_to_text_preserves_matrix_marker_alignment(self):
+        # Facility-matrix tables (rooms as columns, equipment as rows, ● marks)
+        # must keep cell-to-column mapping. The fragment dump joins non-empty
+        # cells only (「液晶螢幕；●；●」), which destroys the answer to
+        # 「某會議室有沒有某設備」.
+        html = (
+            "<table>"
+            "<tr><td>會議室名稱設備名稱</td><td>101朝陽會議室</td><td>102晨曦會議室</td>"
+            "<td>103暮雲會議室</td><td>105高峰會議室</td><td>106星河會議室</td></tr>"
+            "<tr><td>觸控式電子白板</td><td>BENQ</td><td>BENQ</td><td>SHARP</td><td>SHARP</td><td>BENQ</td></tr>"
+            "<tr><td>液晶螢幕</td><td></td><td></td><td></td><td>●</td><td>●</td></tr>"
+            "<tr><td>單槍投影機</td><td></td><td></td><td></td><td>●</td><td></td></tr>"
+            "<tr><td>麥克風系統</td><td></td><td>●</td><td></td><td>●</td><td></td></tr>"
+            "</table>"
+        )
+
+        text = semantic_table_to_text(html, caption="各會議室設備一覽表")
+
+        self.assertNotIn("第 1 列", text)
+        self.assertIn("### 液晶螢幕", text)
+        lcd = text.split("### 液晶螢幕")[1].split("###")[0]
+        self.assertIn("105高峰會議室：●", lcd)
+        self.assertIn("106星河會議室：●", lcd)
+        # Empty cells must stay empty: no fabricated value carried down from
+        # the row above (the touch-board row's BENQ), and no false ● rooms.
+        self.assertNotIn("101朝陽會議室", lcd)
+        self.assertNotIn("BENQ", lcd)
+        projector = text.split("### 單槍投影機")[1].split("###")[0]
+        self.assertIn("105高峰會議室：●", projector)
+        self.assertNotIn("106星河會議室", projector)
+
+    def test_render_block_rag_appends_table_footnote(self):
+        block = Block(
+            block_id="tbl",
+            type=BlockType.TABLE,
+            page_idx=2,
+            payload={
+                "table_caption": "設備一覽表",
+                "table_footnote": [
+                    "提醒：1.使用麥克風系統請在會前先與示範單位預借。",
+                    "2.合併借用時請提早一天與資訊中心聯絡。",
+                ],
+                "table_body": (
+                    "<table><tr><td>項目</td><td>說明</td></tr>"
+                    "<tr><td>白板</td><td>BENQ</td></tr></table>"
+                ),
+            },
+        )
+
+        text = "\n".join(PackageStage()._render_block_rag(block, {}))
+
+        self.assertIn("預借", text)
+        self.assertIn("提早一天", text)
+
+    def test_strip_asset_reference_tokens_removes_full_line_tokens(self):
+        md = "# 標題\n\n內文一\n\n[[asset:tbl0000]]\n\n內文二\n[[asset:fig0002]]\n結尾"
+
+        out = PackageStage._strip_asset_reference_tokens(md)
+
+        self.assertNotIn("[[asset:", out)
+        self.assertIn("內文一", out)
+        self.assertIn("內文二", out)
+        self.assertIn("結尾", out)
+        self.assertNotIn("\n\n\n", out)
 
 
+
+
+    def test_semantic_repair_accepts_zh_ui_ellipsis_inside_line(self):
+        # Windows menu items literally contain 「...」 (「清理舊項目...」). A
+        # faithful zh rewrite must not be rejected for transcribing them —
+        # only placeholder lines / dangling line-final ellipses are refusal
+        # grounds (same rule the en branch already applies). Live: two 18k-token
+        # repairs were discarded wholesale over UI ellipses.
+        markdown = (
+            "# 信箱封存教學\n\n"
+            "## 步驟\n"
+            "- 點選「檔案」後開啟「清理舊項目...」對話框，選擇要封存的資料夾。\n"
+            "- 完成後按確定。\n"
+        ) * 3
+
+        assert PackageStage._semantic_repair_markdown_is_usable(markdown, "舊內容" * 100, "zh-TW")
+
+    def test_semantic_repair_still_rejects_zh_placeholder_ellipsis_lines(self):
+        markdown = (
+            "# 信箱封存教學\n\n"
+            "## 步驟\n"
+            "- 點選「檔案」開啟工具。\n"
+            "- 其餘步驟…\n"
+        ) * 3
+
+        assert not PackageStage._semantic_repair_markdown_is_usable(markdown, "舊內容" * 100, "zh-TW")
 
     def test_semantic_repair_rejects_json_shaped_markdown_after_title_prefix(self):
         markdown = '# Form\n\n{"status":"repaired","repaired_markdown":"# Actual"}'
@@ -1288,7 +1401,7 @@ Text
 
     def test_semantic_repair_still_triggered_by_medium_and_high_issues(self):
         for code, severity in (
-            ("semantic_output_too_short", "medium"),
+            ("semantic_template_incomplete", "medium"),
             ("structured_output_empty", "high"),
         ):
             quality_gate = SimpleNamespace(
@@ -1299,6 +1412,21 @@ Text
                 PackageStage._quality_gate_needs_semantic_repair(quality_gate),
                 code,
             )
+
+    def test_semantic_repair_not_triggered_by_short_figure_caption(self):
+        """Spec change 2026-07: semantic_output_too_short is a per-figure
+        cosmetic (an icon caption of 85-107 chars), and the repair is a
+        whole-document rewrite. Live batch: two content-complete docs entered
+        the reviewer on this code alone, the rewrite fell back (fact_loss)
+        and replaced clean c0 chunks with coarse sr_fallback chunks — the
+        cure strictly worse than the disease. The issue stays visible on the
+        gate; it just no longer launches the reviewer."""
+        quality_gate = SimpleNamespace(
+            issues=[SimpleNamespace(code="semantic_output_too_short", severity="medium")],
+            stats={},
+        )
+
+        self.assertFalse(PackageStage._quality_gate_needs_semantic_repair(quality_gate))
 
     def test_semantic_repair_normalization_removes_duplicate_title_heading(self):
         markdown = (

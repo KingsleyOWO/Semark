@@ -2838,3 +2838,162 @@ def test_form_documents_rag_auto_keeps_chinese_semantic_template():
     assert "## 表單用途" in output.rag_markdown
     assert "## RAG 查詢摘要" in output.rag_markdown
     assert "## Form Purpose" not in output.rag_markdown
+
+
+def test_visual_structured_page_keeps_table_blocks():
+    # A figure with structured_content marks the page "visually structured",
+    # which suppresses loose OCR text — but TABLE blocks are parsed content,
+    # not figure-OCR echoes. Live: a share-dialog table (with the share URL)
+    # was silently dropped from rag.md because its page had an enriched
+    # screenshot.
+    document_ir = DocumentIR(
+        doc_id="doc-vt",
+        run_id="run-vt",
+        source=SourceInfo(path="guide.pdf", ext="pdf", sha256="abc", size_bytes=1),
+        engine=EngineInfo(backend="pipeline", method="auto"),
+        pages=[PageInfo(page_idx=0)],
+        blocks=[
+            Block(
+                block_id="fig-shot",
+                type=BlockType.IMAGE,
+                page_idx=0,
+                payload={"img_path": "images/dialog.jpg"},
+            ),
+            Block(
+                block_id="dlg-table",
+                type=BlockType.TABLE,
+                page_idx=0,
+                payload={
+                    "table_body": (
+                        "<table><tr><td>收件者</td><td>主題</td></tr>"
+                        "<tr><td>demo@example.tw</td><td>To Share With You</td></tr>"
+                        "<tr><td>連結</td><td>http://demo.example.tw:8080/share.cgi?ssid=abc</td></tr>"
+                        "<tr><td>發送</td><td>關閉</td></tr></table>"
+                    ),
+                },
+            ),
+        ],
+    )
+    enrichments = {
+        "fig-shot": {
+            "kind": "figure_caption",
+            "input": {"page_idx": 0},
+            "output": {"structured_content": "分享檔案對話框畫面，含郵件設定分頁。"},
+        }
+    }
+
+    markdown, _ = PackageStage()._render_rag_md(
+        document_ir=document_ir,
+        asset_map={},
+        enrichments=enrichments,
+    )
+
+    assert "share.cgi?ssid=abc" in markdown
+    assert "To Share With You" in markdown
+
+
+def test_icon_sized_figure_caption_is_not_flagged_too_short():
+    # 85-107 char captions for icon crops are content-adequate (2026-07
+    # content audit of 42-doc batch); flagging them medium tanked a complete
+    # 26-page guide to 0.35 and re-launched the doomed reviewer rewrite.
+    # Genuinely unusable outputs (<64 compact chars) must keep firing.
+    adequate = AssetEntry(
+        type="figure_asset",
+        asset_id="fig0001",
+        doc_id="doc",
+        run_id="run",
+        title="Figure 1",
+        page_idx=0,
+        asset_path="",
+        block_id="fig-block-1",
+        retrieval_text=(
+            "這是一個代表清理或刪除功能的圖示，畫面顯示重疊的文件與一個橡皮擦形狀的清除工具，"
+            "旁邊帶有數字步驟標記，象徵整理或移除郵件內容的操作。"
+        ),
+    )
+    stub = AssetEntry(
+        type="figure_asset",
+        asset_id="fig0002",
+        doc_id="doc",
+        run_id="run",
+        title="Figure 2",
+        page_idx=0,
+        asset_path="",
+        block_id="fig-block-2",
+        # Above the low-value-empty skip (>= 8 meaningful chars) but well
+        # under the 64-char floor: still an unusable stub, must keep firing.
+        retrieval_text="圖示顯示一份文件與一支筆的簡單圖案。",
+    )
+    form_short = AssetEntry(
+        type="form_asset",
+        asset_id="form0001",
+        doc_id="doc",
+        run_id="run",
+        title="Form 1",
+        page_idx=0,
+        asset_path="",
+        block_id="form-block-1",
+        retrieval_text=(
+            "這是一個代表清理或刪除功能的圖示，畫面顯示重疊的文件與一個橡皮擦形狀的清除工具，"
+            "旁邊帶有數字步驟標記，象徵整理或移除郵件內容的操作。"
+        ),
+    )
+
+    issues = _check_assets_semantics([adequate, stub, form_short], set(), "")
+
+    flagged = {issue.document_id for issue in issues if issue.code == "semantic_output_too_short"}
+    assert "fig0001" not in flagged
+    assert "fig0002" in flagged
+    assert "form0001" in flagged
+
+
+def test_render_main_text_excludes_figure_semantics_but_keeps_authored_content():
+    # 「只下載主文」:不織入圖片語意描述,保留作者文字與表格。
+    document_ir = DocumentIR(
+        doc_id="doc-mt",
+        run_id="run-mt",
+        source=SourceInfo(path="guide.pdf", ext="pdf", sha256="abc", size_bytes=1),
+        engine=EngineInfo(backend="pipeline", method="auto"),
+        pages=[PageInfo(page_idx=0)],
+        blocks=[
+            Block(
+                block_id="t1",
+                type=BlockType.TEXT,
+                page_idx=0,
+                payload={"text": "步驟一：開啟設定頁面並選擇帳戶。", "text_level": 0},
+            ),
+            Block(
+                block_id="fig1",
+                type=BlockType.IMAGE,
+                page_idx=0,
+                payload={"img_path": "images/step.jpg"},
+            ),
+            Block(
+                block_id="tbl1",
+                type=BlockType.TABLE,
+                page_idx=0,
+                payload={"table_body": "<table><tr><td>項目</td><td>說明</td></tr><tr><td>白板</td><td>觸控式</td></tr></table>"},
+            ),
+        ],
+    )
+    enrichments = {
+        "fig1": {
+            "kind": "figure_caption",
+            "input": {"page_idx": 0},
+            "output": {
+                "semantic_caption": "截圖顯示設定頁面的帳戶清單與紅框標示。",
+                "structured_content": "設定 > 帳戶 > 新增帳戶",
+            },
+        }
+    }
+
+    main_text = PackageStage()._render_main_text(
+        document_ir=document_ir,
+        enrichments=enrichments,
+    )
+
+    assert "步驟一：開啟設定頁面並選擇帳戶。" in main_text
+    assert "觸控式" in main_text
+    assert "截圖顯示設定頁面" not in main_text
+    assert "新增帳戶" not in main_text
+    assert "[[asset:" not in main_text

@@ -66,6 +66,7 @@ class ProfileOverrideUpdate(BaseModel):
     chunk_max_tokens: int | None = None
     chunk_overlap_tokens: int | None = None
     semantic_output_language: str | None = None
+    scrub_private_info: bool | None = None
 
 
 class VLMSettingsResponse(BaseModel):
@@ -571,6 +572,7 @@ async def get_profiles() -> dict[str, Any]:
                 "chunk_max_tokens": config.package.chunk_max_tokens,
                 "chunk_overlap_tokens": config.package.chunk_overlap_tokens,
                 "semantic_output_language": config.package.semantic_output_language.value,
+                "scrub_private_info": config.package.scrub_private_info,
             },
         }
 
@@ -728,6 +730,9 @@ async def get_profile_with_overrides(
                 "semantic_output_language": overrides.get(
                     "semantic_output_language", base_config.package.semantic_output_language.value
                 ),
+                "scrub_private_info": overrides.get(
+                    "scrub_private_info", base_config.package.scrub_private_info
+                ),
             },
         },
         "overrides": overrides,
@@ -793,6 +798,9 @@ async def update_profile_overrides(
 
     if update.vlm_enrich_tables is not None:
         current["vlm_enrich_tables"] = update.vlm_enrich_tables
+
+    if update.scrub_private_info is not None:
+        current["scrub_private_info"] = update.scrub_private_info
 
     if update.table_vlm_budget is not None:
         if update.table_vlm_budget < 0:

@@ -256,10 +256,15 @@ def semantic_table_to_text(
             continue
 
         filled = list(row)
+        # Forward-fill merged key cells only on continuation rows (row key
+        # empty). A row that has its own key but sparse value cells — a
+        # matrix row like 「液晶螢幕 | | | ● | ●」 — must keep its empties,
+        # otherwise the previous row's value is fabricated into this record.
+        is_continuation_row = not row[0]
         for idx, value in enumerate(row):
             if value:
                 last_values[idx] = value
-            elif idx < 2 and last_values.get(idx):
+            elif idx < 2 and is_continuation_row and last_values.get(idx):
                 filled[idx] = last_values[idx]
 
         data_pairs = [
@@ -394,11 +399,20 @@ def table_fragment_to_text(
         "",
         f"## {_table_heading('content', language)}",
     ]
+    # A narrow many-row "table" is almost always a transcribed UI menu or
+    # settings screen that MinerU promoted to a table (live: iPhone 設定→
+    # 一般→關於本機 became 13 numbered rows). 「第 N 列」 framing turns those
+    # steps into fake table rows; plain bullets keep order and content.
+    max_width = max((len([cell for cell in row if cell]) for row in clean_rows), default=0)
+    plain_bullets = max_width <= 2 and len(clean_rows) >= 4
+
     for idx, row in enumerate(clean_rows, start=1):
         cells = [cell for cell in row if cell]
         if not cells:
             continue
-        if len(cells) == 1:
+        if plain_bullets:
+            lines.append(f"- {row_separator.join(cells)}")
+        elif len(cells) == 1:
             lines.append(f"- {row_prefix} {idx}{row_suffix}{row_colon}{cells[0]}")
         else:
             joined = row_separator.join(cells)
@@ -595,8 +609,11 @@ def _detect_semantic_table_header_index(rows: list[list[str]]) -> int | None:
         "金額",
         "單位",
     }
+    structural_idx = None
     for idx, row in enumerate(rows[:5]):
         normalized = [_clean_table_cell(cell) for cell in row]
+        if structural_idx is None and idx == 0 and _looks_like_structural_header(normalized, rows[1:]):
+            structural_idx = idx
         non_empty = [cell for cell in normalized if cell]
         if len(non_empty) < 2:
             continue
@@ -610,7 +627,32 @@ def _detect_semantic_table_header_index(rows: list[list[str]]) -> int | None:
             return idx
         if idx <= 2 and len(non_empty) >= 3 and _next_rows_look_like_data(rows[idx + 1 : idx + 4]):
             return idx
-    return None
+    return structural_idx
+
+
+_TABLE_MARKER_CELLS = {"●", "○", "◎", "✓", "✔", "V", "v"}
+
+
+def _looks_like_structural_header(header: list[str], data_rows: list[list[str]]) -> bool:
+    """Matrix tables (e.g. rooms as columns, equipment as rows, ● marks in
+    cells) carry no known header token, but their first row is a full,
+    distinct label row while data rows are sparse or marker-filled. Missing
+    this shape sends the table to the fragment dump, which joins non-empty
+    cells only and destroys the cell-to-column mapping.
+    """
+    if len(header) < 4 or not all(header):
+        return False
+    if len(set(header)) != len(header):
+        return False
+    if any(re.fullmatch(r"[\d.,%]+", cell) or cell in _TABLE_MARKER_CELLS for cell in header):
+        return False
+    for raw_row in data_rows:
+        row = [_clean_table_cell(cell) for cell in raw_row]
+        if not any(row):
+            continue
+        if any(not cell for cell in row) or any(cell in _TABLE_MARKER_CELLS for cell in row):
+            return True
+    return False
 
 
 def _is_repeated_table_header(row: list[str], header: list[str]) -> bool:

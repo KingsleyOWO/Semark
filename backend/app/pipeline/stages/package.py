@@ -29,6 +29,10 @@ from app.models.org_chart import (
     OrgGroup,
     OrgNode,
 )
+from app.pipeline.privacy import (
+    scrub_transcribed_privacy,
+    set_privacy_scrub_enabled,
+)
 from app.pipeline.corpus_rules import get_rules as get_corpus_rules
 from app.pipeline.package_utils import (
     caption_text,
@@ -66,7 +70,16 @@ __all__ = [
 
 
 def render_vlm_text(value: Any) -> str:
-    """Normalize VLM text fields that may come back as str/list/dict."""
+    """Normalize VLM text fields that may come back as str/list/dict.
+
+    Privacy scrub and zh-TW conversion run once on the joined text: list
+    fields (all_text) carry inbox-region context across items, which
+    per-item scrubbing would lose.
+    """
+    return _to_taiwan_traditional(scrub_transcribed_privacy(_render_vlm_value(value)))
+
+
+def _render_vlm_value(value: Any) -> str:
     if value is None:
         return ""
     if isinstance(value, str):
@@ -74,13 +87,70 @@ def render_vlm_text(value: Any) -> str:
     if isinstance(value, list):
         lines: list[str] = []
         for item in value:
-            text = render_vlm_text(item)
+            text = _render_vlm_value(item)
             if text:
                 lines.append(text)
         return "\n".join(lines).strip()
     if isinstance(value, dict):
         return json.dumps(value, ensure_ascii=False, indent=2)
     return str(value).strip()
+
+
+# A mail-list row transcribed from an inbox screenshot: a 1-3 char truncated
+# sender name followed by an ellipsis (「王.. 報價」「d… 2016/10/21 待領」).
+_MAIL_SENDER_LINE_RE = re.compile(r"^\s*[^\W\d_]{1,3}(?:\.{2,}|…)", re.MULTILINE)
+# A bare reply/forward subject line.
+_MAIL_SUBJECT_LINE_RE = re.compile(r"^\s*(?:RE|FW|回覆|轉寄)[:：]", re.IGNORECASE | re.MULTILINE)
+# Windows-domain accounts with a personal numeric id (DOMAIN\x12345). The
+# format teaching (「網域\員工編號」, no digits) never matches. Explicit
+# lookarounds instead of \b: Python counts CJK as word chars, so 「為demo\…」
+# and a trailing 「…分享」 would defeat word boundaries.
+_DOMAIN_ACCOUNT_RE = re.compile(
+    r"(?<![A-Za-z0-9\\])([A-Za-z][A-Za-z0-9]{1,15}\\[A-Za-z])\d{4,6}(?![0-9])"
+)
+# Any line cropped by a screenshot edge (trailing ellipsis).
+_TRUNCATED_LINE_RE = re.compile(r"(?:\.{2,}|…)\s*$", re.MULTILINE)
+# Stable UI markers of a mail-client message-list pane. Everything short and
+# non-sentence after one of these is subject/sender content — the VLM re-rolls
+# the exact line shape on every fresh enrichment, so region detection is the
+# only rule that survives resampling.
+_INBOX_REGION_MARKER_RE = re.compile(
+    r"^(?:全部|未讀取|已讀取|收件匣\s*\d*|日期[:：]\s*(?:今天|昨天|本週|上週|上個月|較舊|更舊))$"
+)
+
+
+_OPENCC_CONVERTERS: dict[str, Any] = {}
+
+
+def _get_opencc(profile: str) -> Any:
+    if profile not in _OPENCC_CONVERTERS:
+        try:
+            from opencc import OpenCC
+
+            _OPENCC_CONVERTERS[profile] = OpenCC(profile)
+        except Exception:
+            _OPENCC_CONVERTERS[profile] = None
+    return _OPENCC_CONVERTERS[profile]
+
+
+def _to_taiwan_traditional(text: str) -> str:
+    """Convert VLM output that carries simplified Chinese to zh-TW.
+
+    The local VLM occasionally ruminates in simplified Chinese and mainland
+    terms (界面/默认/分辨率) inside otherwise zh-TW descriptions. Detection
+    first: text that the plain s2t pass leaves unchanged has no simplified
+    content and passes through byte-identical, so genuine zh-TW prose (and
+    English) is never rewritten.
+    """
+    if not text or not re.search(r"[一-鿿]", text):
+        return text
+    detector = _get_opencc("s2t")
+    if detector is None or detector.convert(text) == text:
+        return text
+    converter = _get_opencc("s2twp")
+    return converter.convert(text) if converter is not None else text
+
+
 
 
 
@@ -422,6 +492,8 @@ class PackageStage:
             PackageStageResult with output paths
         """
         try:
+            set_privacy_scrub_enabled(self.config.package.scrub_private_info)
+
             outputs_dir = run_path / "outputs"
             outputs_dir.mkdir(parents=True, exist_ok=True)
 
@@ -501,16 +573,28 @@ class PackageStage:
 
             source_md = rag_md
 
-            # 6. Write all outputs
+            # 6. Write all outputs. Asset tokens are internal anchors for the
+            # document exports below; the delivered files must not carry them.
+            delivered_md = self._finalize_delivered_markdown(source_md)
             source_md_path = outputs_dir / "source.md"
-            source_md_path.write_text(source_md, encoding="utf-8")
+            source_md_path.write_text(delivered_md, encoding="utf-8")
 
             # Compatibility aliases for older endpoints/evaluators.
             dataset_md_path = outputs_dir / "dataset.md"
             dataset_md_path.write_text(dataset_md, encoding="utf-8")
 
             rag_md_path = outputs_dir / "rag.md"
-            rag_md_path.write_text(source_md, encoding="utf-8")
+            rag_md_path.write_text(delivered_md, encoding="utf-8")
+
+            # Authored-content-only variant for the 「只下載主文」 download.
+            main_text_path = outputs_dir / "main_text.md"
+            main_text_path.write_text(
+                self._render_main_text(
+                    document_ir=document_ir,
+                    semantic_output_language=semantic_output_language,
+                ),
+                encoding="utf-8",
+            )
 
             assets_index_path = outputs_dir / "assets_index.jsonl"
             with open(assets_index_path, "w", encoding="utf-8") as f:
@@ -535,12 +619,17 @@ class PackageStage:
             )
             document_export_paths = self._write_document_exports(
                 outputs_dir=outputs_dir,
-                source_md=source_md,
+                source_md=scrub_transcribed_privacy(source_md),
                 assets=assets,
                 structured_paths=structured_paths,
                 document_ir=document_ir,
                 semantic_output_language=semantic_output_language,
             )
+
+            # Anchoring is done: from here on the quality gate, reviewer and
+            # fact guard must see the same text that rag.md delivers.
+            source_md_with_tokens = source_md
+            source_md = delivered_md
 
             quality_gate = await run_quality_gate(
                 document_ir=document_ir,
@@ -568,7 +657,7 @@ class PackageStage:
                     )
                     document_export_paths = self._write_document_exports(
                         outputs_dir=outputs_dir,
-                        source_md=source_md,
+                        source_md=source_md_with_tokens,
                         assets=assets,
                         structured_paths=structured_paths,
                         document_ir=document_ir,
@@ -709,7 +798,9 @@ class PackageStage:
     def _quality_gate_needs_semantic_repair(quality_gate: Any) -> bool:
         repair_codes = {
             "html_table_without_semantic_text",
-            "semantic_output_too_short",
+            # semantic_output_too_short is deliberately absent: a short
+            # per-figure caption cannot justify a whole-document rewrite
+            # (live: the rewrite fell back and downgraded clean chunks).
             "semantic_template_incomplete",
             "semantic_summary_too_dense",
             "form_signature_fields_missing",
@@ -2226,9 +2317,11 @@ class PackageStage:
 
     @staticmethod
     def _semantic_repair_has_placeholder_ellipsis(markdown: str, semantic_output_language: str) -> bool:
+        # Line-based for every language: UI menu labels legitimately contain
+        # 「...」 mid-line (「清理舊項目...」對話框); only a bare placeholder
+        # line or a dangling line-final ellipsis signals truncated output.
+        del semantic_output_language
         text = str(markdown or "")
-        if semantic_output_language != "en":
-            return bool(re.search(r"\.\.\.|…", text))
         for line in text.splitlines():
             stripped = line.strip()
             if not stripped:
@@ -2833,6 +2926,54 @@ class PackageStage:
         if page_idx is None:
             return "unknown page" if language == "en" else "未知頁面"
         return f"Page {page_idx + 1}" if language == "en" else f"第 {page_idx + 1} 頁"
+
+    def _render_main_text(
+        self,
+        document_ir: DocumentIR,
+        enrichments: dict[str, dict[str, Any]] | None = None,
+        semantic_output_language: str = "zh-TW",
+    ) -> str:
+        """Render the document's authored content only — no VLM figure
+        semantics woven in. This is the 「只下載主文」 download variant; the
+        enrichments argument is accepted for signature symmetry but is
+        deliberately not passed to the renderer.
+        """
+        del enrichments
+        main_text, _ = self._render_rag_md(
+            document_ir=document_ir,
+            asset_map={},
+            enrichments={},
+            semantic_output_language=semantic_output_language,
+        )
+        return self._finalize_delivered_markdown(main_text)
+
+    @staticmethod
+    def _table_footnote_lines(block: Block) -> list[str]:
+        footnote = block.payload.get("table_footnote")
+        if isinstance(footnote, str):
+            footnote = [footnote]
+        return [str(note).strip() for note in (footnote or []) if str(note).strip()]
+
+    @classmethod
+    def _finalize_delivered_markdown(cls, markdown: str) -> str:
+        """Final pass on every delivered markdown surface: drop internal
+        asset anchors and scrub personal content that reached the text via
+        parser OCR (which never passes render_vlm_text)."""
+        return scrub_transcribed_privacy(cls._strip_asset_reference_tokens(markdown))
+
+    @staticmethod
+    def _strip_asset_reference_tokens(markdown: str) -> str:
+        """[[asset:...]] tokens are internal anchors for the split/collapse
+        processing; nothing downstream resolves them, so a token that reaches
+        the retrieval surface is pure noise (and feeds fake fact tokens like
+        「0000」 into the repair guard).
+        """
+        lines = [
+            line
+            for line in str(markdown or "").splitlines()
+            if not re.fullmatch(r"\s*\[\[asset:[^\]]+\]\]\s*", line)
+        ]
+        return re.sub(r"\n{3,}", "\n\n", "\n".join(lines))
 
     def _collapse_table_collection_sections(self, source_md: str, groups: list[dict[str, Any]]) -> str:
         ranges: list[tuple[int, int]] = []
@@ -4851,11 +4992,14 @@ class PackageStage:
             # in TEXT blocks, and suppressing them silently deletes the actual
             # instructions (regression: the mailbox-archive guide lost steps 5-7 and
             # both reminders from every output while they stayed in the IR). Keep the
-            # leading title and any authored-prose TEXT; drop only bare OCR fragments.
-            if page_idx in visual_structured_pages and block.type != BlockType.IMAGE:
-                text = str(block.payload.get("text", "")).strip() if block.type == BlockType.TEXT else ""
+            # leading title and any authored-prose TEXT; drop only bare OCR TEXT
+            # fragments. Non-TEXT blocks (tables, lists) are parsed content, never
+            # figure-OCR echoes — suppressing them silently deleted a share-dialog
+            # table (with its share URL) from rag.md.
+            if page_idx in visual_structured_pages and block.type == BlockType.TEXT:
+                text = str(block.payload.get("text", "")).strip()
                 is_title = block.reading_order == 0 and len(text) >= 10
-                is_authored_prose = block.type == BlockType.TEXT and self._looks_like_authored_prose(text)
+                is_authored_prose = self._looks_like_authored_prose(text)
                 if not (is_title or is_authored_prose):
                     continue
 
@@ -5230,6 +5374,11 @@ class PackageStage:
                 if preview:
                     summary_label = "Table content summary: " if semantic_output_language == "en" else "表格內容摘要："
                     lines.append(summary_label + clean_latex_symbols(preview))
+
+            footnote_lines = self._table_footnote_lines(block)
+            if footnote_lines:
+                lines.append("")
+                lines.extend(footnote_lines)
 
             # Add asset reference as explicit token
             if asset:

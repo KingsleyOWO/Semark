@@ -14,6 +14,7 @@ from typing import Any
 
 from app.config import PipelineConfig
 from app.models.document_ir import Block, BlockType, DocumentIR
+from app.pipeline.privacy import scrub_transcribed_privacy, set_privacy_scrub_enabled
 
 # Sections estimated below this many tokens merge with their neighbours so
 # retrieval never indexes near-empty chunks.
@@ -165,8 +166,13 @@ class ChunkStage:
                 chunks = self._load_structured_chunks(outputs_dir)
 
             chunks_path = outputs_dir / "chunks.jsonl"
+            # Parser OCR of screenshots can carry personal content (domain
+            # accounts, mail-list lines) straight into block text — scrub at
+            # the delivery surface, same as rag.md.
+            set_privacy_scrub_enabled(self.package_config.scrub_private_info)
             with open(chunks_path, "w", encoding="utf-8") as f:
                 for chunk in chunks:
+                    chunk.content = scrub_transcribed_privacy(chunk.content)
                     f.write(json.dumps(chunk.to_dict(), ensure_ascii=False) + "\n")
 
             stats = {
@@ -592,9 +598,12 @@ class ChunkStage:
         elif block.type == BlockType.TABLE:
             caption = block.payload.get("table_caption", "")
             body = _table_body_to_markdown(block.payload.get("table_body", ""))
-            if caption:
-                return f"**{caption}**\n\n{body}"
-            return body
+            footnote = block.payload.get("table_footnote")
+            if isinstance(footnote, str):
+                footnote = [footnote]
+            notes = "\n".join(str(note).strip() for note in (footnote or []) if str(note).strip())
+            parts = [f"**{caption}**" if caption else "", body, notes]
+            return "\n\n".join(part for part in parts if part)
 
         elif block.type == BlockType.IMAGE:
             caption = block.payload.get("caption", "")

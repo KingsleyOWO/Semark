@@ -28,6 +28,8 @@ class FileType(StrEnum):
     """Available file types for download."""
 
     SOURCE = "source"
+    # Authored content only — no VLM figure semantics (「只下載主文」).
+    MAIN_TEXT = "main_text"
     DOCUMENTS = "documents"
     QUALITY = "quality"
     ASSETS_INDEX = "assets_index"
@@ -74,6 +76,7 @@ class DownloadManifest(BaseModel):
 # Mapping of file types to source files
 SOURCE_FILES = {
     FileType.SOURCE: "source.md",
+    FileType.MAIN_TEXT: "main_text.md",
     FileType.QUALITY: "quality.json",
     FileType.ASSETS_INDEX: "assets_index.jsonl",
     FileType.ENRICHMENTS: "enrichments.jsonl",
@@ -81,6 +84,8 @@ SOURCE_FILES = {
 
 FALLBACK_SOURCE_FILES = {
     FileType.SOURCE: "rag.md",
+    # Runs processed before main_text.md existed fall back to the full text.
+    FileType.MAIN_TEXT: "source.md",
 }
 
 

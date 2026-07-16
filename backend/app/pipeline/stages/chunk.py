@@ -117,6 +117,9 @@ class ChunkStage:
         # block_id -> figure retrieval text, loaded per run from assets_index.jsonl
         # so image blocks chunk as searchable text instead of a bare placeholder.
         self._asset_text: dict[str, str] = {}
+        # Figures the package stage marked decorative (low-value icons): their
+        # blocks are dropped from chunk bodies entirely, mirroring rag.md.
+        self._decorative_blocks: set[str] = set()
 
     async def run(
         self,
@@ -215,6 +218,9 @@ class ChunkStage:
                     continue
                 entry = json.loads(line)
                 block_id = entry.get("block_id", "")
+                if block_id and entry.get("decorative"):
+                    self._decorative_blocks.add(block_id)
+                    continue
                 text = (entry.get("retrieval_text") or "").strip()
                 if block_id and text:
                     asset_text[block_id] = text
@@ -606,6 +612,8 @@ class ChunkStage:
             return "\n\n".join(part for part in parts if part)
 
         elif block.type == BlockType.IMAGE:
+            if block.block_id in self._decorative_blocks:
+                return ""
             caption = block.payload.get("caption", "")
             # Prefer the VLM figure retrieval text so the figure's information is
             # searchable in the chunk body, rather than a model-unreadable

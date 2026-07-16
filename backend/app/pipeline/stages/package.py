@@ -96,27 +96,12 @@ def _render_vlm_value(value: Any) -> str:
     return str(value).strip()
 
 
-# A mail-list row transcribed from an inbox screenshot: a 1-3 char truncated
-# sender name followed by an ellipsis (「王.. 報價」「d… 2016/10/21 待領」).
-_MAIL_SENDER_LINE_RE = re.compile(r"^\s*[^\W\d_]{1,3}(?:\.{2,}|…)", re.MULTILINE)
-# A bare reply/forward subject line.
-_MAIL_SUBJECT_LINE_RE = re.compile(r"^\s*(?:RE|FW|回覆|轉寄)[:：]", re.IGNORECASE | re.MULTILINE)
-# Windows-domain accounts with a personal numeric id (DOMAIN\x12345). The
-# format teaching (「網域\員工編號」, no digits) never matches. Explicit
-# lookarounds instead of \b: Python counts CJK as word chars, so 「為demo\…」
-# and a trailing 「…分享」 would defeat word boundaries.
-_DOMAIN_ACCOUNT_RE = re.compile(
-    r"(?<![A-Za-z0-9\\])([A-Za-z][A-Za-z0-9]{1,15}\\[A-Za-z])\d{4,6}(?![0-9])"
-)
-# Any line cropped by a screenshot edge (trailing ellipsis).
-_TRUNCATED_LINE_RE = re.compile(r"(?:\.{2,}|…)\s*$", re.MULTILINE)
-# Stable UI markers of a mail-client message-list pane. Everything short and
-# non-sentence after one of these is subject/sender content — the VLM re-rolls
-# the exact line shape on every fresh enrichment, so region detection is the
-# only rule that survives resampling.
-_INBOX_REGION_MARKER_RE = re.compile(
-    r"^(?:全部|未讀取|已讀取|收件匣\s*\d*|日期[:：]\s*(?:今天|昨天|本週|上週|上個月|較舊|更舊))$"
-)
+# A Latin term (brand/product name, UI label) inside VLM output. Grounding
+# check: caption/keyword terms must appear somewhere in text actually visible
+# in the document — VLM captions guess brands (live: QNAP File Station
+# screenshots captioned as "Synology", a term appearing nowhere in the
+# document text or any figure's OCR).
+_LATIN_TERM_RE = re.compile(r"[A-Za-z][A-Za-z0-9'&._-]{2,}")
 
 
 _OPENCC_CONVERTERS: dict[str, Any] = {}
@@ -133,6 +118,16 @@ def _get_opencc(profile: str) -> Any:
     return _OPENCC_CONVERTERS[profile]
 
 
+# opencc reads verb+了 as liǎo and converts the aspect particle (展示了→展示瞭),
+# which both trips the simplified-content detector on pure zh-TW prose and
+# mangles converted output. Genuine 瞭 usage is a closed set and is kept.
+_OPENCC_LIAO_FIX_RE = re.compile(r"(?<!明)瞭(?!解|望|然|如指掌)")
+
+
+def _fix_opencc_liao(text: str) -> str:
+    return _OPENCC_LIAO_FIX_RE.sub("了", text)
+
+
 def _to_taiwan_traditional(text: str) -> str:
     """Convert VLM output that carries simplified Chinese to zh-TW.
 
@@ -140,15 +135,16 @@ def _to_taiwan_traditional(text: str) -> str:
     terms (界面/默认/分辨率) inside otherwise zh-TW descriptions. Detection
     first: text that the plain s2t pass leaves unchanged has no simplified
     content and passes through byte-identical, so genuine zh-TW prose (and
-    English) is never rewritten.
+    English) is never rewritten. The 了/瞭 particle ambiguity is repaired on
+    both sides of the gate — the detector itself trips on it.
     """
     if not text or not re.search(r"[一-鿿]", text):
         return text
     detector = _get_opencc("s2t")
-    if detector is None or detector.convert(text) == text:
+    if detector is None or _fix_opencc_liao(detector.convert(text)) == text:
         return text
     converter = _get_opencc("s2twp")
-    return converter.convert(text) if converter is not None else text
+    return _fix_opencc_liao(converter.convert(text)) if converter is not None else text
 
 
 
@@ -354,6 +350,13 @@ class AssetEntry:
     structured_content: str | None = None
     facts: list[str] = field(default_factory=list)
     keywords: list[str] = field(default_factory=list)
+    # VLM image classification (screenshot/photo/flowchart/...). Downstream
+    # renders must not re-derive this from " > " heuristics: UI screenshots
+    # carry navigation paths that are menus, not workflows.
+    image_type: str = ""
+    # Low-value icon/blur (叉號/盾牌/下載箭頭…): kept in the index for
+    # provenance, but excluded from rag.md weaving and chunk bodies.
+    decorative: bool = False
     # Quality flag
     needs_review: bool = False
 
@@ -385,6 +388,10 @@ class AssetEntry:
             result["facts"] = self.facts
         if self.keywords:
             result["keywords"] = self.keywords
+        if self.image_type:
+            result["image_type"] = self.image_type
+        if self.decorative:
+            result["decorative"] = True
         return result
 
 
@@ -3154,7 +3161,37 @@ class PackageStage:
         text = re.sub(r"^表單：[^。]{1,180}。", "", text)
         return text.strip()
 
+    @staticmethod
+    def _is_low_value_icon_output(output: dict[str, Any]) -> bool:
+        """A figure whose whole yield is 'this is a blurry/tiny UI icon'.
+
+        No OCR text plus a short (or self-declared unreadable) caption carries
+        no retrievable information — weaving it just pads chunks with noise
+        (live: 叉號/盾牌/下載箭頭 icons dominated 5 of 22 chunks).
+        """
+
+        all_text = [
+            line
+            for line in split_vlm_lines(output.get("all_text", []))
+            # One stray OCR char ("X" on a close button) is not retrievable text.
+            if len(re.sub(r"\s+", "", line)) >= 2
+        ]
+        if all_text:
+            return False
+        caption = render_vlm_text(output.get("semantic_caption", ""))
+        compact = re.sub(r"\s+", "", caption)
+        if not compact:
+            return False
+        blurry = any(term in caption for term in ("模糊", "低解析度", "難以辨認", "無法辨識"))
+        if blurry and len(compact) <= 80:
+            return True
+        image_type = str(output.get("image_type") or "").lower()
+        self_identified_icon = bool(re.search(r"圖示|圖標|符號", caption))
+        return (image_type in ("other", "icon") or self_identified_icon) and len(compact) <= 60
+
     def _is_decorative_figure_asset(self, asset: AssetEntry) -> bool:
+        if asset.decorative:
+            return True
         text = "\n".join(
             render_vlm_text(part)
             for part in [asset.title, asset.structured_content, asset.semantic_caption, asset.retrieval_text]
@@ -3778,11 +3815,93 @@ class PackageStage:
             zh_count = sum(1 for ch in caption if "一" <= ch <= "鿿")
             ascii_count = sum(1 for ch in caption if ch.isascii() and ch.isalpha())
             if zh_count >= 4 and zh_count >= ascii_count:
+                # Cut at the sentence boundary, not mid-clause at 80 chars
+                # (live: 「…畫面左側顯示了檔案系統的樹狀結構，中」 became a title).
+                sentence = caption.split("。", 1)[0]
+                if sentence and len(sentence) < 80:
+                    return sentence + "。" if len(sentence) < len(caption) else sentence
                 return caption[:80]
         for line in split_vlm_lines(parsed.get("all_text", [])):
             if any("一" <= ch <= "鿿" for ch in line):
                 return line[:80]
         return fallback
+
+    @staticmethod
+    def _visual_grounding_tokens_from_texts(texts: Any) -> set[str]:
+        """Lowercased Latin terms (≥3 chars) appearing in the given texts."""
+
+        tokens: set[str] = set()
+        for text in texts or []:
+            for term in _LATIN_TERM_RE.findall(str(text or "")):
+                tokens.add(term.lower())
+        return tokens
+
+    @classmethod
+    def _collect_visual_grounding_tokens(
+        cls,
+        document_ir: DocumentIR,
+        enrichments: dict[str, dict[str, Any]],
+    ) -> set[str]:
+        """Every Latin term visible in the document: parser text + figure OCR.
+
+        Captions/facts/keywords are excluded — they are generated prose, i.e.
+        the very fields the grounding check exists to verify.
+        """
+
+        texts: list[str] = []
+        for block in document_ir.blocks:
+            payload = block.payload or {}
+            for key in ("text", "table_body", "table_caption", "caption"):
+                value = payload.get(key)
+                if value:
+                    texts.append(render_vlm_text(value))
+            items = payload.get("items")
+            if isinstance(items, list):
+                texts.extend(str(item) for item in items)
+        for enrichment in enrichments.values():
+            output = enrichment.get("output") or {}
+            texts.append(render_vlm_text(output.get("all_text", "")))
+            texts.append(render_vlm_text(output.get("structured_content", "")))
+        return cls._visual_grounding_tokens_from_texts(texts)
+
+    @classmethod
+    def _ground_visual_output_terms(
+        cls,
+        output: dict[str, Any],
+        grounding_tokens: set[str],
+        semantic_output_language: str = "zh-TW",
+    ) -> dict[str, Any]:
+        """Drop caption/keyword Latin terms that are visible nowhere in the doc.
+
+        zh-TW corpora only: captions there are Chinese prose with Latin islands
+        (brand/product names), which drop out cleanly. English prose would be
+        mangled, and with no grounding corpus there is no evidence to act on.
+        """
+
+        if semantic_output_language == "en" or not grounding_tokens:
+            return output
+
+        def keep(term: "re.Match[str]") -> str:
+            return term.group(0) if term.group(0).lower() in grounding_tokens else ""
+
+        result = dict(output or {})
+        caption = str(result.get("semantic_caption") or "")
+        if caption:
+            cleaned = _LATIN_TERM_RE.sub(keep, caption)
+            cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+            cleaned = re.sub(r" +(?=[，。、；：）」！？])", "", cleaned)
+            result["semantic_caption"] = cleaned.strip()
+        keywords = result.get("keywords")
+        if isinstance(keywords, list):
+            result["keywords"] = [
+                keyword
+                for keyword in keywords
+                if all(
+                    term.lower() in grounding_tokens
+                    for term in _LATIN_TERM_RE.findall(str(keyword))
+                )
+            ]
+        return result
 
     def _augment_visual_output_from_page_text(
         self,
@@ -3801,6 +3920,12 @@ class PackageStage:
         existing_all_text = split_vlm_lines(result.get("all_text", []))
         caption = render_vlm_text(result.get("semantic_caption", ""))
         image_type = str(result.get("image_type") or "").lower()
+        if image_type in ("screenshot", "photo"):
+            # A screenshot stays a screenshot: its " > " structured lines are UI
+            # menus/folder trees, not a workflow (same policy as the renderer).
+            # Reclassifying used to push the flow template — built around the
+            # hallucination-prone caption — onto every delivered surface.
+            return result
         looks_like_flowchart = (
             image_type == "flowchart"
             or any(" > " in line for line in structured_lines)
@@ -4254,7 +4379,10 @@ class PackageStage:
         title = self._clean_export_title(asset.title.strip() if asset.title else asset.asset_id)
         visual_output = coerce_visual_vlm_output(
             {
-                "image_type": "flowchart" if " > " in (asset.structured_content or "") else "figure",
+                # Trust the VLM classification when the asset carries one; the
+                # " > " heuristic is only a fallback for legacy asset entries.
+                "image_type": asset.image_type
+                or ("flowchart" if " > " in (asset.structured_content or "") else "figure"),
                 "structured_content": asset.structured_content,
                 "semantic_caption": asset.semantic_caption or "",
                 "facts": asset.facts,
@@ -4435,6 +4563,7 @@ class PackageStage:
         assets: list[AssetEntry] = []
         asset_map: dict[str, AssetEntry] = {}
         enrichments = enrichments or {}
+        grounding_tokens = self._collect_visual_grounding_tokens(document_ir, enrichments)
 
         figures_dir = assets_dir / "figures"
         figures_dir.mkdir(parents=True, exist_ok=True)
@@ -4508,6 +4637,11 @@ class PackageStage:
                             document_ir,
                             block,
                         )
+                        enrichment_output = self._ground_visual_output_terms(
+                            enrichment_output,
+                            grounding_tokens,
+                            semantic_output_language=semantic_output_language,
+                        )
                         semantic_caption = render_vlm_text(enrichment_output.get("semantic_caption", ""))
                         structured_content = render_vlm_text(enrichment_output.get("structured_content", ""))
                         facts = enrichment_output.get("facts", [])
@@ -4547,6 +4681,8 @@ class PackageStage:
                             facts=facts,
                             keywords=keywords,
                             needs_review=needs_review,
+                            image_type=str(enrichment_output.get("image_type") or ""),
+                            decorative=self._is_low_value_icon_output(enrichment_output),
                         )
                         assets.append(asset)
                         asset_map[block.block_id] = asset
@@ -4946,6 +5082,7 @@ class PackageStage:
         char_pos = 0
         enrichments = enrichments or {}
         excluded_page_indices = excluded_page_indices or set()
+        grounding_tokens = self._collect_visual_grounding_tokens(document_ir, enrichments)
 
         # Collect all triggers and watermarks across pages (for unified output at end)
         all_triggers: set[str] = set()
@@ -5091,7 +5228,11 @@ class PackageStage:
                 asset_title = asset.title if asset else fallback_title
                 visual_content = self._render_visual_semantic_content(
                     asset_title,
-                    block_enrichment.get("output", {}),
+                    self._ground_visual_output_terms(
+                        block_enrichment.get("output", {}),
+                        grounding_tokens,
+                        semantic_output_language=semantic_output_language,
+                    ),
                     semantic_output_language=semantic_output_language,
                 ).strip()
                 if visual_content:

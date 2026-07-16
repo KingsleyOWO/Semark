@@ -215,3 +215,54 @@ def test_chunks_mask_domain_accounts_from_parser_text(tmp_path):
     content = (run_path / "outputs" / "chunks.jsonl").read_text(encoding="utf-8")
     assert "d32755" not in content
     assert "d*****" in content
+
+
+def test_decorative_icon_assets_dropped_from_chunks(tmp_path):
+    # Live: ~15 tiny UI icon descriptions (叉號/盾牌/下載箭頭) dominated 5 of 22
+    # chunks. The package stage marks them decorative in assets_index; chunking
+    # must drop them instead of weaving their retrieval text (or an [Image]
+    # placeholder).
+    run_path = tmp_path / "run"
+    outputs = run_path / "outputs"
+    outputs.mkdir(parents=True)
+    entries = [
+        {
+            "block_id": "img1",
+            "retrieval_text": "這是一個黑色的叉號符號，通常用於關閉。",
+            "decorative": True,
+        },
+        {
+            "block_id": "img2",
+            "retrieval_text": "登入頁面輸入帳號與密碼的操作截圖說明。",
+        },
+    ]
+    (outputs / "assets_index.jsonl").write_text(
+        "\n".join(json.dumps(entry, ensure_ascii=False) for entry in entries) + "\n",
+        encoding="utf-8",
+    )
+    document_ir = DocumentIR(
+        doc_id="doc",
+        run_id="run",
+        source=SourceInfo(path="sample.pdf", ext="pdf", sha256="abc", size_bytes=100),
+        engine=EngineInfo(backend="pipeline", method="auto"),
+        pages=[PageInfo(page_idx=0)],
+        blocks=[
+            Block(
+                block_id="t1",
+                type=BlockType.TEXT,
+                page_idx=0,
+                payload={"text": "(1)開啟登入頁面，輸入帳號密碼後點選登入。"},
+            ),
+            Block(block_id="img1", type=BlockType.IMAGE, page_idx=0, payload={}),
+            Block(block_id="img2", type=BlockType.IMAGE, page_idx=0, payload={}),
+        ],
+    )
+
+    result = asyncio.run(ChunkStage().run("doc", "run", document_ir, run_path))
+
+    assert result.success
+    chunks_text = (outputs / "chunks.jsonl").read_text(encoding="utf-8")
+    assert "叉號" not in chunks_text
+    assert "[Image]" not in chunks_text
+    assert "操作截圖說明" in chunks_text
+    assert "輸入帳號密碼後點選登入" in chunks_text

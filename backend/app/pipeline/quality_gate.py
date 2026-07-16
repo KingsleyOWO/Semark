@@ -748,13 +748,27 @@ def _check_rag_readiness(structured_output: Any, final_text: str) -> list[Qualit
             )
         )
 
-    if "..." in final_text:
+    ellipsis_lines: list[str] = []
+    for line in final_text.splitlines():
+        if "..." not in line:
+            continue
+        stripped = line.rstrip()
+        # TOC dot leaders (「一、登入…….. 3」) are layout, not truncation.
+        if re.search(r"\.{2,}[\s.]*\d{1,4}\s*$", stripped):
+            continue
+        # An ellipsis right before a closing quote is a faithfully transcribed,
+        # screenshot-cropped UI label (「標註為「使用說明...」。」) — the
+        # sentence around it is complete.
+        if "..." not in re.sub(r"\.{2,}(?=[」』])", "", stripped):
+            continue
+        ellipsis_lines.append(stripped.strip())
+    if ellipsis_lines:
         issues.append(
             QualityGateIssue(
                 code="summary_contains_ellipsis",
                 severity="warning",
                 message="語意輸出含截斷符號，可能讓 RAG 召回到不完整句子。",
-                evidence={},
+                evidence={"lines": ellipsis_lines[:5]},
             )
         )
     if re.search(r"<table|</tr>|</td>|\bTABLE:|\bROW:", final_text, re.IGNORECASE):

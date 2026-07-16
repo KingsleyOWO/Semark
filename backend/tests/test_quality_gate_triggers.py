@@ -643,3 +643,33 @@ def test_audit_context_window_covers_the_audited_page_in_long_documents():
     )
 
     assert neighbour in context
+
+
+def test_toc_dot_leaders_and_quoted_ui_labels_do_not_flag_ellipsis():
+    # Live (web-drive guide, gate 0.95): the only deduction was
+    # summary_contains_ellipsis fired by the table of contents' dot leaders
+    # and by a faithfully quoted, screenshot-cropped UI label — neither is a
+    # truncated semantic sentence.
+    from app.pipeline.quality_gate import _check_rag_readiness
+
+    final_text = (
+        "## 目錄\n"
+        "一、登入雲端硬碟 .. .... 3\n"
+        "二、檔案上傳方式...... ...... 4\n"
+        "右下角放大了檔案圖示，標註為「使用說明...」。\n"
+        "點選上方箭頭即可上傳檔案。\n"
+    )
+
+    codes = {issue.code for issue in _check_rag_readiness(None, final_text)}
+
+    assert "summary_contains_ellipsis" not in codes
+
+
+def test_truncated_output_line_still_flags_ellipsis():
+    from app.pipeline.quality_gate import _check_rag_readiness
+
+    final_text = "本頁說明如何設定同步資料夾，操作步驟包含...\n"
+
+    codes = {issue.code for issue in _check_rag_readiness(None, final_text)}
+
+    assert "summary_contains_ellipsis" in codes

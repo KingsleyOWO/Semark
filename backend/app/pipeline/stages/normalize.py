@@ -57,6 +57,23 @@ def _rejoin_broken_urls(text: str) -> str:
     return text
 
 
+# Screenshot OCR that MinerU promotes to headings: bare number groups (a TOTP
+# code 「380 671」) and push-notification account lines (「QNAP QTS:
+# DOMAIN\xxx@Host-1」). The text is kept as body content — only the heading
+# level is dropped, so it stays out of every chunk's heading_path.
+_PURE_NUMERIC_HEADING_RE = re.compile(r"[\d\s\-:：./]+")
+_ACCOUNT_NOTIFICATION_RE = re.compile(r"[A-Za-z0-9]\\[A-Za-z0-9]")
+
+
+def _is_ocr_noise_heading(text: str) -> bool:
+    compact = text.strip()
+    if not compact:
+        return False
+    if _PURE_NUMERIC_HEADING_RE.fullmatch(compact):
+        return True
+    return "@" in compact and bool(_ACCOUNT_NOTIFICATION_RE.search(compact))
+
+
 def is_page_furniture(block: Block) -> bool:
     """Return True when a block originated from MinerU page furniture."""
     return block.payload.get("origin") == "page_furniture"
@@ -312,9 +329,13 @@ class NormalizeStage:
                     "text_level": 0,
                     "origin": "list",
                 }
+            text = _rejoin_broken_urls(item.get("text", ""))
+            text_level = item.get("text_level", 0)
+            if text_level and _is_ocr_noise_heading(text):
+                text_level = 0
             payload = {
-                "text": _rejoin_broken_urls(item.get("text", "")),
-                "text_level": item.get("text_level", 0),
+                "text": text,
+                "text_level": text_level,
             }
             if item_type in PAGE_FURNITURE_TYPES:
                 payload["origin"] = "page_furniture"

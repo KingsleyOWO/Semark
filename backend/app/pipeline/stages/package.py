@@ -76,7 +76,9 @@ def render_vlm_text(value: Any) -> str:
     fields (all_text) carry inbox-region context across items, which
     per-item scrubbing would lose.
     """
-    return _to_taiwan_traditional(scrub_transcribed_privacy(_render_vlm_value(value)))
+    return _fix_mainland_vocab(
+        _to_taiwan_traditional(scrub_transcribed_privacy(_render_vlm_value(value)))
+    )
 
 
 def _render_vlm_value(value: Any) -> str:
@@ -116,6 +118,29 @@ def _get_opencc(profile: str) -> Any:
         except Exception:
             _OPENCC_CONVERTERS[profile] = None
     return _OPENCC_CONVERTERS[profile]
+
+
+# VLM prose written in traditional characters still carries mainland
+# vocabulary (圖標/界面/分辨率) — no simplified chars, so the opencc detection
+# gate never sees it. Small, unambiguous pairs only; 界面活性劑 (chemistry)
+# is spared.
+_MAINLAND_VOCAB_FIXES = (
+    (re.compile(r"界面(?!活性)"), "介面"),
+    (re.compile(r"圖標"), "圖示"),
+    (re.compile(r"分辨率"), "解析度"),
+    (re.compile(r"視頻"), "影片"),
+    (re.compile(r"軟件"), "軟體"),
+    (re.compile(r"硬盤"), "硬碟"),
+    (re.compile(r"鼠標"), "滑鼠"),
+)
+
+
+def _fix_mainland_vocab(text: str) -> str:
+    if not text or not re.search(r"[一-鿿]", text):
+        return text
+    for pattern, replacement in _MAINLAND_VOCAB_FIXES:
+        text = pattern.sub(replacement, text)
+    return text
 
 
 # opencc reads verb+了 as liǎo and converts the aspect particle (展示了→展示瞭),

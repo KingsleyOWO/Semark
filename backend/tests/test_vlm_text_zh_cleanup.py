@@ -62,3 +62,25 @@ def test_genuine_liao_words_kept_after_conversion():
     assert _fix_opencc_liao("設定一目瞭然，便於瞭解流程。") == "設定一目瞭然，便於瞭解流程。"
     assert _fix_opencc_liao("站在瞭望台上對系統瞭如指掌。") == "站在瞭望台上對系統瞭如指掌。"
     assert _fix_opencc_liao("說明相當明瞭。") == "說明相當明瞭。"
+
+
+def test_mainland_vocabulary_fixed_in_traditional_text():
+    # VLM prose written in traditional characters still carries mainland
+    # vocabulary (圖標/界面/分辨率) — no simplified chars, so the opencc
+    # detection gate never sees it. A small unambiguous word map runs always.
+    text = "界面左側有一個下載圖標，點選後可調整分辨率。"
+
+    out = render_vlm_text(text)
+
+    assert "介面" in out and "圖示" in out and "解析度" in out
+    assert "界面" not in out and "圖標" not in out and "分辨率" not in out
+
+
+def test_vocab_fix_spares_surfactant_and_taiwan_prose():
+    # 界面活性劑 is legitimate chemistry vocabulary — not a UI word.
+    text = "本產品含界面活性劑，操作介面顯示注意圖示。"
+
+    out = render_vlm_text(text)
+
+    assert "界面活性劑" in out
+    assert "操作介面" in out

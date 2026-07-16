@@ -341,3 +341,30 @@ def test_text_payload_keeps_prose_after_complete_url():
     block = NormalizeStage()._parse_block(item, 0)
 
     assert block.payload["text"] == "see https://demo.example.tw docs folder for details 詳見文件"
+
+
+def test_ocr_noise_not_promoted_to_heading():
+    # Live: a phone push-notification screenshot OCR'd into headings —
+    # 「## QNAP QTS: CORP\d32@Drive-1」 and the TOTP code 「## 380 671」 —
+    # polluting every chunk's heading_path under them.
+    stage = NormalizeStage()
+
+    code_block = stage._parse_block({"type": "text", "text": "380 671", "text_level": 1}, 10)
+    assert code_block.payload["text_level"] == 0
+    assert code_block.payload["text"] == "380 671"
+
+    notif_block = stage._parse_block(
+        {"type": "text", "text": "DEMO QTS: CORP\\d32@Drive-1", "text_level": 1}, 10
+    )
+    assert notif_block.payload["text_level"] == 0
+    assert notif_block.payload["text"] == "DEMO QTS: CORP\\d32@Drive-1"
+
+    real_heading = stage._parse_block(
+        {"type": "text", "text": "二、檔案上傳方式", "text_level": 2}, 3
+    )
+    assert real_heading.payload["text_level"] == 2
+
+    numbered_heading = stage._parse_block(
+        {"type": "text", "text": "3.僅建立分享連結", "text_level": 2}, 11
+    )
+    assert numbered_heading.payload["text_level"] == 2

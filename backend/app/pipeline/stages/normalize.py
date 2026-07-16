@@ -39,6 +39,23 @@ from app.supported_files import SPREADSHEET_NATIVE_EXTENSIONS
 # (package-stage) decision.
 PAGE_FURNITURE_TYPES = frozenset({"header", "footer", "page_number", "page_footnote", "aside_text"})
 
+# A URL MinerU re-wrapped with a stray space (…qfil e&hl=en). The fragment
+# after the space must itself look like a URL tail (query/param characters)
+# so prose following a complete URL is never glued on.
+_BROKEN_URL_RE = re.compile(
+    r"(https?://[^\s]+)[ \t]+([A-Za-z0-9][A-Za-z0-9._/#-]*[&=?%][A-Za-z0-9&=?%._/#-]*)"
+)
+
+
+def _rejoin_broken_urls(text: str) -> str:
+    if not text or "http" not in text:
+        return text
+    previous = None
+    while previous != text:
+        previous = text
+        text = _BROKEN_URL_RE.sub(r"\1\2", text)
+    return text
+
 
 def is_page_furniture(block: Block) -> bool:
     """Return True when a block originated from MinerU page furniture."""
@@ -296,7 +313,7 @@ class NormalizeStage:
                     "origin": "list",
                 }
             payload = {
-                "text": item.get("text", ""),
+                "text": _rejoin_broken_urls(item.get("text", "")),
                 "text_level": item.get("text_level", 0),
             }
             if item_type in PAGE_FURNITURE_TYPES:
@@ -327,6 +344,10 @@ class NormalizeStage:
             payload = {
                 "table_body": item.get("table_body", ""),
                 "table_caption": item.get("table_caption"),
+                # Slide reminders printed under a table arrive in
+                # table_footnote, not as a separate text block — dropping the
+                # field silently loses authored content.
+                "table_footnote": item.get("table_footnote"),
             }
             # Keep the table crop so the parsed HTML can be verified against it
             if item.get("img_path"):

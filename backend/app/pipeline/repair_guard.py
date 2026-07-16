@@ -102,6 +102,20 @@ def extract_value_tokens(text: str) -> set[str]:
     return tokens
 
 
+def _is_noise_fact_token(token: str) -> bool:
+    """Tokens that read as facts to the extractor but are layout noise.
+
+    Bare one/two-digit integers are step markers, page numbers and list
+    indices from screenshot transcriptions — a legitimate rewrite reorders
+    or drops them. Real values keep protection: three+ digits, decimals,
+    percentages and dotted dates all fail these patterns. 欄位N/Column N are
+    the renderer's fallback names for headerless table columns.
+    """
+    if re.fullmatch(r"\d{1,2}", token):
+        return True
+    return bool(re.fullmatch(r"(?:欄位|Column\s*)\d+", token))
+
+
 def _token_survives(token: str, repaired_normalized: str, repaired_compact: str) -> bool:
     if token in repaired_normalized:
         return True
@@ -130,7 +144,13 @@ def repair_preserves_facts(
     # renderer output, not document facts; the reviewer is explicitly asked
     # to remove template filler, so their removal must not count as loss.
     template_labels = set(get_rules().marker_list("template_section_labels"))
+    # Internal asset anchors ([[asset:tbl0000]]) would otherwise contribute
+    # fake numeric facts like 「0000」.
+    original_md = re.sub(r"\[\[asset:[^\]]+\]\]", " ", str(original_md or ""))
     original_tokens = extract_fact_tokens(original_md) - template_labels
+    original_tokens = {
+        token for token in original_tokens if not _is_noise_fact_token(token)
+    }
     evidence_tokens = extract_fact_tokens(evidence_text)
     repaired_normalized = _normalize(repaired_md)
     repaired_compact = _compact(repaired_normalized)

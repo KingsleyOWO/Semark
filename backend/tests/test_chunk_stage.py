@@ -167,3 +167,51 @@ def test_empty_structured_chunks_fall_back_to_raw_block_chunks(tmp_path):
     chunks_text = (outputs / "chunks.jsonl").read_text(encoding="utf-8")
     assert "Raw MinerU fallback is the last-resort non-empty output" in chunks_text
     assert len(chunks_text.splitlines()) == 1
+
+
+def test_table_block_text_includes_footnote():
+    from app.models.document_ir import Block, BlockType
+
+    block = Block(
+        block_id="tbl0",
+        type=BlockType.TABLE,
+        page_idx=0,
+        payload={
+            "table_caption": "設備一覽表",
+            "table_footnote": ["提醒：使用麥克風系統請在會前先與示範單位預借。"],
+            "table_body": "<table><tr><td>項目</td><td>說明</td></tr></table>",
+        },
+    )
+
+    text = ChunkStage()._block_to_text(block)
+
+    assert "預借" in text
+
+
+def test_chunks_mask_domain_accounts_from_parser_text(tmp_path):
+    from app.models.document_ir import DocumentIR, EngineInfo, PageInfo, SourceInfo
+
+    run_path = tmp_path / "run"
+    (run_path / "outputs").mkdir(parents=True)
+    document_ir = DocumentIR(
+        doc_id="doc",
+        run_id="run",
+        source=SourceInfo(path="guide.pdf", ext="pdf", sha256="abc", size_bytes=1),
+        engine=EngineInfo(backend="pipeline", method="auto"),
+        pages=[PageInfo(page_idx=0)],
+        blocks=[
+            Block(
+                block_id="t0",
+                type=BlockType.TEXT,
+                page_idx=0,
+                payload={"text": "描述：DEMO\\d32755分享給您。狀態：仍在等待中。"},
+            )
+        ],
+    )
+
+    result = asyncio.run(ChunkStage().run("doc", "run", document_ir, run_path))
+
+    assert result.success
+    content = (run_path / "outputs" / "chunks.jsonl").read_text(encoding="utf-8")
+    assert "d32755" not in content
+    assert "d*****" in content

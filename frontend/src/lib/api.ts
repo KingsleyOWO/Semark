@@ -546,7 +546,7 @@ export async function getOrgChartDebugFileText(runId: string, fileName: string):
 
 // ========== Download API ==========
 
-export type DownloadFileType = 'source' | 'documents' | 'quality' | 'assets_index' | 'enrichments'
+export type DownloadFileType = 'source' | 'main_text' | 'documents' | 'quality' | 'assets_index' | 'enrichments'
 export type DownloadOutputFormat = 'md' | 'docx' | 'txt' | 'json'
 
 export interface DownloadRequest {
@@ -641,6 +641,7 @@ export interface ProfileConfig {
     chunk_max_tokens: number
     chunk_overlap_tokens: number
     semantic_output_language: string
+    scrub_private_info: boolean
   }
 }
 
@@ -657,6 +658,7 @@ export interface ProfileOverrides {
   chunk_max_tokens?: number
   chunk_overlap_tokens?: number
   semantic_output_language?: string
+  scrub_private_info?: boolean
 }
 
 export interface ProfileWithOverrides {

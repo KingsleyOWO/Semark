@@ -49,6 +49,7 @@ export function Assets() {
   const [selectedDocumentId, setSelectedDocumentId] = useState<string | null>(null)
   const [selectedDownloadIds, setSelectedDownloadIds] = useState<Set<string>>(new Set())
   const [format, setFormat] = useState<Exclude<DownloadOutputFormat, 'json'>>('md')
+  const [mainTextOnly, setMainTextOnly] = useState(false)
   const [isDownloadingAll, setIsDownloadingAll] = useState(false)
   const [isDownloadingRuns, setIsDownloadingRuns] = useState(false)
   const [selectedRunDownloadIds, setSelectedRunDownloadIds] = useState<Set<string>>(new Set())
@@ -199,14 +200,14 @@ export function Assets() {
     try {
       const response = await downloadRuns({
         run_ids: runIds,
-        file_types: ['documents'],
+        file_types: [mainTextOnly ? 'main_text' : 'documents'],
         format,
       })
       const blob = await response.blob()
       const url = window.URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
-      a.download = `processed_documents_${runIds.length}_runs_${format}.zip`
+      a.download = `processed_documents_${runIds.length}_runs_${mainTextOnly ? 'main_text_' : ''}${format}.zip`
       document.body.appendChild(a)
       a.click()
       a.remove()
@@ -278,15 +279,15 @@ export function Assets() {
     try {
       const response = await downloadRuns({
         run_ids: [selectedRunId],
-        file_types: ['documents'],
+        file_types: [mainTextOnly ? 'main_text' : 'documents'],
         format,
-        document_ids: Array.from(selectedDownloadIds),
+        document_ids: mainTextOnly ? undefined : Array.from(selectedDownloadIds),
       })
       const blob = await response.blob()
       const url = window.URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
-      a.download = `${selectedRunId}_documents_${format}.zip`
+      a.download = `${selectedRunId}_${mainTextOnly ? 'main_text' : 'documents'}_${format}.zip`
       document.body.appendChild(a)
       a.click()
       a.remove()
@@ -344,6 +345,16 @@ export function Assets() {
               {option}
             </Button>
           ))}
+          <div className="mx-1 h-5 w-px bg-border" />
+          <Button
+            type="button"
+            size="sm"
+            variant={mainTextOnly ? 'default' : 'outline'}
+            onClick={() => setMainTextOnly((v) => !v)}
+            title={t('assets.mainTextOnlyHint')}
+          >
+            {t('assets.mainTextOnly')}
+          </Button>
         </div>
       </div>
 

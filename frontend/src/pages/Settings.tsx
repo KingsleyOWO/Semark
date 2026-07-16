@@ -121,6 +121,7 @@ interface ProfileFormData {
   chunk_max_tokens: number
   chunk_overlap_tokens: number
   semantic_output_language: string
+  scrub_private_info: boolean
 }
 
 const PARAM_DESCRIPTION_KEYS = {
@@ -136,6 +137,7 @@ const PARAM_DESCRIPTION_KEYS = {
   chunk_max_tokens: 'settings.desc.chunk_max_tokens',
   chunk_overlap_tokens: 'settings.desc.chunk_overlap_tokens',
   semantic_output_language: 'settings.desc.semantic_output_language',
+  scrub_private_info: 'settings.desc.scrub_private_info',
   temperature: 'settings.desc.temperature',
   top_p: 'settings.desc.top_p',
   top_k: 'settings.desc.top_k',
@@ -182,6 +184,7 @@ export function Settings() {
     chunk_max_tokens: 512,
     chunk_overlap_tokens: 50,
     semantic_output_language: 'auto',
+    scrub_private_info: true,
   })
   const [profileHasChanges, setProfileHasChanges] = useState(false)
 
@@ -243,6 +246,7 @@ export function Settings() {
         chunk_max_tokens: profileData.config.package.chunk_max_tokens,
         chunk_overlap_tokens: profileData.config.package.chunk_overlap_tokens,
         semantic_output_language: profileData.config.package.semantic_output_language,
+        scrub_private_info: profileData.config.package.scrub_private_info,
       })
       setProfileHasChanges(false)
     }
@@ -418,6 +422,9 @@ export function Settings() {
     }
     if (profileFormData.semantic_output_language !== profileData.config.package.semantic_output_language) {
       overrides.semantic_output_language = profileFormData.semantic_output_language
+    }
+    if (profileFormData.scrub_private_info !== profileData.config.package.scrub_private_info) {
+      overrides.scrub_private_info = profileFormData.scrub_private_info
     }
 
     profileUpdateMutation.mutate(overrides)
@@ -1062,6 +1069,15 @@ export function Settings() {
                       {t('settings.outputPackage')}
                     </h4>
                     <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                      <div>
+                        <ParamLabel label={t('settings.scrubPrivateInfo')} description={t(PARAM_DESCRIPTION_KEYS.scrub_private_info)} />
+                        <div className="mt-2">
+                          <Toggle
+                            checked={profileFormData.scrub_private_info}
+                            onChange={(v) => handleProfileInputChange('scrub_private_info', v)}
+                          />
+                        </div>
+                      </div>
                       <div>
                         <ParamLabel label={t('settings.semanticOutputLanguage')} description={t(PARAM_DESCRIPTION_KEYS.semantic_output_language)} />
                         <select

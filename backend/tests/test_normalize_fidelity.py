@@ -129,6 +129,30 @@ def test_table_payload_preserves_img_path():
     assert block.payload["img_path"] == "images/table_01.jpg"
 
 
+def test_table_payload_preserves_footnote():
+    # MinerU attaches slide reminders printed under a table to table_footnote.
+    # Dropping it silently loses authored content (e.g. 「請先與總務預借」).
+    item = {
+        "type": "table",
+        "table_body": "<table><tr><td>項目</td><td>金額</td></tr></table>",
+        "table_caption": ["表一"],
+        "table_footnote": [
+            "提醒：1.使用麥克風系統請在會前先與示範單位預借。",
+            "2.合併借用時請提早一天與資訊中心聯絡。",
+        ],
+        "page_idx": 0,
+        "bbox": [100, 100, 900, 500],
+    }
+
+    block = NormalizeStage()._parse_block(item, 2)
+
+    assert block.type == BlockType.TABLE
+    assert block.payload["table_footnote"] == [
+        "提醒：1.使用麥克風系統請在會前先與示範單位預借。",
+        "2.合併借用時請提早一天與資訊中心聯絡。",
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Dedup priority
 # ---------------------------------------------------------------------------
@@ -288,3 +312,32 @@ async def test_supplement_blocks_sort_in_normalized_space(monkeypatch, tmp_path)
     assert count == 1
     assert [b.block_id for b in blocks] == ["b000000", "s000001"]
     assert [b.reading_order for b in blocks] == [0, 1]
+
+
+def test_text_payload_rejoins_url_broken_by_ocr_linewrap():
+    # MinerU wraps long URLs across lines and re-emits them with a space in
+    # the middle (live: com.qnap.qfil e&hl=en) — copying that URL 404s.
+    item = {
+        "type": "text",
+        "text": "Android： https://play.example.com/store/apps/details?id=com.demo.qfil e&hl=en",
+        "page_idx": 0,
+        "bbox": [0, 0, 100, 10],
+    }
+
+    block = NormalizeStage()._parse_block(item, 0)
+
+    assert "qfil e" not in block.payload["text"]
+    assert "id=com.demo.qfile&hl=en" in block.payload["text"]
+
+
+def test_text_payload_keeps_prose_after_complete_url():
+    item = {
+        "type": "text",
+        "text": "see https://demo.example.tw docs folder for details 詳見文件",
+        "page_idx": 0,
+        "bbox": [0, 0, 100, 10],
+    }
+
+    block = NormalizeStage()._parse_block(item, 0)
+
+    assert block.payload["text"] == "see https://demo.example.tw docs folder for details 詳見文件"

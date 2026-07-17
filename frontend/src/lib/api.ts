@@ -327,6 +327,20 @@ export async function getOutputsSummary(
   return fetchJson(`${API_BASE}/runs/outputs-summary?${params}`)
 }
 
+/** Page through outputs-summary until every run is loaded. */
+export async function getAllOutputsSummary(
+  options?: { include_hidden?: boolean; has_documents_only?: boolean }
+): Promise<OutputsSummaryResponse> {
+  const pageSize = 500
+  const runs: OutputRunSummary[] = []
+  let page: OutputsSummaryResponse
+  do {
+    page = await getOutputsSummary(pageSize, runs.length, options)
+    runs.push(...page.runs)
+  } while (page.runs.length > 0 && runs.length < page.total)
+  return { runs, total: Math.max(page.total, runs.length) }
+}
+
 // Run artifacts
 export async function getDocumentIR(runId: string): Promise<DocumentIR> {
   return fetchJson(`${API_BASE}/runs/${runId}/document_ir`)
@@ -554,6 +568,7 @@ export interface DownloadRequest {
   file_types: DownloadFileType[]
   format: DownloadOutputFormat
   document_ids?: string[]
+  dedupe_by_doc?: boolean
 }
 
 /**

@@ -185,3 +185,25 @@ def test_source_name_strips_edge_whitespace():
 
     assert _source_name_for("/data/uploads/201電子白板 .pdf", "01RUNABCDEFGHIJK") == "201電子白板"
     assert _source_name_for(None, "01RUNABCDEFGHIJK") == "01RUNABCDEFG"
+
+
+def test_dedupe_by_doc_keeps_newest_run_per_document():
+    from app.api.routes.download import _dedupe_runs_by_doc
+
+    class Run:
+        def __init__(self, run_id, doc_id):
+            self.run_id = run_id
+            self.doc_id = doc_id
+
+    old = Run("01KXG051R8EP000000000000AA", "doc-a")
+    new = Run("01KXN1ZYYV00000000000000BB", "doc-a")
+    other = Run("01KXG051TX00000000000000CC", "doc-b")
+
+    kept = _dedupe_runs_by_doc(
+        [(old, "204電子白板"), (new, "204電子白板"), (other, "606電子白板")]
+    )
+
+    assert [(run.run_id, name) for run, name in kept] == [
+        ("01KXN1ZYYV00000000000000BB", "204電子白板"),
+        ("01KXG051TX00000000000000CC", "606電子白板"),
+    ]

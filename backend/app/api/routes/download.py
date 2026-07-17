@@ -61,6 +61,13 @@ class DownloadRequest(BaseModel):
         default=None,
         description="Optional split document IDs to include when downloading documents.",
     )
+    dedupe_by_doc: bool = Field(
+        default=False,
+        description=(
+            "Keep only the newest run per document, so re-processed documents "
+            "are exported once instead of once per run."
+        ),
+    )
 
 
 class DownloadManifest(BaseModel):
@@ -120,6 +127,9 @@ async def download_runs(
         # Extract original filename without extension
         source_name = _source_name_for(doc.source_path if doc else None, run.run_id)
         runs_with_docs.append((run, source_name))
+
+    if request.dedupe_by_doc:
+        runs_with_docs = _dedupe_runs_by_doc(runs_with_docs)
 
     # Create ZIP in memory
     zip_buffer = io.BytesIO()
@@ -354,6 +364,23 @@ def _get_file_content(
         )
 
     return content, f"{source_name}_{type_suffix}.md"
+
+
+def _dedupe_runs_by_doc(runs_with_docs: list) -> list:
+    """
+    Keep only the newest run per document. Run IDs are ULIDs, so lexicographic
+    order matches creation order.
+    """
+    newest_run_by_doc: dict[str, str] = {}
+    for run, _source_name in runs_with_docs:
+        current = newest_run_by_doc.get(run.doc_id)
+        if current is None or run.run_id > current:
+            newest_run_by_doc[run.doc_id] = run.run_id
+    return [
+        (run, source_name)
+        for run, source_name in runs_with_docs
+        if newest_run_by_doc[run.doc_id] == run.run_id
+    ]
 
 
 def _source_name_for(source_path: str | None, run_id: str) -> str:

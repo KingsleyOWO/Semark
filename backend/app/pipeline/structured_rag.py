@@ -9,6 +9,7 @@ from typing import Any
 
 from app.models.document_ir import BlockType, DocumentIR
 from app.pipeline.corpus_rules import get_rules as get_corpus_rules
+from app.pipeline.delivery import atomic_write_json, atomic_write_jsonl, atomic_write_text
 from app.pipeline.semantic.language import (
     display_form_section,
     form_template_sections,
@@ -3741,18 +3742,17 @@ def write_structured_rag_outputs(output: StructuredRagOutput, outputs_dir: Any) 
         "structured_chunks": outputs_dir / "structured_chunks.jsonl",
     }
 
-    paths["document_plan"].write_text(
-        json.dumps(output.plan.to_dict(), ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    atomic_write_json(paths["document_plan"], output.plan.to_dict(), ensure_ascii=False, indent=2)
     language = str(output.stats.get("semantic_output_language") or "zh-TW")
-    with open(paths["structured_records"], "w", encoding="utf-8") as f:
-        for record in output.records:
-            f.write(json.dumps(_localized_record_for_output(record, language), ensure_ascii=False) + "\n")
-    paths["structured_rag"].write_text(output.rag_markdown, encoding="utf-8")
-    with open(paths["structured_chunks"], "w", encoding="utf-8") as f:
-        for chunk in output.chunks:
-            f.write(json.dumps(_localized_chunk_for_output(chunk, language), ensure_ascii=False) + "\n")
+    atomic_write_jsonl(
+        paths["structured_records"],
+        (_localized_record_for_output(record, language) for record in output.records),
+    )
+    atomic_write_text(paths["structured_rag"], output.rag_markdown, encoding="utf-8")
+    atomic_write_jsonl(
+        paths["structured_chunks"],
+        (_localized_chunk_for_output(chunk, language) for chunk in output.chunks),
+    )
 
     if output.plan.document_type == "form_collection":
         paths.update(_write_form_subdocument_outputs(output, outputs_dir))
@@ -3823,14 +3823,16 @@ def _write_form_subdocument_outputs(
             chunks=chunks_by_subdoc.get(subdoc_id, []),
             stats={},
         )
-        markdown_path.write_text(form_output.rag_markdown, encoding="utf-8")
+        atomic_write_text(markdown_path, form_output.rag_markdown, encoding="utf-8")
         language = str(output.stats.get("semantic_output_language") or "zh-TW")
-        with open(fields_path, "w", encoding="utf-8") as f:
-            for record in field_records:
-                f.write(json.dumps(_localized_record_for_output(record, language), ensure_ascii=False) + "\n")
-        with open(chunks_path, "w", encoding="utf-8") as f:
-            for chunk in form_output.chunks:
-                f.write(json.dumps(_localized_chunk_for_output(chunk, language), ensure_ascii=False) + "\n")
+        atomic_write_jsonl(
+            fields_path,
+            (_localized_record_for_output(record, language) for record in field_records),
+        )
+        atomic_write_jsonl(
+            chunks_path,
+            (_localized_chunk_for_output(chunk, language) for chunk in form_output.chunks),
+        )
 
         index.append(
             {
@@ -3851,10 +3853,7 @@ def _write_form_subdocument_outputs(
             }
         )
 
-    paths["forms_index"].write_text(
-        json.dumps(index, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    atomic_write_json(paths["forms_index"], index, ensure_ascii=False, indent=2)
     return paths
 
 

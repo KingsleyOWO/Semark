@@ -29,11 +29,8 @@ from app.models.org_chart import (
     OrgGroup,
     OrgNode,
 )
-from app.pipeline.privacy import (
-    scrub_transcribed_privacy,
-    set_privacy_scrub_enabled,
-)
 from app.pipeline.corpus_rules import get_rules as get_corpus_rules
+from app.pipeline.delivery import atomic_write_json, atomic_write_jsonl, atomic_write_text
 from app.pipeline.package_utils import (
     caption_text,
     clean_html_table,
@@ -42,8 +39,15 @@ from app.pipeline.package_utils import (
     infer_table_asset_title,
     semantic_table_to_text,
 )
+from app.pipeline.privacy import (
+    scrub_transcribed_privacy,
+    set_privacy_scrub_enabled,
+)
 from app.pipeline.quality_gate import (
     _resolve_page_image as resolve_quality_gate_page_image,
+)
+from app.pipeline.quality_gate import (
+    _scrub_vlm_audit_output_fields as scrub_quality_gate_vlm_audit_output_fields,
 )
 from app.pipeline.quality_gate import (
     run_quality_gate,
@@ -609,31 +613,29 @@ class PackageStage:
             # document exports below; the delivered files must not carry them.
             delivered_md = self._finalize_delivered_markdown(source_md)
             source_md_path = outputs_dir / "source.md"
-            source_md_path.write_text(delivered_md, encoding="utf-8")
+            atomic_write_text(source_md_path, delivered_md, encoding="utf-8")
 
-            # Compatibility aliases for older endpoints/evaluators.
+            # Compatibility alias for older endpoints/evaluators. Same scrub as
+            # source.md/rag.md: dataset_md carries raw block text + raw table
+            # HTML and never passes through _finalize_delivered_markdown.
             dataset_md_path = outputs_dir / "dataset.md"
-            dataset_md_path.write_text(dataset_md, encoding="utf-8")
+            atomic_write_text(dataset_md_path, self._finalize_dataset_markdown(dataset_md), encoding="utf-8")
 
             rag_md_path = outputs_dir / "rag.md"
-            rag_md_path.write_text(delivered_md, encoding="utf-8")
+            atomic_write_text(rag_md_path, delivered_md, encoding="utf-8")
 
             assets_index_path = outputs_dir / "assets_index.jsonl"
-            with open(assets_index_path, "w", encoding="utf-8") as f:
-                for asset in assets:
-                    f.write(json.dumps(asset.to_dict(), ensure_ascii=False) + "\n")
+            atomic_write_jsonl(assets_index_path, (asset.to_dict() for asset in assets))
 
             source_map_path = run_path / "source_map.json"
             # Combine source maps (use rag view as primary)
             combined_source_map = SourceMap(
                 md_anchors=rag_source_map.md_anchors,
             )
-            with open(source_map_path, "w", encoding="utf-8") as f:
-                json.dump(combined_source_map.to_dict(), f, ensure_ascii=False, indent=2)
+            atomic_write_json(source_map_path, combined_source_map.to_dict(), ensure_ascii=False, indent=2)
 
             quality_path = outputs_dir / "quality.json"
-            with open(quality_path, "w", encoding="utf-8") as f:
-                json.dump(quality.to_dict(), f, ensure_ascii=False, indent=2)
+            atomic_write_json(quality_path, quality.to_dict(), ensure_ascii=False, indent=2)
 
             structured_paths = write_structured_rag_outputs(
                 output=structured_output,
@@ -641,7 +643,7 @@ class PackageStage:
             )
             document_export_paths = self._write_document_exports(
                 outputs_dir=outputs_dir,
-                source_md=scrub_transcribed_privacy(source_md),
+                source_md=source_md,
                 assets=assets,
                 structured_paths=structured_paths,
                 document_ir=document_ir,
@@ -978,7 +980,14 @@ class PackageStage:
                     f"- error: {audit.get('error') or ''}",
                     "",
                     "```json",
-                    self._truncate_text(json.dumps(audit.get("output") or {}, ensure_ascii=False, indent=2), 3000),
+                    self._truncate_text(
+                        json.dumps(
+                            scrub_quality_gate_vlm_audit_output_fields(audit.get("output")),
+                            ensure_ascii=False,
+                            indent=2,
+                        ),
+                        3000,
+                    ),
                     "```",
                     "",
                 ])
@@ -992,7 +1001,7 @@ class PackageStage:
             "```",
             "",
         ])
-        (outputs_dir / "llm_vlm_outputs.md").write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
+        atomic_write_text(outputs_dir / "llm_vlm_outputs.md", "\n".join(lines).strip() + "\n", encoding="utf-8")
 
     async def _repair_form_markdown_outputs(
         self,
@@ -1374,7 +1383,7 @@ class PackageStage:
             target = fallback
         if target is None or not target.parent.exists():
             return
-        target.write_text(markdown, encoding="utf-8")
+        atomic_write_text(target, markdown, encoding="utf-8")
 
         # The index title was inferred before the repair rewrote the document;
         # when it is only the file-stem stub (or otherwise unreliable), adopt
@@ -1390,7 +1399,7 @@ class PackageStage:
         if current_title and current_title != stem and not cls._is_unreliable_export_title(current_title):
             return
         main_entry["title"] = cls._clean_export_title(repaired_title)[:120]
-        index_path.write_text(json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8")
+        atomic_write_json(index_path, index, ensure_ascii=False, indent=2)
 
     @staticmethod
     def _leading_h1_title(markdown: str) -> str:
@@ -1420,7 +1429,7 @@ class PackageStage:
         for filename in ("structured_rag.md", "source.md", "rag.md"):
             path = outputs_dir / filename
             if path.exists() or filename == "structured_rag.md":
-                path.write_text(markdown, encoding="utf-8")
+                atomic_write_text(path, markdown, encoding="utf-8")
         self._write_repaired_main_document_export(outputs_dir, markdown)
 
         chunks_path = outputs_dir / "structured_chunks.jsonl"
@@ -1458,9 +1467,13 @@ class PackageStage:
         item_stats["needs_review"] = True
         item_stats["fallback_source"] = "pre_reviewer_structured_output"
 
+        # Unlike the structured retention path, current_markdown here never
+        # passes render_vlm_text, so the privacy scrub must run at this
+        # boundary before any of the writes below.
+        current_markdown = scrub_transcribed_privacy(current_markdown)
         md_path = Path(str((form_item.get("files") or {}).get("markdown") or ""))
         if md_path.parent.exists() and not md_path.exists():
-            md_path.write_text(current_markdown, encoding="utf-8")
+            atomic_write_text(md_path, current_markdown, encoding="utf-8")
         self._write_repaired_split_form_document(
             outputs_dir=outputs_dir,
             form_item=form_item,
@@ -2488,10 +2501,15 @@ class PackageStage:
         extracted forms/tables/figures inside one uploaded markdown file.
         """
 
+        # The structured-repair re-export passes raw, pre-scrub source_md
+        # (see the call site after a structured repair); scrubbing once here
+        # keeps every caller safe by construction instead of relying on each
+        # one to remember.
+        source_md = scrub_transcribed_privacy(source_md)
+
         documents_dir = outputs_dir / "documents"
         documents_dir.mkdir(parents=True, exist_ok=True)
-        for old_markdown in documents_dir.glob("*.md"):
-            old_markdown.unlink()
+        written_document_names: set[str] = set()
 
         paths: dict[str, Path] = {
             "documents_dir": documents_dir,
@@ -2543,7 +2561,8 @@ class PackageStage:
                 display_title = self._best_form_export_title(item, source_title, form_title_by_page)
                 render_item = dict(item)
                 render_item["title"] = display_title
-                dst.write_text(
+                atomic_write_text(
+                    dst,
                     self._render_split_form_document(
                         raw_markdown=form_md,
                         item=render_item,
@@ -2553,6 +2572,7 @@ class PackageStage:
                     ),
                     encoding="utf-8",
                 )
+                written_document_names.add(dst.name)
                 form_entry = {
                     "document_id": item["form_id"],
                     "kind": "form",
@@ -2574,7 +2594,8 @@ class PackageStage:
             for collection_idx, group in enumerate(table_collection_groups):
                 collection_id = f"table_collection_{collection_idx:04d}"
                 dst = documents_dir / f"{collection_id}.md"
-                dst.write_text(
+                atomic_write_text(
+                    dst,
                     self._render_table_collection_document(
                         group=group,
                         source_title=source_title,
@@ -2582,6 +2603,7 @@ class PackageStage:
                     ),
                     encoding="utf-8",
                 )
+                written_document_names.add(dst.name)
                 page_indices = sorted({asset.page_idx for asset in group["assets"] if asset.page_idx is not None})
                 index.append(
                     {
@@ -2610,7 +2632,8 @@ class PackageStage:
                 if not self._should_export_asset_document(asset, source_md, assets):
                     continue
                 dst = documents_dir / f"{asset.asset_id}.md"
-                dst.write_text(
+                atomic_write_text(
+                    dst,
                     self._render_split_asset_document(
                         asset=asset,
                         source_title=source_title,
@@ -2619,6 +2642,7 @@ class PackageStage:
                     ),
                     encoding="utf-8",
                 )
+                written_document_names.add(dst.name)
                 index.append(
                     {
                         "document_id": asset.asset_id,
@@ -2648,7 +2672,8 @@ class PackageStage:
                     if "source_title" in entry:
                         entry["source_title"] = source_title
 
-        paths["main_document"].write_text(
+        atomic_write_text(
+            paths["main_document"],
             self._render_split_main_document(
                 source_md=source_md,
                 source_title=source_title,
@@ -2659,10 +2684,16 @@ class PackageStage:
             ),
             encoding="utf-8",
         )
-        paths["documents_index"].write_text(
-            json.dumps(index, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        written_document_names.add(paths["main_document"].name)
+
+        # Every new .md is on disk before anything stale is removed: a crash
+        # here can leave an extra stray .md, never a documents_index.json
+        # entry pointing at a file that was deleted but not replaced.
+        for old_markdown in documents_dir.glob("*.md"):
+            if old_markdown.name not in written_document_names:
+                old_markdown.unlink()
+
+        atomic_write_json(paths["documents_index"], index, ensure_ascii=False, indent=2)
         return {key: str(path) for key, path in paths.items()}
 
     def _source_is_single_visual_document(
@@ -2994,6 +3025,12 @@ class PackageStage:
         asset anchors and scrub personal content that reached the text via
         parser OCR (which never passes render_vlm_text)."""
         return scrub_transcribed_privacy(cls._strip_asset_reference_tokens(markdown))
+
+    @staticmethod
+    def _finalize_dataset_markdown(dataset_md: str) -> str:
+        """dataset.md is a compatibility alias (raw block text + raw table
+        HTML) and does not go through _finalize_delivered_markdown."""
+        return scrub_transcribed_privacy(dataset_md)
 
     @staticmethod
     def _strip_asset_reference_tokens(markdown: str) -> str:

@@ -14,6 +14,7 @@ from typing import Any
 
 from app.config import PipelineConfig
 from app.models.document_ir import Block, BlockType, DocumentIR
+from app.pipeline.delivery import atomic_write_jsonl
 from app.pipeline.privacy import scrub_transcribed_privacy, set_privacy_scrub_enabled
 
 # Sections estimated below this many tokens merge with their neighbours so
@@ -97,6 +98,17 @@ class _Section:
     heading_only: bool  # titles only, no body content
 
 
+def _scrub_chunk_metadata(metadata: dict[str, Any]) -> None:
+    """Mask the same free-text metadata fields chunk.content already scrubs:
+    table_html is raw parser HTML, heading/heading_path are raw block text."""
+    if "heading" in metadata:
+        metadata["heading"] = scrub_transcribed_privacy(metadata["heading"])
+    if "heading_path" in metadata:
+        metadata["heading_path"] = [scrub_transcribed_privacy(part) for part in metadata["heading_path"]]
+    if "table_html" in metadata:
+        metadata["table_html"] = [scrub_transcribed_privacy(html) for html in metadata["table_html"]]
+
+
 class ChunkStage:
     """
     Chunk stage - splits document into semantic chunks.
@@ -173,10 +185,10 @@ class ChunkStage:
             # accounts, mail-list lines) straight into block text — scrub at
             # the delivery surface, same as rag.md.
             set_privacy_scrub_enabled(self.package_config.scrub_private_info)
-            with open(chunks_path, "w", encoding="utf-8") as f:
-                for chunk in chunks:
-                    chunk.content = scrub_transcribed_privacy(chunk.content)
-                    f.write(json.dumps(chunk.to_dict(), ensure_ascii=False) + "\n")
+            for chunk in chunks:
+                chunk.content = scrub_transcribed_privacy(chunk.content)
+                _scrub_chunk_metadata(chunk.metadata)
+            atomic_write_jsonl(chunks_path, (chunk.to_dict() for chunk in chunks))
 
             stats = {
                 "total_chunks": len(chunks),

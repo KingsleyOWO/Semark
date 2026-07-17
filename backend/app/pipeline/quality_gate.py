@@ -8,7 +8,6 @@ risk and route to VLM audit instead of rewriting content blindly.
 from __future__ import annotations
 
 import html
-import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -17,6 +16,8 @@ from typing import Any
 from app.adapters.vlm import VLMAdapter
 from app.models.document_ir import Block, BlockType, DocumentIR
 from app.pipeline.corpus_rules import get_rules as get_corpus_rules
+from app.pipeline.delivery import atomic_write_json
+from app.pipeline.privacy import scrub_transcribed_privacy
 from app.pipeline.semantic.language import (
     form_template_sections,
     prompt_form_sections,
@@ -64,6 +65,39 @@ def _quality_gate_message_for_language(code: str, message: str, semantic_output_
     return message
 
 
+# Evidence keys that carry raw excerpts of source/output text (as opposed to
+# status enums, codes, ids, paths, or counts) across the _check_* functions
+# below: table notes (table_notes_missing), authored-prose samples
+# (authored_text_dropped), and the VLM audit's own missing-items report
+# (vlm_audit_missing_items, built from _scrub_vlm_audit_output_fields output
+# so it is already masked by the time it lands here).
+_FREE_TEXT_EVIDENCE_KEYS = {"missing_notes", "missing_samples", "missing_items"}
+
+
+def _scrub_free_text(value: Any) -> Any:
+    """Mask leaked personal content in a string or list of strings; anything
+    else (numbers, bools, None) passes through untouched."""
+    if isinstance(value, str):
+        return scrub_transcribed_privacy(value)
+    if isinstance(value, list):
+        return [scrub_transcribed_privacy(item) if isinstance(item, str) else item for item in value]
+    return value
+
+
+def _scrub_vlm_audit_output_fields(output: Any) -> dict[str, Any]:
+    """Mask leaked page content in a VLM audit's raw output dict.
+
+    The audit describes what the model saw on the page, so it can carry
+    exactly the mail-list/domain-account content the scrub removes elsewhere.
+    Shared by quality_gate.json (QualityGateResult.to_dict) and
+    llm_vlm_outputs.md (package._write_llm_vlm_outputs) so both surfaces stay
+    in sync with one scrub point instead of two.
+    """
+    if not isinstance(output, dict):
+        return {}
+    return {key: _scrub_free_text(value) for key, value in output.items()}
+
+
 @dataclass
 class QualityGateIssue:
     code: str
@@ -75,6 +109,10 @@ class QualityGateIssue:
     evidence: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self, semantic_output_language: str = "zh-TW") -> dict[str, Any]:
+        evidence = dict(self.evidence)
+        for key in _FREE_TEXT_EVIDENCE_KEYS:
+            if key in evidence:
+                evidence[key] = _scrub_free_text(evidence[key])
         return {
             "code": self.code,
             "severity": self.severity,
@@ -82,7 +120,7 @@ class QualityGateIssue:
             "page_idx": self.page_idx,
             "block_id": self.block_id,
             "document_id": self.document_id,
-            "evidence": self.evidence,
+            "evidence": evidence,
         }
 
 
@@ -102,7 +140,10 @@ class QualityGateResult:
             "score": self.score,
             "issues": [issue.to_dict(semantic_output_language) for issue in self.issues],
             "vlm_audit_candidates": self.vlm_audit_candidates,
-            "vlm_audits": self.vlm_audits,
+            "vlm_audits": [
+                {**audit, "output": _scrub_vlm_audit_output_fields(audit.get("output"))}
+                for audit in self.vlm_audits
+            ],
             "stats": self.stats,
         }
 
@@ -199,7 +240,7 @@ async def run_quality_gate(
 
 def write_quality_gate(result: QualityGateResult, outputs_dir: Path) -> Path:
     path = outputs_dir / "quality_gate.json"
-    path.write_text(json.dumps(result.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_write_json(path, result.to_dict(), ensure_ascii=False, indent=2)
     return path
 
 

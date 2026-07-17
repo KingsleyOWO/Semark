@@ -327,17 +327,45 @@ export async function getOutputsSummary(
   return fetchJson(`${API_BASE}/runs/outputs-summary?${params}`)
 }
 
-/** Page through outputs-summary until every run is loaded. */
+/**
+ * Page through outputs-summary until every run is loaded.
+ *
+ * Hardened against a misbehaving/misconfigured backend so this can never
+ * spin forever: `fetchedCount` (the raw count of rows the server has
+ * returned so far, independent of de-duplication) drives the next
+ * `offset`, accumulated runs are de-duplicated by run_id in case pages
+ * ever overlap, the loop stops as soon as a page comes back empty, and a
+ * hard cap on the number of page fetches guarantees termination with a
+ * console warning if the server keeps reporting more remain.
+ */
 export async function getAllOutputsSummary(
   options?: { include_hidden?: boolean; has_documents_only?: boolean }
 ): Promise<OutputsSummaryResponse> {
   const pageSize = 500
+  const maxPages = 200
+  const seenRunIds = new Set<string>()
   const runs: OutputRunSummary[] = []
+  let fetchedCount = 0
+  let pageCount = 0
   let page: OutputsSummaryResponse
   do {
-    page = await getOutputsSummary(pageSize, runs.length, options)
-    runs.push(...page.runs)
-  } while (page.runs.length > 0 && runs.length < page.total)
+    page = await getOutputsSummary(pageSize, fetchedCount, options)
+    pageCount++
+    fetchedCount += page.runs.length
+    for (const run of page.runs) {
+      if (!seenRunIds.has(run.run_id)) {
+        seenRunIds.add(run.run_id)
+        runs.push(run)
+      }
+    }
+  } while (page.runs.length > 0 && fetchedCount < page.total && pageCount < maxPages)
+
+  if (pageCount >= maxPages && page.runs.length > 0 && fetchedCount < page.total) {
+    console.warn(
+      `getAllOutputsSummary: hit the ${maxPages}-page cap after fetching ${fetchedCount} of ${page.total} reported runs; results may be incomplete.`
+    )
+  }
+
   return { runs, total: Math.max(page.total, runs.length) }
 }
 

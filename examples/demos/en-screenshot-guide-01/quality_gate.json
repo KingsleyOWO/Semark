@@ -1,0 +1,92 @@
+{
+  "status": "pass",
+  "score": 0.95,
+  "issues": [
+    {
+      "code": "field_name_too_long",
+      "severity": "warning",
+      "message": "Some field names are too long and may contain merged fields or raw OCR labels.",
+      "page_idx": null,
+      "block_id": null,
+      "document_id": null,
+      "evidence": {
+        "fields": [
+          "Vendor Account Setup and Updates header. (Note"
+        ]
+      }
+    }
+  ],
+  "vlm_audit_candidates": [],
+  "vlm_audits": [],
+  "stats": {
+    "issue_count": 1,
+    "issues_by_severity": {
+      "warning": 1
+    },
+    "issues_by_code": {
+      "field_name_too_long": 1
+    },
+    "vlm_audit_candidate_count": 0,
+    "vlm_audit_count": 0,
+    "structured_document_type": "form_document",
+    "structured_record_count": 19,
+    "semantic_quality": {
+      "correctness_score": 1.0,
+      "rag_readiness_score": 0.94,
+      "recommended_repairs": [
+        "split_merged_fields"
+      ],
+      "post_repair_issue_count": 1,
+      "post_repair_status": "pass"
+    },
+    "semantic_output_language": "en",
+    "semantic_repair": {
+      "enabled": true,
+      "document_type": "form_document",
+      "applied_count": 1,
+      "attempted_count": 1,
+      "items": [
+        {
+          "target": "structured_rag",
+          "page_image_attached": true,
+          "model_success": true,
+          "tokens_used": 7220,
+          "duration_seconds": 68.46018815040588,
+          "status": "applied",
+          "summary": "Repaired document structure from generic template boilerplate to a clear instructional guide. Extracted specific steps (Login via ID.me, Accept Terms, Navigate to Vendor Setup), prerequisites (banking info, time estimate), and form details (VA10091 sections). Removed hallucinated field names and merged UI labels into coherent instructions.",
+          "applied_repairs": [
+            "Removed generic template headers (Form Purpose, Form Structure, etc.)",
+            "Extracted step-by-step instructions from raw text",
+            "Clarified 'Authorized Use Only' as a notice rather than a fillable field",
+            "Resolved 'field_name_too_long' by treating UI labels as navigation instructions",
+            "Added form details (VA10091 sections) from Page 2 evidence",
+            "Preserved critical warnings (no saving progress, do not click Claim/Invoice Status)"
+          ],
+          "confidence": 0.95
+        }
+      ],
+      "trigger_codes": [
+        "field_name_too_long"
+      ],
+      "blocked_count": 0,
+      "fallback_count": 0
+    },
+    "semantic_repair_applied": true,
+    "post_repair_note": "Reviewer model rewrote semantic markdown/chunks after the rule-based quality gate.",
+    "pre_semantic_repair_issue_count": 1,
+    "post_semantic_repair_issue_count": 1,
+    "pre_semantic_repair_vlm_audit_candidate_count": 0,
+    "pre_semantic_repair_vlm_audit_count": 0,
+    "semantic_repair_cleared_issue_codes": [],
+    "semantic_repair_quality_settled": true,
+    "auto_rag_ready": false,
+    "post_repair_recheck": {
+      "issue_count": 1,
+      "cleared": [],
+      "remaining": [
+        "field_name_too_long"
+      ],
+      "vlm_audits_skipped": true
+    }
+  }
+}

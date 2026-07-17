@@ -2,6 +2,9 @@ import { useState, useMemo, useEffect } from 'react'
 import { useParams, Link, useSearchParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import ReactMarkdown from 'react-markdown'
+import rehypeRaw from 'rehype-raw'
+import rehypeSanitize, { defaultSchema } from 'rehype-sanitize'
+import type { Options as SanitizeSchema } from 'rehype-sanitize'
 import {
   getRun,
   getDocumentIR,
@@ -349,6 +352,8 @@ export function Viewer() {
                 sourceMap={selectedDocumentAnchors}
                 selectedBlockId={selectedBlockId}
                 onAnchorClick={handleMdClick}
+                docId={documentIR?.doc_id ?? ''}
+                runId={runId}
               />
             </div>
           </ScrollArea>
@@ -889,11 +894,68 @@ function SemanticOutput({ output }: { output: Record<string, unknown> }) {
 }
 
 // Markdown with clickable anchors
+
+// The pipeline's package stage deliberately keeps some tables as raw HTML inside the
+// delivered markdown instead of converting them to Markdown table syntax ("Keep HTML
+// for display", backend package.py _render_block_dataset), and can reference figure
+// images via bare relative paths. remark-rehype drops raw HTML nodes unless something
+// turns them back into real elements, which is why tables were silently disappearing
+// from this pane. rehypeRaw does that -- but on its own it would let ANY embedded HTML
+// through verbatim, including <script> tags and on*="" event handlers (stored XSS), so
+// it must always be paired with rehype-sanitize. The schema below starts from
+// rehype-sanitize's GitHub-style defaultSchema, which already:
+//   - allows table/thead/tbody/tfoot/tr/td/th and the colSpan/rowSpan/align attributes
+//   - strips <script>/<iframe>/event-handler attributes and never allows `style`
+// and only adds back the couple of things this app's own rendering needs (still never
+// `style`, still no scripts/handlers):
+const TABLE_TAG_NAMES = ['table', 'thead', 'tbody', 'tfoot', 'tr', 'td', 'th']
+const TABLE_CELL_ATTRIBUTES = ['colSpan', 'rowSpan', 'align']
+
+const markdownSanitizeSchema = {
+  ...defaultSchema,
+  // Explicit (rather than trusting defaultSchema already has these) so this stays
+  // correct even if the upstream default schema ever changes.
+  tagNames: Array.from(new Set([...(defaultSchema.tagNames ?? []), ...TABLE_TAG_NAMES])),
+  attributes: {
+    ...defaultSchema.attributes,
+    td: Array.from(new Set([...(defaultSchema.attributes?.td ?? []), ...TABLE_CELL_ATTRIBUTES])),
+    th: Array.from(new Set([...(defaultSchema.attributes?.th ?? []), ...TABLE_CELL_ATTRIBUTES])),
+  },
+  protocols: {
+    ...defaultSchema.protocols,
+    // data: is additionally allowed for <img src> (inline-encoded images); http/https
+    // are already allowed by defaultSchema. Deliberately not extended to `href` or any
+    // other attribute.
+    src: Array.from(new Set([...(defaultSchema.protocols?.src ?? []), 'data'])),
+  },
+} satisfies SanitizeSchema
+
+/**
+ * The pipeline's markdown can reference page/figure images via bare relative paths
+ * (e.g. MinerU-native `images/<hash>.jpg`); resolved against the SPA's own route those
+ * 404. Rewrite bare relative paths to the run's asset endpoint using the same
+ * getAssetUrl() helper the page/figure panels already use. Absolute URLs (any scheme,
+ * e.g. http:, https:, data:) and root-relative paths (starting with "/", e.g. an
+ * already-resolved /api/... URL) are left untouched.
+ */
+function resolveMarkdownImageSrc(
+  src: string | undefined,
+  docId: string,
+  runId: string
+): string | undefined {
+  if (!src || /^[a-zA-Z][a-zA-Z\d+.-]*:/.test(src) || src.startsWith('/')) {
+    return src
+  }
+  return getAssetUrl(docId, runId, src)
+}
+
 interface MarkdownWithAnchorsProps {
   content: string
   sourceMap: Array<{ anchor_id: string; md_range: number[]; block_ids: string[] }>
   selectedBlockId: string | null
   onAnchorClick: (anchorId: string) => void
+  docId: string
+  runId: string
 }
 
 function MarkdownWithAnchors({
@@ -901,6 +963,8 @@ function MarkdownWithAnchors({
   sourceMap,
   selectedBlockId,
   onAnchorClick,
+  docId,
+  runId,
 }: MarkdownWithAnchorsProps) {
   // Find which anchor contains the selected block
   const selectedAnchor = sourceMap.find((a) =>
@@ -910,6 +974,7 @@ function MarkdownWithAnchors({
   return (
     <div className="markdown-content">
       <ReactMarkdown
+        rehypePlugins={[rehypeRaw, [rehypeSanitize, markdownSanitizeSchema]]}
         components={{
           p: ({ children, ...props }) => {
             // Try to find matching anchor by content position
@@ -942,10 +1007,15 @@ function MarkdownWithAnchors({
           img: ({ src, alt, ...props }) => (
             <img
               {...props}
-              src={src}
+              src={resolveMarkdownImageSrc(src, docId, runId)}
               alt={alt}
-              className="rounded border cursor-pointer hover:ring-2 hover:ring-primary"
+              className="max-w-full h-auto rounded border cursor-pointer hover:ring-2 hover:ring-primary"
             />
+          ),
+          table: ({ children, ...props }) => (
+            <div className="overflow-x-auto">
+              <table {...props}>{children}</table>
+            </div>
           ),
         }}
       >
@@ -998,10 +1068,20 @@ function PageWithBboxOverlay({
           </div>
         )}
 
-        {/* Bbox overlays */}
+        {/* Bbox overlays.
+            block.bbox_norm is normalized 0-1000 on BOTH axes (backend normalize.py
+            divides both x and y by the page's own width/height), and the wrapping div
+            above already carries the page's true aspect ratio via the `aspectRatio`
+            style. So the viewBox must be a plain 1000x1000 square -- scaling the height
+            by (height / width) here double-applies the aspect ratio and vertically
+            compresses every overlay (bottom-of-page blocks would land at ~71% down on
+            an A4 portrait page instead of ~100%). preserveAspectRatio="none" lets the
+            square viewBox stretch independently per axis to fill the correctly-shaped
+            container, which is exactly what un-normalizes bbox_norm back to pixel
+            space. */}
         <svg
           className="absolute inset-0 w-full h-full pointer-events-none"
-          viewBox={`0 0 1000 ${(height / width) * 1000}`}
+          viewBox="0 0 1000 1000"
           preserveAspectRatio="none"
         >
           {blocks.map((block) => {

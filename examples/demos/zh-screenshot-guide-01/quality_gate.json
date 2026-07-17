@@ -1,0 +1,22 @@
+{
+  "status": "pass",
+  "score": 1.0,
+  "issues": [],
+  "vlm_audit_candidates": [],
+  "vlm_audits": [],
+  "stats": {
+    "issue_count": 0,
+    "issues_by_severity": {},
+    "issues_by_code": {},
+    "vlm_audit_candidate_count": 0,
+    "vlm_audit_count": 0,
+    "structured_document_type": "generic_document",
+    "structured_record_count": 0,
+    "semantic_quality": {
+      "correctness_score": 1.0,
+      "rag_readiness_score": 1.0,
+      "recommended_repairs": []
+    },
+    "semantic_output_language": "zh-TW"
+  }
+}

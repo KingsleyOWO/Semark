@@ -62,9 +62,136 @@ Suggested GitHub topics: `rag`, `pdf-to-markdown`, `semantic-markdown`, `documen
 
 ## Demo Preview
 
-The curated demos below show the source page beside the generated RAG-ready semantic Markdown. Full artifacts are stored under `examples/demos/`.
+Each demo pairs a real public source page with the generated RAG-ready semantic Markdown, and each one targets a concrete pain point. Full artifacts (output, figure documents, chunks, quality gate) are stored under `examples/demos/`.
+
+| Pain point | What Semark delivers | Demo |
+| --- | --- | --- |
+| UI screenshots in manuals are invisible to retrieval — the menu names, highlighted buttons, and field hints are pixels, not text | Screenshots become semantic descriptions, menu/button paths, and grounded on-screen text | [zh screenshot guide](#traditional-chinese-screenshot-guide-treasury-payment-slips) |
+| Screenshot-heavy layouts confuse parsers, and raw OCR noise leaks into the knowledge base | The reviewer model rebuilds a clean step-by-step guide; decorative icons are filtered out | [en screenshot guide](#english-screenshot-guide-va-portal-login) |
+| Form OCR produces a flat field soup with no usable structure | Purpose, instructions, grouped fields, and legal notes in a fixed RAG template | [en form](#english-form-uscis-g-1145) |
+| Flowcharts lose their decision logic the moment they become text | Conditions, branches, and responsible parties written out as structured Markdown | [zh flowchart](#traditional-chinese-flowchart-sexual-harassment-complaint-workflow) |
+
+### Traditional Chinese Screenshot Guide: Treasury Payment Slips
+
+**Pain point:** in screenshot-based manuals the facts that matter — which menu to click, which option is boxed in red, what to type into each field — live inside images, where OCR-only pipelines cannot retrieve them.
+
+**Source page** (page 2 of 2, the data-entry screen)
+
+![Treasury guide source page](examples/demos/zh-screenshot-guide-01/source-page-2.png)
+
+**What a parse-only pipeline delivers** — this is the complete raw output of the parsing/OCR layer for both pages ([raw-parse.md](examples/demos/zh-screenshot-guide-01/raw-parse.md)):
+
+```markdown
+列印國庫繳款書操作說明  
+![](images/3501ffcf4badafeb0891e3722c14444ba46ea14600b95ba58ebbf80e14e515ca.jpg)
+
+版權所有©中華民國109年，財政部國庫署，建議解析度1024×768以上。客服電話:02-2395-7500#325,#32920160302-1517
+
+【說明】
+
+請使用 Google chrome 瀏覽器，連結至「國庫收支書表條碼化 web 版」首頁」（http://veb.nta.gov.tw/），點選畫面左上角「繳款書(01)條碼化作業」，進入資料登打畫面。
+
+![](images/f93289d3a314f46910d41d95a3175e6bea439cd6b9d11ce84166e60d877ac1b4.jpg)
+
+## 【說明】
+
+1. 請依紅框說明文字輸入相關資訊後，點選右上角「列印」即可產製國庫繳款書（為利條碼讀取，請以雷射印表機列印）。
+
+2. 備註欄案號，請填法院裁定遺管人之案號(如：台北地院108年度司繼字第0號)。
+```
+
+The entire data-entry screen — every field, every hint value, the red boxes — is that one dead image link. A retriever can answer nothing about the form from this.
+
+**What Semark delivers** (main document, excerpt — [full artifacts](examples/demos/zh-screenshot-guide-01/))
+
+```markdown
+# 列印國庫繳款書操作說明
+
+頂部導航欄包含四個條碼化作業選項：繳款書(01)、支出收回書(02)、收入退還書(03) 和 轉正通知書(05/04)。
+「繳款書(01)條碼化作業」選項被紅框特別標示。
+
+【說明】
+請使用 Google chrome 瀏覽器，連結至「國庫收支書表條碼化 web 版」首頁」（http://veb.nta.gov.tw/），點選畫面左上角「繳款書(01)條碼化作業」，進入資料登打畫面。
+
+頁面標題為 VEB001R 繳款書(01)條碼化作業。
+收入科目代號需輸入「12171002103」。
+收入科目名稱需輸入「其他雜項收入」。
+收入機關代號與對帳機關代號均需輸入「1710003」。
+填發機關、收入機關名稱及對帳機關名稱均需輸入「國庫署」。
+繳款人欄位提示格式為「遺管人○○○繳納被繼承人○○○賸餘現金」。
+備註欄位需輸入聯絡電話及案號。
+
+## 【說明】
+1. 請依紅框說明文字輸入相關資訊後，點選右上角「列印」即可產製國庫繳款書（為利條碼讀取，請以雷射印表機列印）。
+2. 備註欄案號，請填法院裁定遺管人之案號(如：台北地院108年度司繼字第0號)。
+```
+
+Every red-box callout and field hint from the screenshots is now plain, retrievable text — ask a RAG system 「收入科目代號要填什麼」 and it can answer 「12171002103」 with this page as the source.
+
+### English Screenshot Guide: VA Portal Login
+
+**Pain point:** pages that mix prose with UI screenshots often get misread as fillable forms, and the resulting output is either template noise or raw OCR. Here the reviewer repair rebuilt the page into the guide it actually is.
+
+**Source page** (page 1 of 2, the Authorized Use dialog)
+
+![VA portal guide source page](examples/demos/en-screenshot-guide-01/source-page-1.png)
+
+**What a parse-only pipeline delivers** (raw output excerpt — [raw-parse.md](examples/demos/en-screenshot-guide-01/raw-parse.md)):
+
+```markdown
+![](images/ad9812033c62175142ad60e21944a961cce1451dd0cc4e2c9b49f6885afd327b.jpg)
+
+![](images/840bd0d482fed59b2cb8354121663026b1fe2c13f489952db74f61d881ce9538.jpg)
+
+## 1. After reading the Authorized Use Only, click “I Agree”.
+
+## AAuthorized Use Only
+
+• Deny access to this system
+
+![](images/50898e8b5a1d79fb899f60735826565bca2af476bcae51dcd3735ee9c387cb18.jpg)
+```
+
+The screenshots are dead image links (the portal panels' VA10091 / SAM.gov / contact facts simply do not exist as text), an OCR typo "AAuthorized" got promoted to a heading, and a mid-procedure step became a section title.
+
+**What Semark delivers** (main document, excerpt — [full artifacts](examples/demos/en-screenshot-guide-01/))
+
+```markdown
+# Welcome to the VA Customer Engagement Portal (CEP)
+
+After logging in through **ID.me**, the **Customer Engagement Portal** home page will appear. On the home page, locate the **Vendor Account Setup and Updates** "Login" button.
+
+## Things you will need to get started
+*   Your current banking information where you want your payments to go to.
+*   If this is an update to a previous enrollment, you will need your previous banking information.
+
+## Time to complete
+Completing the webform should take **5 to 20 minutes**. Once you start your form, you cannot save your progress or information to go back to later.
+
+## Instructions
+
+### 1. Accept Terms of Use
+After reading the **Authorized Use Only** notice, click "**I Agree**".
+
+### 2. Navigate to Vendor Setup
+Click the "**Login**" button under the **Vendor Account Setup and Updates** header.
+
+> **Note:** Do not click on the "**Claim/Invoice Status**" Login button as it will direct you to the part of the Customer Engagement Portal for that activity.
+
+## Vendor File Form (VA10091) Details
+The Customer Engagement Portal Vendor File Form has 5 specific sections:
+1.  Tax ID Information
+2.  Payee Information
+3.  Address/Bank Information
+4.  Add Authorized Representative Contact/s
+5.  Review
+```
+
+The decorative warning icon was filtered out, each meaningful screenshot became a figure document with grounded semantics, and the wrong-button warning survives as an explicit instruction a retriever can find.
 
 ### English Form: USCIS G-1145
+
+**Pain point:** OCR of a government form yields an unstructured field soup; answering "what does this form do and how do I fill it in" needs purpose, rules, and grouped fields.
 
 **Source page**
 
@@ -110,6 +237,8 @@ Grouped by meaning for completion:
 ```
 
 ### Traditional Chinese Flowchart: Sexual Harassment Complaint Workflow
+
+**Pain point:** a flowchart's decision logic (which law applies, who investigates, on what deadline) disappears when the image is dropped or OCR'd flat.
 
 **Source page**
 

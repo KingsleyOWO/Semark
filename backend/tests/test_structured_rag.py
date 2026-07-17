@@ -2947,53 +2947,5 @@ def test_icon_sized_figure_caption_is_not_flagged_too_short():
     assert "form0001" in flagged
 
 
-def test_render_main_text_excludes_figure_semantics_but_keeps_authored_content():
-    # 「只下載主文」:不織入圖片語意描述,保留作者文字與表格。
-    document_ir = DocumentIR(
-        doc_id="doc-mt",
-        run_id="run-mt",
-        source=SourceInfo(path="guide.pdf", ext="pdf", sha256="abc", size_bytes=1),
-        engine=EngineInfo(backend="pipeline", method="auto"),
-        pages=[PageInfo(page_idx=0)],
-        blocks=[
-            Block(
-                block_id="t1",
-                type=BlockType.TEXT,
-                page_idx=0,
-                payload={"text": "步驟一：開啟設定頁面並選擇帳戶。", "text_level": 0},
-            ),
-            Block(
-                block_id="fig1",
-                type=BlockType.IMAGE,
-                page_idx=0,
-                payload={"img_path": "images/step.jpg"},
-            ),
-            Block(
-                block_id="tbl1",
-                type=BlockType.TABLE,
-                page_idx=0,
-                payload={"table_body": "<table><tr><td>項目</td><td>說明</td></tr><tr><td>白板</td><td>觸控式</td></tr></table>"},
-            ),
-        ],
-    )
-    enrichments = {
-        "fig1": {
-            "kind": "figure_caption",
-            "input": {"page_idx": 0},
-            "output": {
-                "semantic_caption": "截圖顯示設定頁面的帳戶清單與紅框標示。",
-                "structured_content": "設定 > 帳戶 > 新增帳戶",
-            },
-        }
-    }
-
-    main_text = PackageStage()._render_main_text(
-        document_ir=document_ir,
-        enrichments=enrichments,
-    )
-
-    assert "步驟一：開啟設定頁面並選擇帳戶。" in main_text
-    assert "觸控式" in main_text
-    assert "截圖顯示設定頁面" not in main_text
-    assert "新增帳戶" not in main_text
-    assert "[[asset:" not in main_text
+# 主文下載已改為直接供應 documents/main.md(與檢視器同一份);
+# 其行為契約由 tests/test_download_naming.py 的 main_text 測試釘住。

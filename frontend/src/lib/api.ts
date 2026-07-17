@@ -610,6 +610,49 @@ export function getSplitDocumentDownloadUrl(
   return `${API_BASE}/runs/${runId}/documents/${encodeURIComponent(documentId)}/download?format=${format}`
 }
 
+function filenameFromContentDisposition(header: string | null): string | null {
+  if (!header) return null
+  const encoded = header.match(/filename\*=UTF-8''([^;]+)/i)
+  if (encoded) {
+    try {
+      return decodeURIComponent(encoded[1].trim())
+    } catch {
+      // fall through to the plain filename
+    }
+  }
+  const plain = header.match(/filename="?([^";]+)"?/i)
+  return plain ? plain[1] : null
+}
+
+/** Save a blob through a temporary anchor element. */
+export function triggerBrowserDownload(blob: Blob, filename: string) {
+  const url = window.URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  window.URL.revokeObjectURL(url)
+}
+
+/**
+ * Download a single file directly (no ZIP), keeping the server-provided
+ * filename. Returns false when the endpoint has no file for this request so
+ * callers can fall back to the batch ZIP.
+ */
+export async function downloadFileDirect(url: string): Promise<boolean> {
+  const res = await fetch(url)
+  if (!res.ok) return false
+  const blob = await res.blob()
+  const filename =
+    filenameFromContentDisposition(res.headers.get('Content-Disposition')) ||
+    decodeURIComponent(url.split('/').pop()?.split('?')[0] || '') ||
+    'download'
+  triggerBrowserDownload(blob, filename)
+  return true
+}
+
 // ========== Profile Settings API ==========
 
 export interface ProfileDescription {

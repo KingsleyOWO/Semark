@@ -28,7 +28,7 @@ class FileType(StrEnum):
     """Available file types for download."""
 
     SOURCE = "source"
-    # Authored content only — no VLM figure semantics (「只下載主文」).
+    # The split main document — the same file the document viewer renders.
     MAIN_TEXT = "main_text"
     DOCUMENTS = "documents"
     QUALITY = "quality"
@@ -73,7 +73,9 @@ class DownloadManifest(BaseModel):
     files: list[dict]
 
 
-# Mapping of file types to source files
+# Mapping of file types to source files. MAIN_TEXT resolves to the split main
+# document first (see _get_main_document_file); the entry here is the legacy
+# fallback for runs packaged when outputs/main_text.md was still written.
 SOURCE_FILES = {
     FileType.SOURCE: "source.md",
     FileType.MAIN_TEXT: "main_text.md",
@@ -116,12 +118,13 @@ async def download_runs(
             raise HTTPException(status_code=404, detail=f"Run not found: {run_id}")
         doc = await doc_repo.get(run.doc_id)
         # Extract original filename without extension
-        source_name = Path(doc.source_path).stem if doc else run.run_id[:12]
+        source_name = _source_name_for(doc.source_path if doc else None, run.run_id)
         runs_with_docs.append((run, source_name))
 
     # Create ZIP in memory
     zip_buffer = io.BytesIO()
     manifest_files = []
+    used_entry_names: set[str] = set()
 
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         for run, source_name in runs_with_docs:
@@ -178,6 +181,7 @@ async def download_runs(
                     if result is not None:
                         content, filename = result
                         # Put files directly in root (filename already includes source_name)
+                        filename = _dedupe_zip_entry_name(filename, run.run_id, used_entry_names)
                         zf.writestr(filename, content)
                         manifest_files.append(
                             {
@@ -253,7 +257,7 @@ async def download_split_document(
         raise HTTPException(status_code=404, detail=f"Run not found: {run_id}")
 
     doc = await doc_repo.get(run.doc_id)
-    source_name = Path(doc.source_path).stem if doc else run.run_id[:12]
+    source_name = _source_name_for(doc.source_path if doc else None, run.run_id)
     outputs_path = settings.get_run_path(run.doc_id, run.run_id) / "outputs"
 
     entry = _get_document_entry(outputs_path, document_id, source_name=source_name)
@@ -296,6 +300,11 @@ def _get_file_content(
     Returns (content_bytes, filename) or None if source file doesn't exist.
     Uses source_name (original document name) for output filename.
     """
+    if file_type == FileType.MAIN_TEXT:
+        resolved = _get_main_document_file(outputs_path, format, source_name)
+        if resolved is not None:
+            return resolved
+
     source_file = SOURCE_FILES[file_type]
     source_path = outputs_path / source_file
     if not source_path.exists() and file_type in FALLBACK_SOURCE_FILES:
@@ -345,6 +354,79 @@ def _get_file_content(
         )
 
     return content, f"{source_name}_{type_suffix}.md"
+
+
+def _source_name_for(source_path: str | None, run_id: str) -> str:
+    """Filename-safe display name; uploads can carry edge whitespace in the stem."""
+    if source_path:
+        stem = Path(source_path).stem.strip()
+        if stem:
+            return stem
+    return run_id[:12]
+
+
+def _dedupe_zip_entry_name(filename: str, run_id: str, used_names: set[str]) -> str:
+    """
+    Batch zips store non-document file types flat at the archive root, so two
+    runs of the same source would otherwise overwrite each other on extraction.
+    """
+    if filename not in used_names:
+        used_names.add(filename)
+        return filename
+
+    stem, dot, suffix = filename.rpartition(".")
+    if not dot:
+        stem, suffix = filename, ""
+    candidate = f"{stem}_{run_id[:12]}{dot}{suffix}"
+    counter = 2
+    while candidate in used_names:
+        candidate = f"{stem}_{run_id[:12]}_{counter}{dot}{suffix}"
+        counter += 1
+    used_names.add(candidate)
+    return candidate
+
+
+def _get_main_document_file(
+    outputs_path: Path,
+    format: OutputFormat,
+    source_name: str,
+) -> tuple[bytes, str] | None:
+    """
+    Resolve the 主文 download to the split main document.
+
+    The document viewer renders documents/main.md, so the download must serve
+    the same file; outputs/main_text.md is only a legacy fallback handled by
+    the caller.
+    """
+    documents_dir = (outputs_path / "documents").resolve()
+    entries = _get_document_entries(outputs_path, source_name=source_name)
+    entry = next(
+        (item for item in entries if item.get("document_id") == "main"),
+        None,
+    ) or next(
+        (item for item in entries if str(item.get("kind") or "") == "main"),
+        None,
+    )
+
+    if entry is not None:
+        path = (outputs_path / "documents" / str(entry["filename"])).resolve()
+        title = str(entry.get("title") or Path(str(entry["filename"])).stem)
+        base_name = str(entry.get("download_base_name") or f"{source_name}_main")
+    else:
+        path = (outputs_path / "documents" / "main.md").resolve()
+        title = source_name
+        base_name = f"{source_name}_main"
+
+    if not path.is_relative_to(documents_dir) or not path.exists():
+        return None
+
+    content, download_name, _media_type = _convert_markdown_document(
+        md_bytes=path.read_bytes(),
+        base_name=base_name,
+        title=title,
+        format=format,
+    )
+    return content, download_name
 
 
 def _get_document_files(

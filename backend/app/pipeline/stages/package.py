@@ -618,16 +618,6 @@ class PackageStage:
             rag_md_path = outputs_dir / "rag.md"
             rag_md_path.write_text(delivered_md, encoding="utf-8")
 
-            # Authored-content-only variant for the 「只下載主文」 download.
-            main_text_path = outputs_dir / "main_text.md"
-            main_text_path.write_text(
-                self._render_main_text(
-                    document_ir=document_ir,
-                    semantic_output_language=semantic_output_language,
-                ),
-                encoding="utf-8",
-            )
-
             assets_index_path = outputs_dir / "assets_index.jsonl"
             with open(assets_index_path, "w", encoding="utf-8") as f:
                 for asset in assets:
@@ -2958,26 +2948,6 @@ class PackageStage:
         if page_idx is None:
             return "unknown page" if language == "en" else "未知頁面"
         return f"Page {page_idx + 1}" if language == "en" else f"第 {page_idx + 1} 頁"
-
-    def _render_main_text(
-        self,
-        document_ir: DocumentIR,
-        enrichments: dict[str, dict[str, Any]] | None = None,
-        semantic_output_language: str = "zh-TW",
-    ) -> str:
-        """Render the document's authored content only — no VLM figure
-        semantics woven in. This is the 「只下載主文」 download variant; the
-        enrichments argument is accepted for signature symmetry but is
-        deliberately not passed to the renderer.
-        """
-        del enrichments
-        main_text, _ = self._render_rag_md(
-            document_ir=document_ir,
-            asset_map={},
-            enrichments={},
-            semantic_output_language=semantic_output_language,
-        )
-        return self._finalize_delivered_markdown(main_text)
 
     @staticmethod
     def _table_footnote_lines(block: Block) -> list[str]:

@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useSearchParams } from 'react-router-dom'
 import {
   deleteSplitDocuments,
+  downloadFileDirect,
   downloadRuns,
   getAssetUrl,
   getQualityGate,
@@ -10,7 +11,7 @@ import {
   getSplitDocumentDownloadUrl,
   getSplitDocuments,
   getOutputsSummary,
-  type DownloadOutputFormat,
+  triggerBrowserDownload,
   type OutputRunSummary,
 } from '@/lib/api'
 import { Button } from '@/components/ui/button'
@@ -18,12 +19,11 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
 import { ScrollArea } from '@/components/ui/scroll-area'
+import { DownloadMenu, type DownloadSelection } from '@/components/DownloadMenu'
 import { useI18n } from '@/lib/i18n'
 import type { QualityGateReport, SplitDocumentMeta } from '@/types/api'
 import {
-  Archive,
   CheckSquare,
-  Download,
   Eye,
   FileText,
   FolderOpen,
@@ -32,8 +32,6 @@ import {
   Square,
   Trash2,
 } from 'lucide-react'
-
-const formatOptions: Array<Exclude<DownloadOutputFormat, 'json'>> = ['md', 'docx', 'txt']
 
 interface DocumentSearchItem {
   meta: SplitDocumentMeta
@@ -48,10 +46,6 @@ export function Assets() {
   const [selectedRunId, setSelectedRunId] = useState<string | null>(() => searchParams.get('run'))
   const [selectedDocumentId, setSelectedDocumentId] = useState<string | null>(null)
   const [selectedDownloadIds, setSelectedDownloadIds] = useState<Set<string>>(new Set())
-  const [format, setFormat] = useState<Exclude<DownloadOutputFormat, 'json'>>('md')
-  const [mainTextOnly, setMainTextOnly] = useState(false)
-  const [isDownloadingAll, setIsDownloadingAll] = useState(false)
-  const [isDownloadingRuns, setIsDownloadingRuns] = useState(false)
   const [selectedRunDownloadIds, setSelectedRunDownloadIds] = useState<Set<string>>(new Set())
 
   const { data: outputsSummary } = useQuery({
@@ -192,29 +186,22 @@ export function Assets() {
     setSelectedRunDownloadIds(new Set())
   }
 
-  async function downloadSelectedRuns() {
+  async function downloadSelectedRuns({ content, format }: DownloadSelection) {
     const runIds = Array.from(selectedRunDownloadIds)
     if (runIds.length === 0) return
 
-    setIsDownloadingRuns(true)
-    try {
-      const response = await downloadRuns({
-        run_ids: runIds,
-        file_types: [mainTextOnly ? 'main_text' : 'documents'],
-        format,
-      })
-      const blob = await response.blob()
-      const url = window.URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = `processed_documents_${runIds.length}_runs_${mainTextOnly ? 'main_text_' : ''}${format}.zip`
-      document.body.appendChild(a)
-      a.click()
-      a.remove()
-      window.URL.revokeObjectURL(url)
-    } finally {
-      setIsDownloadingRuns(false)
+    // Single run + 主文 → download the file itself instead of a one-file ZIP.
+    if (content === 'main' && runIds.length === 1) {
+      if (await downloadFileDirect(getSplitDocumentDownloadUrl(runIds[0], 'main', format))) return
     }
+
+    const response = await downloadRuns({
+      run_ids: runIds,
+      file_types: [content === 'main' ? 'main_text' : 'documents'],
+      format,
+    })
+    const label = content === 'main' ? 'main_text' : 'documents'
+    triggerBrowserDownload(await response.blob(), `${label}_${runIds.length}_runs_${format}.zip`)
   }
 
   function toggleDownloadSelection(documentId: string) {
@@ -273,28 +260,31 @@ export function Assets() {
     },
   })
 
-  async function downloadAllDocuments() {
+  async function downloadCheckedDocuments({ format }: DownloadSelection) {
     if (!selectedRunId) return
-    setIsDownloadingAll(true)
-    try {
-      const response = await downloadRuns({
-        run_ids: [selectedRunId],
-        file_types: [mainTextOnly ? 'main_text' : 'documents'],
-        format,
-        document_ids: mainTextOnly ? undefined : Array.from(selectedDownloadIds),
-      })
-      const blob = await response.blob()
-      const url = window.URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = `${selectedRunId}_${mainTextOnly ? 'main_text' : 'documents'}_${format}.zip`
-      document.body.appendChild(a)
-      a.click()
-      a.remove()
-      window.URL.revokeObjectURL(url)
-    } finally {
-      setIsDownloadingAll(false)
+    const documentIds = Array.from(selectedDownloadIds)
+    if (documentIds.length === 0) return
+
+    // A single checked document downloads as the file itself, matching the
+    // preview pane's download.
+    if (documentIds.length === 1) {
+      if (await downloadFileDirect(getSplitDocumentDownloadUrl(selectedRunId, documentIds[0], format))) return
     }
+
+    const response = await downloadRuns({
+      run_ids: [selectedRunId],
+      file_types: ['documents'],
+      format,
+      document_ids: documentIds,
+    })
+    const base = selectedRun?.source_name || getFileName(selectedRun?.source_path || '') || selectedRunId
+    triggerBrowserDownload(await response.blob(), `${base}_documents_${format}.zip`)
+  }
+
+  async function downloadPreviewDocument({ format }: DownloadSelection) {
+    if (!selectedRunId || !selectedDocumentId) return
+    const ok = await downloadFileDirect(getSplitDocumentDownloadUrl(selectedRunId, selectedDocumentId, format))
+    if (!ok) throw new Error(t('assets.downloadFailed'))
   }
 
 
@@ -325,37 +315,11 @@ export function Assets() {
 
   return (
     <div className="space-y-4">
-      <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
-        <div>
-          <h1 className="text-2xl font-bold">{t('assets.title')}</h1>
-          <p className="text-sm text-muted-foreground">
+      <div>
+        <h1 className="text-2xl font-bold">{t('assets.title')}</h1>
+        <p className="text-sm text-muted-foreground">
 {t('assets.description')}
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          {formatOptions.map((option) => (
-            <Button
-              key={option}
-              type="button"
-              size="sm"
-              variant={format === option ? 'default' : 'outline'}
-              onClick={() => setFormat(option)}
-              className="uppercase"
-            >
-              {option}
-            </Button>
-          ))}
-          <div className="mx-1 h-5 w-px bg-border" />
-          <Button
-            type="button"
-            size="sm"
-            variant={mainTextOnly ? 'default' : 'outline'}
-            onClick={() => setMainTextOnly((v) => !v)}
-            title={t('assets.mainTextOnlyHint')}
-          >
-            {t('assets.mainTextOnly')}
-          </Button>
-        </div>
+        </p>
       </div>
 
       <div className="grid gap-4 xl:grid-cols-[minmax(280px,0.75fr)_minmax(360px,0.95fr)_minmax(520px,1.45fr)] 2xl:grid-cols-[minmax(320px,0.7fr)_minmax(420px,0.9fr)_minmax(680px,1.6fr)]">
@@ -394,16 +358,12 @@ export function Assets() {
               </Button>
             </div>
             <div className="grid grid-cols-2 gap-2">
-              <Button
-                type="button"
-                variant="default"
-                size="sm"
-                onClick={downloadSelectedRuns}
-                disabled={selectedRunDownloadCount === 0 || isDownloadingRuns}
-              >
-                <Archive className="mr-2 h-4 w-4" />
-                {t('common.download')} {selectedRunDownloadCount}
-              </Button>
+              <DownloadMenu
+                triggerLabel={t('assets.downloadRunsCount', { count: selectedRunDownloadCount })}
+                disabled={selectedRunDownloadCount === 0}
+                showContentChoice
+                onDownload={downloadSelectedRuns}
+              />
               <Button
                 type="button"
                 variant="destructive"
@@ -488,16 +448,11 @@ export function Assets() {
               </Button>
             </div>
             <div className="grid grid-cols-2 gap-2">
-              <Button
-                type="button"
-                variant="default"
-                size="sm"
-                onClick={downloadAllDocuments}
-                disabled={!selectedRunId || selectedDownloadCount === 0 || isDownloadingAll}
-              >
-                <Archive className="mr-2 h-4 w-4" />
-                {t('assets.downloadSelected', { count: selectedDownloadCount })}
-              </Button>
+              <DownloadMenu
+                triggerLabel={t('assets.downloadSelected', { count: selectedDownloadCount })}
+                disabled={!selectedRunId || selectedDownloadCount === 0}
+                onDownload={downloadCheckedDocuments}
+              />
               <Button
                 type="button"
                 variant="destructive"
@@ -605,12 +560,12 @@ export function Assets() {
               </div>
               <div className="flex shrink-0 items-center gap-2">
                 {selectedRunId && selectedDocumentId && (
-                  <Button size="sm" variant="outline" asChild>
-                    <a href={getSplitDocumentDownloadUrl(selectedRunId, selectedDocumentId, format)}>
-                      <Download className="mr-2 h-4 w-4" />
-                      {t('assets.downloadDocument')}
-                    </a>
-                  </Button>
+                  <DownloadMenu
+                    triggerLabel={t('assets.downloadDocument')}
+                    triggerVariant="outline"
+                    align="end"
+                    onDownload={downloadPreviewDocument}
+                  />
                 )}
                 {selectedRunId && selectedDocument?.page_indices?.[0] !== undefined && (
                   <Button size="sm" variant="outline" asChild>

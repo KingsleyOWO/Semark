@@ -8,8 +8,8 @@ leak personal content that is unrelated to the teaching material:
 - MinerU OCRs screenshot regions into plain TEXT/TABLE blocks (live: a real
   domain account 「CORP\\x12345」 reached rag.md as a parser text block).
 
-The scrub therefore runs on every delivered surface (rag.md, main_text.md,
-chunks.jsonl, document exports) rather than only on VLM output. Teaching
+The scrub therefore runs on every delivered surface (rag.md, chunks.jsonl,
+document exports) rather than only on VLM output. Teaching
 content survives: account-format instructions carry no digits, and UI menu
 labels (「另存新檔(A)...」) are explicitly preserved.
 

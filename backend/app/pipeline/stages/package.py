@@ -1349,10 +1349,12 @@ class PackageStage:
         })
         return {"attempted_count": 1, "applied_count": 1, "blocked_count": 0, "fallback_count": 0, "items": [item_stats]}
 
-    @staticmethod
-    def _write_repaired_main_document_export(outputs_dir: Path, markdown: str) -> None:
+    @classmethod
+    def _write_repaired_main_document_export(cls, outputs_dir: Path, markdown: str) -> None:
         index_path = outputs_dir / "documents_index.json"
         target: Path | None = None
+        index: list[Any] = []
+        main_entry: dict[str, Any] | None = None
         if index_path.exists():
             try:
                 index = json.loads(index_path.read_text(encoding="utf-8"))
@@ -1362,6 +1364,7 @@ class PackageStage:
                 for entry in index:
                     if not isinstance(entry, dict) or str(entry.get("document_id") or "") != "main":
                         continue
+                    main_entry = entry
                     file_value = str(entry.get("file") or "")
                     if file_value:
                         target = Path(file_value)
@@ -1372,6 +1375,32 @@ class PackageStage:
         if target is None or not target.parent.exists():
             return
         target.write_text(markdown, encoding="utf-8")
+
+        # The index title was inferred before the repair rewrote the document;
+        # when it is only the file-stem stub (or otherwise unreliable), adopt
+        # the repaired document's own H1 so the viewer and downloads show the
+        # real title.
+        if main_entry is None:
+            return
+        repaired_title = cls._leading_h1_title(markdown)
+        if not repaired_title or cls._is_unreliable_export_title(repaired_title):
+            return
+        current_title = str(main_entry.get("title") or "").strip()
+        stem = Path(str(main_entry.get("source_filename") or "")).stem
+        if current_title and current_title != stem and not cls._is_unreliable_export_title(current_title):
+            return
+        main_entry["title"] = cls._clean_export_title(repaired_title)[:120]
+        index_path.write_text(json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    @staticmethod
+    def _leading_h1_title(markdown: str) -> str:
+        for line in markdown.strip().splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            match = re.match(r"^#\s+(.+)$", stripped)
+            return match.group(1).strip() if match else ""
+        return ""
 
 
     def _retain_structured_candidate_for_review(
@@ -1736,6 +1765,9 @@ class PackageStage:
             # The repair replaced the chunk view; stale pre-repair chunks must
             # not mask losses during re-validation.
             recheck_output.chunks = []
+            # Template-shape checks must not re-demand sections the reviewer
+            # repair deliberately replaced.
+            recheck_output.semantic_repair_applied = True
         except (AttributeError, TypeError):
             recheck_output = structured_output
 
@@ -3049,6 +3081,7 @@ class PackageStage:
         skip_next_blank = False
         source_title_key = re.sub(r"\s+", "", self._clean_export_title(source_title)).lower()
         last_heading_key = ""
+        seen_compact_lines: set[str] = set()
         for line in body.splitlines():
             stripped = line.strip()
             if re.fullmatch(r"\[\[asset:[^\]]+\]\]", stripped):
@@ -3100,6 +3133,15 @@ class PackageStage:
                 line = self._clean_english_ocr_cjk_noise(line)
             if not line.strip():
                 continue
+            # Screenshot pages repeat the same OCR lines (navbar re-read per
+            # page, field hints transcribed by both parser and VLM); keep the
+            # first occurrence only. Headings, tables, and short answer-like
+            # lines are exempt.
+            compact_line = re.sub(r"\s+", "", line)
+            if len(compact_line) >= 6 and not line.lstrip().startswith(("#", "|", "-", "*")):
+                if compact_line in seen_compact_lines:
+                    continue
+                seen_compact_lines.add(compact_line)
             cleaned.append(line)
         return self._remove_empty_display_sections("\n".join(cleaned)).strip()
 
@@ -3370,6 +3412,8 @@ class PackageStage:
         for text_fix in get_corpus_rules().text_fixes:
             text = text_fix.sub(text)
         text = re.sub(r"[ \t]{2,}", " ", text)
+        # Screenshot OCR crops can leave a dangling opening quote at line end.
+        text = re.sub(r"\s*[「『]$", "", text)
         return text.rstrip()
 
     @staticmethod
@@ -3645,6 +3689,10 @@ class PackageStage:
             "申請單",
             "報告書",
             "核銷",
+            "操作說明",
+            "使用說明",
+            "說明書",
+            "教學",
         )
         for term in title_terms:
             if term in compact:
@@ -3749,6 +3797,10 @@ class PackageStage:
             "toc",
         }
         if compact.lower() in generic_compact_titles:
+            return True
+        # Bracketed section labels (「【說明】」「【注意】」) that MinerU promotes
+        # to headings are never document titles; real bracketed titles are longer.
+        if re.fullmatch(r"[【\[（(][一-鿿]{1,4}[】\]）)]", compact):
             return True
         if re.fullmatch(r"\d+", compact):
             return True

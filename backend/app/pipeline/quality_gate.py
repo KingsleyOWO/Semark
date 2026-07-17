@@ -556,6 +556,12 @@ def _check_semantic_template(structured_output: Any, final_text: str, semantic_o
     document_type = str(getattr(plan, "document_type", "") or "")
     if document_type not in {"form_collection", "form_document"}:
         return []
+    if bool(getattr(structured_output, "semantic_repair_applied", False)):
+        # An applied reviewer repair replaced the form-template rendering
+        # (e.g. a screenshot how-to guide the planner misread as a form).
+        # Requiring template sections in reviewer-authored text would re-flag
+        # exactly what the repair deliberately removed.
+        return []
 
     required_sections = form_template_sections(semantic_output_language, include_field_descriptions=True)
     present = [section for section in required_sections if section in final_text]

@@ -22,7 +22,7 @@ from app.models.api import (
     RunResponse,
     StageResponse,
 )
-from app.models.entities import RunCreate, RunStatus, StageName, StageStatus
+from app.models.entities import Run, RunCreate, RunStatus, StageName, StageStatus
 
 router = APIRouter(prefix="/runs", tags=["runs"])
 
@@ -527,6 +527,122 @@ async def get_runs_stats(
     return stats
 
 
+async def _build_output_item(
+    doc_repo: DocRepository,
+    run: Run,
+    outputs_dir: Path,
+    document_summary: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build one outputs-summary item, exactly as the endpoint has always
+    shaped it (same fields, same order)."""
+    if document_summary is None:
+        document_summary = _load_split_document_summary(outputs_dir)
+
+    doc = await doc_repo.get(run.doc_id)
+    source_path = doc.source_path if doc else ""
+    source_name = Path(source_path).stem if source_path else run.doc_id
+    quality_summary = _load_quality_gate_summary(outputs_dir)
+    return {
+        "run_id": run.run_id,
+        "doc_id": run.doc_id,
+        "profile": run.profile,
+        "status": run.status.value,
+        "created_at": run.created_at,
+        "updated_at": run.updated_at,
+        "source_path": source_path,
+        "source_name": source_name,
+        **document_summary,
+        **quality_summary,
+    }
+
+
+async def _collect_outputs_summary(
+    db: Database,
+    *,
+    status: RunStatus | None,
+    limit: int,
+    offset: int,
+    include_hidden: bool,
+    has_documents_only: bool,
+    scan_batch_size: int = 500,
+) -> dict[str, Any]:
+    """Core logic behind GET /runs/outputs-summary.
+
+    Factored out of the route so tests can shrink `scan_batch_size` (the
+    internal document-existence scan window) far below the real default
+    without fabricating hundreds of fixture runs to exercise a multi-batch
+    scan.
+
+    has_documents_only=False keeps the pre-existing candidate_limit
+    heuristic verbatim (out of scope for this fix).
+
+    has_documents_only=True (the default, and what the frontend's
+    "download all documents" flow relies on) previously only ever inspected
+    a single window of up to 500 of the newest runs (offset forced to 0)
+    and reported `total` as the document-bearing count WITHIN that window,
+    silently dropping older document-bearing runs once an install passed
+    that window. This scans run_repo.list_all in scan_batch_size batches
+    from offset 0 upward until exhausted, so `offset`/`limit` apply over the
+    TRUE filtered (document-bearing) sequence and `total` is the full
+    filtered count. Only items within [offset, offset + limit) are fully
+    built (doc lookup + quality summary); runs outside the requested page
+    are just counted.
+    """
+    run_repo = RunRepository(db)
+    doc_repo = DocRepository(db)
+
+    hidden_run_ids = set() if include_hidden else await _get_hidden_pipeline_run_ids(db)
+
+    if not has_documents_only:
+        candidate_limit = min(max(limit * 3, limit), 500)
+        runs = await run_repo.list_all(
+            status=status,
+            limit=candidate_limit,
+            offset=offset,
+            exclude_run_ids=hidden_run_ids,
+        )
+        items = [
+            await _build_output_item(
+                doc_repo, run, settings.get_run_path(run.doc_id, run.run_id) / "outputs"
+            )
+            for run in runs
+        ]
+        total = await run_repo.count(status=status, exclude_run_ids=hidden_run_ids)
+        return {"runs": items, "total": total}
+
+    items: list[dict[str, Any]] = []
+    total = 0
+    scan_offset = 0
+    while True:
+        batch = await run_repo.list_all(
+            status=status,
+            limit=scan_batch_size,
+            offset=scan_offset,
+            exclude_run_ids=hidden_run_ids,
+        )
+        if not batch:
+            break
+
+        for run in batch:
+            outputs_dir = settings.get_run_path(run.doc_id, run.run_id) / "outputs"
+            document_summary = _load_split_document_summary(outputs_dir)
+            if document_summary["documents_total"] == 0:
+                continue
+
+            index = total
+            total += 1
+            if offset <= index < offset + limit:
+                items.append(
+                    await _build_output_item(doc_repo, run, outputs_dir, document_summary)
+                )
+
+        scan_offset += len(batch)
+        if len(batch) < scan_batch_size:
+            break  # last batch was short: exhausted, skip one more round-trip
+
+    return {"runs": items, "total": total}
+
+
 @router.get("/outputs-summary")
 async def list_outputs_summary(
     status: RunStatus | None = Query(default=RunStatus.SUCCEEDED),
@@ -537,52 +653,14 @@ async def list_outputs_summary(
     db: Database = Depends(get_db),
 ) -> dict[str, Any]:
     """List generated document outputs without N+1 split-document requests."""
-    run_repo = RunRepository(db)
-    doc_repo = DocRepository(db)
-
-    hidden_run_ids = set() if include_hidden else await _get_hidden_pipeline_run_ids(db)
-    candidate_limit = min(max(limit * 3, limit), 500)
-    candidate_offset = offset if not has_documents_only else 0
-    runs = await run_repo.list_all(
+    return await _collect_outputs_summary(
+        db,
         status=status,
-        limit=candidate_limit,
-        offset=candidate_offset,
-        exclude_run_ids=hidden_run_ids,
+        limit=limit,
+        offset=offset,
+        include_hidden=include_hidden,
+        has_documents_only=has_documents_only,
     )
-
-    items: list[dict[str, Any]] = []
-    for run in runs:
-        outputs_dir = settings.get_run_path(run.doc_id, run.run_id) / "outputs"
-        document_summary = _load_split_document_summary(outputs_dir)
-        if has_documents_only and document_summary["documents_total"] == 0:
-            continue
-
-        doc = await doc_repo.get(run.doc_id)
-        source_path = doc.source_path if doc else ""
-        source_name = Path(source_path).stem if source_path else run.doc_id
-        quality_summary = _load_quality_gate_summary(outputs_dir)
-        items.append(
-            {
-                "run_id": run.run_id,
-                "doc_id": run.doc_id,
-                "profile": run.profile,
-                "status": run.status.value,
-                "created_at": run.created_at,
-                "updated_at": run.updated_at,
-                "source_path": source_path,
-                "source_name": source_name,
-                **document_summary,
-                **quality_summary,
-            }
-        )
-
-    if has_documents_only:
-        total = len(items)
-        items = items[offset:offset + limit]
-    else:
-        total = await run_repo.count(status=status, exclude_run_ids=hidden_run_ids)
-
-    return {"runs": items, "total": total}
 
 
 @router.get("/{run_id}", response_model=RunDetailResponse)

@@ -107,8 +107,12 @@ class DocRepository:
 
     async def list_all(self, limit: int = 100, offset: int = 0) -> list[Doc]:
         """List all documents."""
+        # created_at is an ISO string that can tie across docs created in the
+        # same batch; doc_id (content-hash derived, unique) is added as a
+        # stable secondary sort key so LIMIT/OFFSET paging is deterministic
+        # instead of depending on unspecified SQLite tie order.
         async with self.db.connection.execute(
-            "SELECT * FROM docs ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            "SELECT * FROM docs ORDER BY created_at DESC, doc_id DESC LIMIT ? OFFSET ?",
             (limit, offset),
         ) as cursor:
             rows = await cursor.fetchall()
@@ -198,8 +202,9 @@ class RunRepository:
 
     async def list_by_doc(self, doc_id: str, limit: int = 50) -> list[Run]:
         """List runs for a document."""
+        # See list_all() below for why run_id DESC is added as a tiebreaker.
         async with self.db.connection.execute(
-            "SELECT * FROM runs WHERE doc_id = ? ORDER BY created_at DESC LIMIT ?",
+            "SELECT * FROM runs WHERE doc_id = ? ORDER BY created_at DESC, run_id DESC LIMIT ?",
             (doc_id, limit),
         ) as cursor:
             rows = await cursor.fetchall()
@@ -224,7 +229,14 @@ class RunRepository:
             params.extend(sorted(exclude_run_ids))
 
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        query = f"SELECT * FROM runs {where} ORDER BY created_at DESC LIMIT ? OFFSET ?"
+        # created_at is an ISO string that can tie across runs created in the
+        # same batch (e.g. batch-create); run_id (a monotonic ULID, unique)
+        # is added as a stable secondary sort key so callers that page
+        # through this query with LIMIT/OFFSET (e.g. outputs-summary) get a
+        # deterministic order across calls instead of depending on
+        # unspecified SQLite tie order, which could otherwise skip or
+        # duplicate rows across pages.
+        query = f"SELECT * FROM runs {where} ORDER BY created_at DESC, run_id DESC LIMIT ? OFFSET ?"
         params.extend([limit, offset])
 
         async with self.db.connection.execute(query, tuple(params)) as cursor:

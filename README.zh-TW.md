@@ -472,6 +472,13 @@ SEMARK_FRONTEND_PORT=35070 SEMARK_PORT=38585 \
   docker compose -f docker-compose.full.host.yml up --build
 ```
 
+用 IP 位址或 `localhost` 開啟前端一律可行。如果想透過**具名主機**（例如內部 DNS 名稱）存取，需要明確加入允許清單——其他 Host header 會被拒絕，避免 DNS rebinding 攻擊打到無認證的後端：
+
+```bash
+SEMARK_FRONTEND_ALLOWED_HOSTS=semark.internal,docs.example.lan \
+  docker compose up --build
+```
+
 如果使用雲端或遠端 OpenAI-compatible provider，就把兩組模型 endpoint 指到對方服務，而不是 Ollama：
 
 ```bash
@@ -498,6 +505,13 @@ docker compose -f docker-compose.api-only.yml up --build
 ```
 
 Compose files 會把 backend workspace 放在 named Docker volume，並預設關閉 local path ingestion。重新散布 image 或推薦模型下載前，請先閱讀 `THIRD_PARTY_LICENSES.md`。
+
+> **警告——你的資料存放在 Docker volumes 裡。** 所有上傳的文件、處理紀錄與設定都存在 named volumes `doc-parser-workspace` 和 `mineru-cache`。執行 `docker compose down -v`（或 `docker volume rm`）會**永久刪除全部資料**。重建/升級請用不帶 `-v` 的 `docker compose down`——volume 會保留。進行有風險的操作前，建議先備份：
+>
+> ```bash
+> docker run --rm -v doc-parser-workspace:/data -v "$(pwd)":/backup alpine \
+>   tar czf /backup/semark-workspace-backup.tar.gz -C /data .
+> ```
 
 ## Demo Samples
 

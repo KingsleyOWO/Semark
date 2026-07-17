@@ -34,6 +34,7 @@ services:
       dockerfile: Dockerfile.frontend
     environment:
       VITE_API_PROXY_TARGET: http://backend:8585
+      SEMARK_FRONTEND_ALLOWED_HOSTS: ${SEMARK_FRONTEND_ALLOWED_HOSTS:-}
     ports:
       - "5070:5070"
     depends_on:

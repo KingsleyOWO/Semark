@@ -473,6 +473,13 @@ SEMARK_FRONTEND_PORT=35070 SEMARK_PORT=38585 \
   docker compose -f docker-compose.full.host.yml up --build
 ```
 
+Accessing the frontend by IP address or `localhost` always works. If you want to reach it through a **named host** (for example an internal DNS name), allowlist it explicitly — arbitrary Host headers are rejected to prevent DNS-rebinding attacks against the unauthenticated backend:
+
+```bash
+SEMARK_FRONTEND_ALLOWED_HOSTS=semark.internal,docs.example.lan \
+  docker compose up --build
+```
+
 For cloud or remote OpenAI-compatible providers, point both model endpoints at the provider instead of Ollama:
 
 ```bash
@@ -499,6 +506,13 @@ docker compose -f docker-compose.api-only.yml up --build
 ```
 
 The compose files keep the backend workspace in a named Docker volume and keep local path ingestion disabled by default. Review `THIRD_PARTY_LICENSES.md` before redistributing images or recommending model downloads.
+
+> **Warning — your data lives in Docker volumes.** All uploaded documents, processing runs, and settings are stored in the named volumes `doc-parser-workspace` and `mineru-cache`. Running `docker compose down -v` (or `docker volume rm`) **permanently deletes all of them**. Use plain `docker compose down` for rebuilds/upgrades — it keeps the volumes. To back up before risky operations:
+>
+> ```bash
+> docker run --rm -v doc-parser-workspace:/data -v "$(pwd)":/backup alpine \
+>   tar czf /backup/semark-workspace-backup.tar.gz -C /data .
+> ```
 
 
 ## Demo Samples

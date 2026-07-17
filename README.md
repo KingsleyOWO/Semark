@@ -33,6 +33,8 @@ Each demo pairs a real public source page with the generated RAG-ready semantic 
 | Form OCR produces a flat field soup with no usable structure | Purpose, instructions, grouped fields, and legal notes in a fixed RAG template | [en form](#english-form-uscis-g-1145) |
 | Flowcharts lose their decision logic the moment they become text | Conditions, branches, and responsible parties written out as structured Markdown | [zh flowchart](#traditional-chinese-flowchart-sexual-harassment-complaint-workflow) |
 
+> **A note on personal information**: the screenshot demo sources above are public documents with no personal data. In real use, **Mask Private Info** (on by default) deterministically masks the personal content screenshots commonly leak (mailbox subjects and senders, domain account IDs, email account digits) before delivery — but masking is a pattern-based last line of defense. If personal information must not appear in your documents at all, the most reliable approach is to keep it out of the source screenshots in the first place (cover or blur before capturing). See [Screenshots and Personal Information](#screenshots-and-personal-information).
+
 ### Traditional Chinese Screenshot Guide: Treasury Payment Slips
 
 **Pain point:** in screenshot-based manuals the facts that matter — which menu to click, which option is boxed in red, what to type into each field — live inside images, where OCR-only pipelines cannot retrieve them.

@@ -10,7 +10,7 @@ import {
   getSplitDocument,
   getSplitDocumentDownloadUrl,
   getSplitDocuments,
-  getOutputsSummary,
+  getAllOutputsSummary,
   triggerBrowserDownload,
   type OutputRunSummary,
 } from '@/lib/api'
@@ -50,7 +50,7 @@ export function Assets() {
 
   const { data: outputsSummary } = useQuery({
     queryKey: ['outputs-summary'],
-    queryFn: () => getOutputsSummary(100, 0, { include_hidden: true, has_documents_only: true }),
+    queryFn: () => getAllOutputsSummary({ include_hidden: true, has_documents_only: true }),
   })
 
   const runs = useMemo(() => outputsSummary?.runs ?? [], [outputsSummary])
@@ -166,6 +166,19 @@ export function Assets() {
 
   const selectedRunDownloadCount = selectedRunDownloadIds.size
 
+  // Newest run per document among the checked runs. Re-processed documents
+  // appear once per run in the list, but downloads should export each
+  // document once.
+  const newestSelectedRuns = useMemo(() => {
+    const byDoc = new Map<string, OutputRunSummary>()
+    for (const run of runs) {
+      if (!selectedRunDownloadIds.has(run.run_id)) continue
+      const current = byDoc.get(run.doc_id)
+      if (!current || run.run_id > current.run_id) byDoc.set(run.doc_id, run)
+    }
+    return Array.from(byDoc.values())
+  }, [runs, selectedRunDownloadIds])
+
   function toggleRunDownloadSelection(runId: string) {
     setSelectedRunDownloadIds((current) => {
       const next = new Set(current)
@@ -190,18 +203,22 @@ export function Assets() {
     const runIds = Array.from(selectedRunDownloadIds)
     if (runIds.length === 0) return
 
-    // Single run + 主文 → download the file itself instead of a one-file ZIP.
-    if (content === 'main' && runIds.length === 1) {
-      if (await downloadFileDirect(getSplitDocumentDownloadUrl(runIds[0], 'main', format))) return
+    // Single document + 主文 → download the file itself instead of a one-file ZIP.
+    if (content === 'main' && newestSelectedRuns.length === 1) {
+      if (await downloadFileDirect(getSplitDocumentDownloadUrl(newestSelectedRuns[0].run_id, 'main', format))) return
     }
 
     const response = await downloadRuns({
       run_ids: runIds,
       file_types: [content === 'main' ? 'main_text' : 'documents'],
       format,
+      dedupe_by_doc: true,
     })
     const label = content === 'main' ? 'main_text' : 'documents'
-    triggerBrowserDownload(await response.blob(), `${label}_${runIds.length}_runs_${format}.zip`)
+    triggerBrowserDownload(
+      await response.blob(),
+      `${label}_${newestSelectedRuns.length}_documents_${format}.zip`
+    )
   }
 
   function toggleDownloadSelection(documentId: string) {
@@ -362,6 +379,10 @@ export function Assets() {
                 triggerLabel={t('assets.downloadRunsCount', { count: selectedRunDownloadCount })}
                 disabled={selectedRunDownloadCount === 0}
                 showContentChoice
+                summary={t('assets.downloadScopeSummary', {
+                  runs: selectedRunDownloadCount,
+                  docs: newestSelectedRuns.length,
+                })}
                 onDownload={downloadSelectedRuns}
               />
               <Button

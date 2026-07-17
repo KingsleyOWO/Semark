@@ -35,6 +35,8 @@ interface DownloadMenuProps {
   disabled?: boolean
   /** Show the 主文/全部文件 choice (batch across runs). */
   showContentChoice?: boolean
+  /** Optional scope line shown at the top of the menu. */
+  summary?: string
   triggerVariant?: 'default' | 'outline'
   align?: 'start' | 'center' | 'end'
   className?: string
@@ -45,6 +47,7 @@ export function DownloadMenu({
   onDownload,
   disabled = false,
   showContentChoice = false,
+  summary,
   triggerVariant = 'default',
   align = 'start',
   className,
@@ -98,6 +101,9 @@ export function DownloadMenu({
           sideOffset={6}
           className="z-50 w-72 rounded-md border bg-background p-3 shadow-lg"
         >
+          {summary && (
+            <p className="mb-2 rounded-md bg-muted/60 px-2 py-1.5 text-xs text-muted-foreground">{summary}</p>
+          )}
           {showContentChoice && (
             <div className="space-y-1.5">
               <div className="text-xs font-medium text-muted-foreground">{t('assets.downloadContent')}</div>

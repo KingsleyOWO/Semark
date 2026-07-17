@@ -12,6 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from app.api.routes import assets, docs, download, ingest, runs
 from app.api.routes import settings as settings_routes
 from app.config import settings
+from app.core.task_queue import TaskQueue, get_task_queue
 from app.db.database import db
 from app.db.repositories import RunRepository, RunStageRepository
 from app.models.entities import RunStatus, StageStatus
@@ -27,12 +28,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings.workspace_path.mkdir(parents=True, exist_ok=True)
     settings.docs_path.mkdir(parents=True, exist_ok=True)
 
-    await _cancel_orphan_running_runs()
+    await _cancel_orphan_runs()
+
+    # Start queue workers now (rather than lazily on first request) so
+    # there is always a live TaskQueue instance to stop() on shutdown.
+    task_queue = await get_task_queue(db)
 
     yield
 
     # Shutdown
-    await db.disconnect()
+    await _shutdown_task_queue_and_db(task_queue)
 
 
 
@@ -59,6 +64,78 @@ async def _cancel_orphan_running_runs() -> int:
                 )
         await run_repo.update_status(run.run_id, RunStatus.CANCELED)
     return len(running_runs)
+
+
+async def _cancel_orphan_pending_runs() -> int:
+    """Cancel DB runs left pending after a backend restart.
+
+    Constraint: the task queue (app.core.task_queue) is a purely in-memory
+    asyncio.Queue, so a run_id that was submitted (POST /runs/{id}/execute)
+    but not yet dequeued when the process died has no worker left to ever
+    pick it up after restart -- left alone it sits in PENDING forever with
+    no indication anything is wrong (e.g. batch-create+submit 20 docs,
+    restart after 5 have started -> 15 permanent "pending" zombies).
+
+    Tradeoff: creating a run (POST /runs) does NOT itself submit it to the
+    queue -- execute() is a separate call -- and the DB has no column
+    recording "was queued" vs. "created but execution never requested"; the
+    only place that distinction lived was the in-memory TaskQueue, which is
+    exactly what a restart destroys. So this sweep cannot tell a truly
+    orphaned (queued) PENDING run apart from one a user simply hasn't
+    executed yet, and conservatively cancels both rather than leaving
+    potential zombies invisible. Cost is low either way: re-executing a run
+    is the same one action a user would take regardless of which case it
+    was.
+    """
+
+    run_repo = RunRepository(db)
+    stage_repo = RunStageRepository(db)
+    pending_runs = await run_repo.list_all(status=RunStatus.PENDING, limit=1000)
+    for run in pending_runs:
+        stages = await stage_repo.list_by_run(run.run_id)
+        for stage in stages:
+            if stage.status == StageStatus.PENDING:
+                await stage_repo.update_status(
+                    run.run_id,
+                    stage.stage,
+                    StageStatus.CANCELED,
+                    error={"message": "Backend restarted before this run was started"},
+                )
+        await run_repo.update_status(run.run_id, RunStatus.CANCELED)
+    return len(pending_runs)
+
+
+async def _cancel_orphan_runs() -> int:
+    """Boot-time reconciliation sweep for runs stranded by a backend restart.
+
+    Combines both blind spots created by the in-process, in-memory task
+    queue: runs a prior process was actively executing (RUNNING) and runs
+    it had merely accepted but not yet started (PENDING). Neither can be
+    resumed by a freshly-started queue, so both are surfaced as CANCELED
+    instead of appearing permanently "stuck" in the UI.
+    """
+
+    running = await _cancel_orphan_running_runs()
+    pending = await _cancel_orphan_pending_runs()
+    return running + pending
+
+
+async def _shutdown_task_queue_and_db(task_queue: TaskQueue) -> None:
+    """Stop queue workers before closing the DB connection.
+
+    Ordering matters: worker cancellation is handled by
+    PipelineOrchestrator.execute()'s `except asyncio.CancelledError` branch,
+    which writes RunStatus.CANCELED through the DB. If db.disconnect() ran
+    first, that write would raise "Database not connected" and the run
+    would stay wrongly marked RUNNING until the next boot's sweep corrected
+    it. Stopping the queue first lets in-flight cancellation writes land
+    while the connection is still open. Extracted to a standalone function
+    (called by lifespan) so shutdown ordering is directly unit-testable.
+    """
+
+    await task_queue.stop()
+    await db.disconnect()
+
 
 app = FastAPI(
     title="Semark API",

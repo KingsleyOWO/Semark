@@ -14,7 +14,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 
-from app.core.orchestrator import PipelineOrchestrator, PipelineResult
+from app.core.orchestrator import (
+    DEFAULT_MAX_CONCURRENT_PIPELINES,
+    PipelineOrchestrator,
+    PipelineResult,
+)
 from app.db.database import Database
 from app.models.entities import RunStatus, StageName
 
@@ -51,12 +55,20 @@ class TaskQueue:
     def __init__(
         self,
         db: Database,
-        max_parse_concurrent: int = 2,
+        max_parse_concurrent: int = DEFAULT_MAX_CONCURRENT_PIPELINES,
         max_enrich_gpu_concurrent: int = 1,
         max_enrich_http_concurrent: int = 4,
     ):
         self.db = db
-        self.orchestrator = PipelineOrchestrator(db)
+        # Single source of truth for whole-pipeline concurrency:
+        # max_parse_concurrent both sizes the worker pool below
+        # (pool_config["parse"] -> number of _worker_loop tasks) and is
+        # passed straight into the orchestrator's process-wide semaphore, so
+        # these queue workers and the direct (background=false) execute()
+        # path in routes/runs.py -- which owns a *separate*
+        # PipelineOrchestrator instance -- share one concurrency cap. See
+        # app.core.orchestrator._get_pipeline_semaphore.
+        self.orchestrator = PipelineOrchestrator(db, max_concurrent_pipelines=max_parse_concurrent)
 
         self._task_info: dict[str, TaskInfo] = {}
         self._running_tasks: dict[str, asyncio.Task] = {}

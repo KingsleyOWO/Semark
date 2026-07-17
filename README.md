@@ -22,44 +22,6 @@ Use Semark when you need:
 - Bilingual Traditional Chinese and English semantic outputs.
 - Docker or local deployment for private documents without forcing cloud model usage.
 
-## Screenshots and Personal Information
-
-Semark treats screenshot-based documents (software manuals, internal how-to guides, onboarding walkthroughs) as first-class input:
-
-- **Screenshot understanding**: UI screenshots are described semantically — what the screen shows, which menu items or buttons are highlighted, and the visible on-screen text — so the steps stay retrievable even though the source is an image. Captions are grounded against text that actually appears in the document, which suppresses hallucinated product or vendor names, and decorative icons or unreadable crops are filtered out of the RAG output and chunks.
-- **Main text only**: the download menu can export just the main document — the same content the document view shows — when you do not want figure attachments in the deliverable.
-- **Personal information masking**: real screenshots often leak content unrelated to the teaching material (mailbox subjects and senders, domain account IDs such as `CORP\x12345`, personal email account digits). With **Mask Private Info** enabled in Settings, Semark deterministically masks these patterns on every delivered surface (Markdown, split documents, chunks) while keeping instructional content such as account-format explanations intact.
-
-The masking is a best-effort safety net for common patterns, not a guarantee. If personal or sensitive information must never appear in the output, blur or cover it in the source screenshots before processing — the pipeline cannot restore what was never uploaded, which makes that the only fully reliable option.
-
-## Demo Model Note
-
-The curated demo snapshots were generated with a local Ollama model configured as `qwen3.6:35b-a3b-q8_0` for both enrichment and review in the test environment. Stronger vision/reviewer models may produce better semantic repair, visual reasoning, and field grouping quality. Model output is therefore an example of the pipeline shape, not a fixed upper bound.
-
-## Start Here
-
-- New user full setup: [Quickstart From GitHub](#quickstart-from-github).
-- Docker with MinerU: [Docker Quickstart](#docker-quickstart).
-- Local or cloud model endpoints: [VLM Enrichment and Review](#vlm-enrichment-and-review).
-- Built-in samples and optional public downloads: [Demo Samples](#demo-samples).
-- Expected output examples without running a model: [Demo Preview](#demo-preview).
-
-## How It Works
-
-1. **Ingest**: upload PDF, Office, HTML, or image files through the UI/API.
-2. **Parse**: MinerU extracts layout, OCR text, tables, page images, and document blocks.
-3. **Normalize**: the backend builds a unified document IR with source maps and page references.
-4. **Enrich**: optional VLM calls analyze forms, figures, diagrams, flowcharts, and visually dense pages.
-5. **Package**: rule-based semantic rendering plus an optional reviewer model creates final RAG-ready Markdown and split child files for independent forms, tables, flowcharts, figures, or attachments.
-6. **Quality Gate**: the pipeline checks structure, language consistency, missing semantic output, and repair metadata.
-7. **Export**: users can view, download, or ingest the main document, split semantic documents, chunks JSONL, assets, and quality reports.
-
-## Common Search / GEO Terms
-
-`Semark`, `Semark document parser`, `Semantic Markdown for RAG`, `document parser for RAG`, `PDF to semantic Markdown`, `PDF to Markdown for LLM`, `RAG-ready Markdown`, `LLM-ready Markdown`, `AI document parser`, `MinerU web UI`, `MinerU Docker app`, `VLM document understanding`, `semantic document parser`, `OCR to structured Markdown`, `automatic document splitting`, `form extraction for RAG`, `flowchart to Markdown`, `table extraction to Markdown`, `Traditional Chinese document parser`, `English PDF parser`, `local RAG document ingestion`, `OpenWebUI document pipeline`, `LlamaIndex document ingestion`, `LangChain document ingestion`.
-
-Suggested GitHub topics: `rag`, `pdf-to-markdown`, `semantic-markdown`, `document-ai`, `mineru`, `vlm`, `ocr`, `llm`, `knowledge-base`, `ollama`, `openai-compatible`, `traditional-chinese`.
-
 ## Demo Preview
 
 Each demo pairs a real public source page with the generated RAG-ready semantic Markdown, and each one targets a concrete pain point. Full artifacts (output, figure documents, chunks, quality gate) are stored under `examples/demos/`.
@@ -297,6 +259,38 @@ Grouped by meaning for completion:
 - 本流程圖為標準作業指引，各機關（學校）應依內部規定配合執行調查程序。
 - 涉及移送社會處確認或警察機關申訴之案件，應保留完整紀錄並函復相關調查單位。
 ```
+
+## Demo Model Note
+
+The curated demo snapshots were generated with a local Ollama model configured as `qwen3.6:35b-a3b-q8_0` for both enrichment and review in the test environment. Stronger vision/reviewer models may produce better semantic repair, visual reasoning, and field grouping quality. Model output is therefore an example of the pipeline shape, not a fixed upper bound.
+
+## Screenshots and Personal Information
+
+Semark treats screenshot-based documents (software manuals, internal how-to guides, onboarding walkthroughs) as first-class input:
+
+- **Screenshot understanding**: UI screenshots are described semantically — what the screen shows, which menu items or buttons are highlighted, and the visible on-screen text — so the steps stay retrievable even though the source is an image. Captions are grounded against text that actually appears in the document, which suppresses hallucinated product or vendor names, and decorative icons or unreadable crops are filtered out of the RAG output and chunks.
+- **Main text only**: the download menu can export just the main document — the same content the document view shows — when you do not want figure attachments in the deliverable.
+- **Personal information masking**: real screenshots often leak content unrelated to the teaching material (mailbox subjects and senders, domain account IDs such as `CORP\x12345`, personal email account digits). With **Mask Private Info** enabled in Settings, Semark deterministically masks these patterns on every delivered surface (Markdown, split documents, chunks) while keeping instructional content such as account-format explanations intact.
+
+The masking is a best-effort safety net for common patterns, not a guarantee. If personal or sensitive information must never appear in the output, blur or cover it in the source screenshots before processing — the pipeline cannot restore what was never uploaded, which makes that the only fully reliable option.
+
+## Start Here
+
+- New user full setup: [Quickstart From GitHub](#quickstart-from-github).
+- Docker with MinerU: [Docker Quickstart](#docker-quickstart).
+- Local or cloud model endpoints: [VLM Enrichment and Review](#vlm-enrichment-and-review).
+- Built-in samples and optional public downloads: [Demo Samples](#demo-samples).
+- Expected output examples without running a model: [Demo Preview](#demo-preview).
+
+## How It Works
+
+1. **Ingest**: upload PDF, Office, HTML, or image files through the UI/API.
+2. **Parse**: MinerU extracts layout, OCR text, tables, page images, and document blocks.
+3. **Normalize**: the backend builds a unified document IR with source maps and page references.
+4. **Enrich**: optional VLM calls analyze forms, figures, diagrams, flowcharts, and visually dense pages.
+5. **Package**: rule-based semantic rendering plus an optional reviewer model creates final RAG-ready Markdown and split child files for independent forms, tables, flowcharts, figures, or attachments.
+6. **Quality Gate**: the pipeline checks structure, language consistency, missing semantic output, and repair metadata.
+7. **Export**: users can view, download, or ingest the main document, split semantic documents, chunks JSONL, assets, and quality reports.
 
 ## What It Handles
 
@@ -587,6 +581,12 @@ The interface language and generated semantic document language are separate set
 - `en`: force English semantic section titles and summaries.
 
 Use `en` for English-only demo documents, `zh-TW` for Traditional Chinese corpora, and `auto` when the corpus is mixed. The selected value is recorded in each run manifest under `pipeline_config.package.semantic_output_language`.
+
+## Common Search / GEO Terms
+
+`Semark`, `Semark document parser`, `Semantic Markdown for RAG`, `document parser for RAG`, `PDF to semantic Markdown`, `PDF to Markdown for LLM`, `RAG-ready Markdown`, `LLM-ready Markdown`, `AI document parser`, `MinerU web UI`, `MinerU Docker app`, `VLM document understanding`, `semantic document parser`, `OCR to structured Markdown`, `automatic document splitting`, `form extraction for RAG`, `flowchart to Markdown`, `table extraction to Markdown`, `Traditional Chinese document parser`, `English PDF parser`, `local RAG document ingestion`, `OpenWebUI document pipeline`, `LlamaIndex document ingestion`, `LangChain document ingestion`.
+
+Suggested GitHub topics: `rag`, `pdf-to-markdown`, `semantic-markdown`, `document-ai`, `mineru`, `vlm`, `ocr`, `llm`, `knowledge-base`, `ollama`, `openai-compatible`, `traditional-chinese`.
 
 ## License
 

@@ -20,7 +20,7 @@ except ImportError:
 
 from app.adapters.vlm import EnrichmentOutput, VLMAdapter
 from app.config import PipelineConfig, settings
-from app.core.cache import CacheManager
+from app.core.cache import CacheManager, compute_config_hash
 from app.db.database import Database
 from app.models.document_ir import Block, BlockType, DocumentIR
 from app.pipeline.org_chart_parser import OrgChartParser
@@ -368,6 +368,7 @@ class EnrichStage:
         parse_cache_path: Path | None = None,
         use_cache: bool = True,
         progress_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+        mineru_version: str | None = None,
     ) -> EnrichStageResult:
         """
         Run enrich stage.
@@ -404,6 +405,23 @@ class EnrichStage:
 
             # Compute VLM config hash for cache
             vlm_config_hash = VLMAdapter.compute_config_hash(self.vlm_config)
+
+            # block_id is POSITIONAL (b{index:06d} from normalize.py, or
+            # yolo_fig_{page_idx}_{det_idx} assigned below): re-parsing the
+            # same doc under a different MinerU config (method/backend/
+            # lang/...) shifts segmentation, so the same block_id can end up
+            # denoting a DIFFERENT figure/table across parses. Mirror the
+            # parse cache's own identity (CacheManager.get_parse_cache_key /
+            # compute_config_hash in core/cache.py) into the enrich cache
+            # key so a parse-config change busts stale enrich entries
+            # instead of silently attaching the old parse's caption to the
+            # wrong block under the new parse.
+            # version=None (resumed runs where parse was skipped) degrades to
+            # the config-only identity rather than blocking cache use.
+            parse_config_hash = compute_config_hash(
+                self.config.mineru, version=mineru_version
+            )
+            effective_vlm_config_hash = f"{vlm_config_hash}:{parse_config_hash}"
 
             # Apply gating logic to find blocks that need enrichment
             blocks_to_enrich, gating_stats = self._apply_gating(document_ir)
@@ -496,7 +514,7 @@ class EnrichStage:
 
             # Process block-level enrichments
             for block, kind, table_gating in blocks_to_enrich:
-                prompt_version = self.vlm_adapter.get_prompt_version(kind)
+                prompt_version = f"{self.vlm_adapter.get_prompt_version(kind)}:{semantic_output_language}"
                 current_item = progress_item(kind, block.page_idx, block.block_id)
                 await emit_progress(
                     f"VLM 分析第 {block.page_idx + 1} 頁 {kind}",
@@ -508,7 +526,7 @@ class EnrichStage:
                     cached = await self.cache_manager.get_enrich_cache(
                         doc_id=doc_id,
                         block_id=block.block_id,
-                        vlm_config_hash=vlm_config_hash,
+                        vlm_config_hash=effective_vlm_config_hash,
                         prompt_version=prompt_version,
                     )
                     if cached:
@@ -613,7 +631,7 @@ class EnrichStage:
                         await self.cache_manager.set_enrich_cache(
                             doc_id=doc_id,
                             block_id=block.block_id,
-                            vlm_config_hash=vlm_config_hash,
+                            vlm_config_hash=effective_vlm_config_hash,
                             prompt_version=prompt_version,
                             output=result.output,
                         )
@@ -711,7 +729,7 @@ class EnrichStage:
                             cached = await self.cache_manager.get_enrich_cache(
                                 doc_id=doc_id,
                                 block_id=form_block_id,
-                                vlm_config_hash=vlm_config_hash,
+                                vlm_config_hash=effective_vlm_config_hash,
                                 prompt_version=prompt_version,
                             )
                             if cached:
@@ -955,7 +973,7 @@ class EnrichStage:
                             await self.cache_manager.set_enrich_cache(
                                 doc_id=doc_id,
                                 block_id=form_block_id,
-                                vlm_config_hash=vlm_config_hash,
+                                vlm_config_hash=effective_vlm_config_hash,
                                 prompt_version=prompt_version,
                                 output=output,
                             )
@@ -1015,7 +1033,7 @@ class EnrichStage:
                 figures_dir = run_path / "assets" / "figures"
                 for det_idx, (page_idx, detection) in enumerate(figure_detections):
                     figure_id = f"yolo_fig_{page_idx:04d}_{det_idx:03d}"
-                    prompt_version = self.vlm_adapter.get_prompt_version("figure_description")
+                    prompt_version = f"{self.vlm_adapter.get_prompt_version('figure_description')}:{semantic_output_language}"
                     current_item = progress_item("figure_caption", page_idx, figure_id)
                     await emit_progress(
                         f"VLM 分析第 {page_idx + 1} 頁圖表",
@@ -1027,7 +1045,7 @@ class EnrichStage:
                         cached = await self.cache_manager.get_enrich_cache(
                             doc_id=doc_id,
                             block_id=figure_id,
-                            vlm_config_hash=vlm_config_hash,
+                            vlm_config_hash=effective_vlm_config_hash,
                             prompt_version=prompt_version,
                         )
                         if cached:
@@ -1124,7 +1142,7 @@ class EnrichStage:
                         await self.cache_manager.set_enrich_cache(
                             doc_id=doc_id,
                             block_id=figure_id,
-                            vlm_config_hash=vlm_config_hash,
+                            vlm_config_hash=effective_vlm_config_hash,
                             prompt_version=prompt_version,
                             output=result.output,
                         )

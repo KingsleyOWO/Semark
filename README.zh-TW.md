@@ -22,44 +22,6 @@
 - 支援英文與繁體中文輸出，專有名詞可保留英文。
 - 希望文件留在本機或內網處理，模型端點可自行選擇本地 Ollama 或雲端 OpenAI-compatible API。
 
-## 截圖文件與個人資訊
-
-Semark 把「截圖為主的文件」（軟體操作手冊、內部教學、新人上手指南）當成一級輸入來處理：
-
-- **截圖理解**：UI 截圖會被轉成語意描述——畫面在顯示什麼、哪個選單或按鈕被標示、畫面上看得到的文字——即使來源是圖片，操作步驟仍然可以被檢索。描述會與文件中實際出現的文字做比對（grounding），抑制幻覺出來的產品或廠商名稱；裝飾性圖示與無法辨識的裁切圖會自動從 RAG 輸出與 chunks 中過濾。
-- **只下載主文**：如果交付成果不需要圖片附件，下載選單可以只匯出主文，內容與文件檢視畫面顯示的完全一致。
-- **個人資訊遮蔽**：真實截圖常常帶出與教學無關的內容（信箱的信件主旨與寄件人、網域帳號工號如 `CORP\x12345`、個人 email 帳號數字）。在設定中開啟「遮蔽個人資訊」後，這些樣式會在所有交付輸出（Markdown、分檔文件、chunks）中被確定性遮蔽，而帳號格式說明這類教學本體會保留。
-
-要提醒的是：遮蔽是針對常見樣式的最後防線，不是保證。如果個人化的圖片或資訊完全不應該出現在文檔上，請在處理前就先把來源截圖中的個人內容蓋掉或模糊化——沒有上傳的內容才是真正不會外流的內容。
-
-## Demo 模型說明
-
-目前 curated demo snapshots 是在測試環境中使用本地 Ollama 模型 `qwen3.6:35b-a3b-q8_0` 產生，該模型同時作為 enrichment 與 reviewer model。若改用更強的 vision model 或 reviewer model，理論上在語意修復、視覺理解、欄位分組與流程判讀上會有更好的效果。因此 demo 展示的是目前 pipeline 的輸出形態，不代表模型能力上限。
-
-## 從這裡開始
-
-- 第一次完整安裝：[從 GitHub 快速啟動](#從-github-快速啟動)。
-- Docker 與 MinerU：[Docker Quickstart](#docker-quickstart)。
-- 本機或雲端模型端點：[VLM Enrichment and Review](#vlm-enrichment-and-review)。
-- 內建範例與可選 public corpus 下載：[Demo Samples](#demo-samples)。
-- 不跑模型也能先看預期輸出：[Demo Preview](#demo-preview)。
-
-## 大致運作方式
-
-1. **文件匯入**：透過 UI/API 上傳 PDF、Office、HTML 或圖片。
-2. **MinerU 解析**：抽取 OCR 文字、版面、表格、頁面影像與文件區塊。
-3. **標準化 IR**：後端建立統一的 document IR，保留頁碼、來源 block 與 source map。
-4. **VLM 語意補強**：可選擇對表單、圖片、流程圖、圖表進行視覺理解與欄位抽取。
-5. **語意包裝與自動分檔**：規則式結構化輸出搭配 reviewer model，產生最後的 RAG-ready Markdown，並將獨立表單、表格、流程圖、圖示或附件拆成子文件。
-6. **品質檢查**：檢查語言一致性、空輸出、錯誤分檔、流程/表單結構與修復結果。
-7. **輸出使用**：可在 Viewer 檢視、下載主文、分檔語意文件、Markdown/chunks/assets，也可直接匯入 RAG 或知識庫系統。
-
-## 常見搜尋關鍵詞 / GEO Terms
-
-`Semark`、`Semark 文件解析`、`Semantic Markdown for RAG`、`RAG 文件解析工具`、`PDF 轉語意 Markdown`、`PDF 轉 Markdown`、`RAG-ready Markdown`、`LLM-ready Markdown`、`AI 文件解析`、`MinerU UI`、`MinerU Docker`、`VLM 文件理解`、`自動文件分檔`、`表單抽取 RAG`、`流程圖轉 Markdown`、`表格轉 Markdown`、`OCR 轉結構化文本`、`繁體中文文件解析`、`英文 PDF 語意化`、`本地端 RAG 文件匯入`、`OpenWebUI 文件處理流程`、`LlamaIndex 文件匯入`、`LangChain 文件匯入`。
-
-建議 GitHub topics：`rag`、`pdf-to-markdown`、`semantic-markdown`、`document-ai`、`mineru`、`vlm`、`ocr`、`llm`、`knowledge-base`、`ollama`、`openai-compatible`、`traditional-chinese`。
-
 ## Demo Preview
 
 每個 demo 都把「真實的公開來源頁面」與「產出的 RAG-ready semantic Markdown」放在一起，而且各自對準一個具體痛點。完整檔案（主文、圖片語意文件、chunks、品質報告）位於 `examples/demos/`。
@@ -297,6 +259,38 @@ Grouped by meaning for completion:
 - 本流程圖為標準作業指引，各機關（學校）應依內部規定配合執行調查程序。
 - 涉及移送社會處確認或警察機關申訴之案件，應保留完整紀錄並函復相關調查單位。
 ```
+
+## Demo 模型說明
+
+目前 curated demo snapshots 是在測試環境中使用本地 Ollama 模型 `qwen3.6:35b-a3b-q8_0` 產生，該模型同時作為 enrichment 與 reviewer model。若改用更強的 vision model 或 reviewer model，理論上在語意修復、視覺理解、欄位分組與流程判讀上會有更好的效果。因此 demo 展示的是目前 pipeline 的輸出形態，不代表模型能力上限。
+
+## 截圖文件與個人資訊
+
+Semark 把「截圖為主的文件」（軟體操作手冊、內部教學、新人上手指南）當成一級輸入來處理：
+
+- **截圖理解**：UI 截圖會被轉成語意描述——畫面在顯示什麼、哪個選單或按鈕被標示、畫面上看得到的文字——即使來源是圖片，操作步驟仍然可以被檢索。描述會與文件中實際出現的文字做比對（grounding），抑制幻覺出來的產品或廠商名稱；裝飾性圖示與無法辨識的裁切圖會自動從 RAG 輸出與 chunks 中過濾。
+- **只下載主文**：如果交付成果不需要圖片附件，下載選單可以只匯出主文，內容與文件檢視畫面顯示的完全一致。
+- **個人資訊遮蔽**：真實截圖常常帶出與教學無關的內容（信箱的信件主旨與寄件人、網域帳號工號如 `CORP\x12345`、個人 email 帳號數字）。在設定中開啟「遮蔽個人資訊」後，這些樣式會在所有交付輸出（Markdown、分檔文件、chunks）中被確定性遮蔽，而帳號格式說明這類教學本體會保留。
+
+要提醒的是：遮蔽是針對常見樣式的最後防線，不是保證。如果個人化的圖片或資訊完全不應該出現在文檔上，請在處理前就先把來源截圖中的個人內容蓋掉或模糊化——沒有上傳的內容才是真正不會外流的內容。
+
+## 從這裡開始
+
+- 第一次完整安裝：[從 GitHub 快速啟動](#從-github-快速啟動)。
+- Docker 與 MinerU：[Docker Quickstart](#docker-quickstart)。
+- 本機或雲端模型端點：[VLM Enrichment and Review](#vlm-enrichment-and-review)。
+- 內建範例與可選 public corpus 下載：[Demo Samples](#demo-samples)。
+- 不跑模型也能先看預期輸出：[Demo Preview](#demo-preview)。
+
+## 大致運作方式
+
+1. **文件匯入**：透過 UI/API 上傳 PDF、Office、HTML 或圖片。
+2. **MinerU 解析**：抽取 OCR 文字、版面、表格、頁面影像與文件區塊。
+3. **標準化 IR**：後端建立統一的 document IR，保留頁碼、來源 block 與 source map。
+4. **VLM 語意補強**：可選擇對表單、圖片、流程圖、圖表進行視覺理解與欄位抽取。
+5. **語意包裝與自動分檔**：規則式結構化輸出搭配 reviewer model，產生最後的 RAG-ready Markdown，並將獨立表單、表格、流程圖、圖示或附件拆成子文件。
+6. **品質檢查**：檢查語言一致性、空輸出、錯誤分檔、流程/表單結構與修復結果。
+7. **輸出使用**：可在 Viewer 檢視、下載主文、分檔語意文件、Markdown/chunks/assets，也可直接匯入 RAG 或知識庫系統。
 
 ## 支援輸入與輸出
 
@@ -585,6 +579,12 @@ Ollama 請使用 `/v1` endpoint，例如 `http://127.0.0.1:11434/v1`，並設定
 - `en`：強制使用英文 semantic section titles 與 summaries。
 
 英文 demo 文件建議用 `en`，繁體中文 corpus 建議用 `zh-TW`，混合 corpus 可用 `auto`。此設定會記錄在每次 run manifest 的 `pipeline_config.package.semantic_output_language`。
+
+## 常見搜尋關鍵詞 / GEO Terms
+
+`Semark`、`Semark 文件解析`、`Semantic Markdown for RAG`、`RAG 文件解析工具`、`PDF 轉語意 Markdown`、`PDF 轉 Markdown`、`RAG-ready Markdown`、`LLM-ready Markdown`、`AI 文件解析`、`MinerU UI`、`MinerU Docker`、`VLM 文件理解`、`自動文件分檔`、`表單抽取 RAG`、`流程圖轉 Markdown`、`表格轉 Markdown`、`OCR 轉結構化文本`、`繁體中文文件解析`、`英文 PDF 語意化`、`本地端 RAG 文件匯入`、`OpenWebUI 文件處理流程`、`LlamaIndex 文件匯入`、`LangChain 文件匯入`。
+
+建議 GitHub topics：`rag`、`pdf-to-markdown`、`semantic-markdown`、`document-ai`、`mineru`、`vlm`、`ocr`、`llm`、`knowledge-base`、`ollama`、`openai-compatible`、`traditional-chinese`。
 
 ## License
 

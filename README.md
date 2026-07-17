@@ -15,9 +15,22 @@ Use Semark when you need:
 - PDF to structured Markdown for RAG and LLM applications.
 - MinerU-based document parsing with a usable web UI and API.
 - VLM-assisted extraction for forms, figures, flowcharts, diagrams, and visual documents.
+- Screenshot-heavy how-to guides: UI screenshots become semantic descriptions, menu/button paths, and on-screen text instead of dead images.
 - Automatic file splitting for long documents that contain multiple forms, tables, flowcharts, or attachments.
+- Main-text-only export: download exactly the main document shown in the viewer, without the split attachments, in MD/DOCX/TXT.
+- Masking of personal information that OCR/VLM would otherwise transcribe from screenshots into the output.
 - Bilingual Traditional Chinese and English semantic outputs.
 - Docker or local deployment for private documents without forcing cloud model usage.
+
+## Screenshots and Personal Information
+
+Semark treats screenshot-based documents (software manuals, internal how-to guides, onboarding walkthroughs) as first-class input:
+
+- **Screenshot understanding**: UI screenshots are described semantically — what the screen shows, which menu items or buttons are highlighted, and the visible on-screen text — so the steps stay retrievable even though the source is an image. Captions are grounded against text that actually appears in the document, which suppresses hallucinated product or vendor names, and decorative icons or unreadable crops are filtered out of the RAG output and chunks.
+- **Main text only**: the download menu can export just the main document — the same content the document view shows — when you do not want figure attachments in the deliverable.
+- **Personal information masking**: real screenshots often leak content unrelated to the teaching material (mailbox subjects and senders, domain account IDs such as `CORP\x12345`, personal email account digits). With **Mask Private Info** enabled in Settings, Semark deterministically masks these patterns on every delivered surface (Markdown, split documents, chunks) while keeping instructional content such as account-format explanations intact.
+
+The masking is a best-effort safety net for common patterns, not a guarantee. If personal or sensitive information must never appear in the output, blur or cover it in the source screenshots before processing — the pipeline cannot restore what was never uploaded, which makes that the only fully reliable option.
 
 ## Demo Model Note
 

@@ -82,3 +82,28 @@
     overflow-x: hidden;
   }
 }
+
+/* Minimal readable styling for the Viewer's markdown pane. There is no
+   @tailwindcss/typography plugin installed (the `prose` classes on the pane are
+   inert), and tables were never rendered before rehype-raw/rehype-sanitize were wired
+   up (see Viewer.tsx MarkdownWithAnchors), so this pane's table/th/td never had any
+   styling at all. Colors reuse the app's existing design tokens. */
+@layer base {
+  .markdown-content table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 0.75rem 0;
+    font-size: 0.8125rem;
+  }
+  .markdown-content th,
+  .markdown-content td {
+    border: 1px solid hsl(var(--border));
+    padding: 0.375rem 0.625rem;
+    text-align: left;
+    vertical-align: top;
+  }
+  .markdown-content thead th {
+    background-color: hsl(var(--muted));
+    font-weight: 600;
+  }
+}

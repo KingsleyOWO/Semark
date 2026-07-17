@@ -63,7 +63,7 @@ async def _cancel_orphan_running_runs() -> int:
 app = FastAPI(
     title="Semark API",
     description="Semantic Markdown for RAG from PDF, Office, HTML, and images",
-    version="0.1.0",
+    version="0.3.0",
     lifespan=lifespan,
 )
 

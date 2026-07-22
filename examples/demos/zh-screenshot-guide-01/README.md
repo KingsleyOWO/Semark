@@ -1,58 +1,47 @@
-# Traditional Chinese Screenshot Guide Demo: Treasury Payment Slip Printing
+# 繁體中文截圖教學 Demo：國庫繳款書列印
 
-This demo shows a two-page Traditional Chinese how-to guide built almost
-entirely from UI screenshots, processed with the accurate profile. The
-screenshots (menu bars, red-box highlights, a data-entry form with field
-hints) are converted into semantic descriptions and retrievable text instead
-of staying invisible images.
+這個 demo 是一份共兩頁、主要由 UI 截圖構成的繁體中文操作說明，使用 `accurate` profile 處理。截圖中的選單列、紅框標示、資料輸入欄位與欄位提示，會被轉成語意描述及可檢索文字，而不是留在 RAG 無法讀取的圖片中。
 
-## Source Pages
+## 來源頁面
 
-![Source page 1](source-page-1.png)
+![來源頁面 1](source-page-1.png)
 
-![Source page 2](source-page-2.png)
+![來源頁面 2](source-page-2.png)
 
-## Generated Output
+## 產出檔案
 
-- [raw-parse.md](raw-parse.md): the parse-only baseline — the complete raw output of the parsing/OCR layer, where both screenshots are dead image links.
-- [output.md](output.md): the main document — what the viewer shows and what 主文 downloads deliver.
-- [figure-example.md](figure-example.md): one of the split figure documents — the form-screen screenshot rendered as semantic facts plus a scene description.
-- [chunks.jsonl](chunks.jsonl): retrieval chunks generated from the semantic output.
-- [quality_gate.json](quality_gate.json): pass status (score 1.0) with no open issues.
+- [raw-parse.md](raw-parse.md)：只做解析／OCR 的完整原始輸出；兩張截圖在結果中都只剩圖片連結。
+- [output.md](output.md)：整合正文與圖片解釋的主文，也是 Viewer 顯示及下載「主文」時取得的內容。
+- [figure-example.md](figure-example.md)：其中一份獨立圖片語意文件；將表單畫面整理成語意事實與場景描述。
+- [chunks.jsonl](chunks.jsonl)：由語意輸出建立的檢索 chunks。
+- [quality_gate.json](quality_gate.json)：品質檢查結果，分數為 1.0，沒有未解決問題。
 
-## What to Look For
+## 建議比較重點
 
-- Compare [raw-parse.md](raw-parse.md) with [output.md](output.md): in the baseline the whole data-entry screen is one image link; in the semantic output every field hint is retrievable text.
-- The red-box callout on page 1 (「繳款書(01)條碼化作業」選項被紅框特別標示) survives as text a retriever can find.
-- Every field hint on the form screenshot (收入科目代號 「12171002103」, 機關代號 「1710003」…) is transcribed once and also restated as grounded semantic facts.
-- The document title is recovered from the page (列印國庫繳款書操作說明), not from a generic section label or the file name.
+- 比較 [raw-parse.md](raw-parse.md) 與 [output.md](output.md)：原始解析中，整個資料輸入畫面只剩一條圖片連結；語意輸出則讓每個欄位提示都成為可檢索文字。
+- 第 1 頁的紅框提示（「繳款書(01)條碼化作業」選項被紅框特別標示）會保留成檢索得到的文字。
+- 表單截圖中的欄位提示，例如收入科目代號「12171002103」及機關代號「1710003」，會被轉錄一次，並整理成有根據的語意事實。
+- 文件標題會從頁面內容還原為「列印國庫繳款書操作說明」，而不是使用通用章節標籤或檔名。
 
-## Model Note
+## 模型說明
 
-This snapshot was generated in the test environment with local Ollama model
-`qwen3.6:35b-a3b-q8_0` as the enrichment/reviewer model. Stronger compatible
-vision or reviewer models may improve visual reasoning and semantic quality.
+這份 snapshot 在測試環境中使用本機 Ollama 模型 `qwen3.6:35b-a3b-q8_0`，同時作為 enrichment 與 reviewer model。改用更強的相容 vision 或 reviewer model，可能進一步改善視覺判讀與語意品質。
 
-## Run Metadata
+## 執行資訊
 
-- Run ID: `01KXQEWEJTXCRG7SDNM2H5RN6C`
-- Document ID: `028e33ae775f8034`
-- Profile: `accurate`
-- Output language: `zh-TW`
-- Quality gate: `pass` (1.0)
+- Run ID：`01KXQEWEJTXCRG7SDNM2H5RN6C`
+- Document ID：`028e33ae775f8034`
+- Profile：`accurate`
+- 輸出語言：`zh-TW`
+- Quality gate：`pass`（1.0）
 
-## Source Attribution
+## 來源標示
 
-The source pages are from the National Treasury Administration (Ministry of
-Finance, Taiwan) operation guide for printing treasury payment slips in the
-public VEB system (國庫收支應用書表條碼化 Web 版):
+來源頁面取自中華民國財政部國庫署公開的「國庫收支應用書表條碼化 Web 版」國庫繳款書列印操作說明：
 
-- System: <https://veb.nta.gov.tw/>
-- Agency information page: <https://www.nta.gov.tw/singlehtml/241?cntId=8ab3b311519146c7bd4126f8a72fc260>
+- 系統：<https://veb.nta.gov.tw/>
+- 機關資訊頁：<https://www.nta.gov.tw/singlehtml/241?cntId=8ab3b311519146c7bd4126f8a72fc260>
 
-## Notes
+## 注意事項
 
-The guide teaches a public government workflow; the phone numbers and field
-example values shown are the agency's published, non-personal instructions.
-The output is intended to show the RAG-ready shape of screenshot-based
-documents, not to replace the official instructions.
+這份教學說明的是公開政府系統的操作流程。畫面中的電話號碼與欄位範例值均為機關公開的非個人資訊。本輸出用於展示截圖型文件轉成 RAG-ready 語意內容後的形式，不取代官方操作說明。

@@ -66,7 +66,7 @@
 
 整個資料登打畫面——每個欄位、每個提示值、所有紅框——就是那一行死圖連結。對這份輸出做 RAG，關於表單的任何問題都答不出來。
 
-**Semark 產出的 semantic Markdown**（主文節錄，[完整檔案](examples/demos/zh-screenshot-guide-01/)）
+**Semark 產出的 semantic Markdown**（主文節錄，[完整主文](examples/demos/zh-screenshot-guide-01/output.md)）
 
 ```markdown
 # 列印國庫繳款書操作說明
@@ -180,7 +180,7 @@
 
 截圖全是死圖連結（入口網面板上的 VA10091、SAM.gov、聯絡資訊在文字層完全不存在），OCR 錯字「AAuthorized」被升級成章節標題，操作步驟也變成了標題。
 
-**Semark 產出的 semantic Markdown**（主文節錄，[完整檔案](examples/demos/en-screenshot-guide-01/)）
+**Semark 產出的 semantic Markdown**（主文節錄，[完整主文](examples/demos/en-screenshot-guide-01/output.md)）
 
 ```markdown
 # Welcome to the VA Customer Engagement Portal (CEP)

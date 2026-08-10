@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from app.adapters.vlm import VLMAdapter
-from app.models.document_ir import Block, BlockType, DocumentIR
+from app.models.document_ir import Block, BlockType, DocumentIR, coerce_payload_text
 from app.pipeline.corpus_rules import get_rules as get_corpus_rules
 from app.pipeline.delivery import atomic_write_json
 from app.pipeline.privacy import scrub_transcribed_privacy
@@ -1363,7 +1363,9 @@ def _plain_block_text(block: Block) -> str:
     if block.type == BlockType.TABLE:
         return re.sub(r"<[^>]+>", " ", str(block.payload.get("table_body") or ""))
     if block.type == BlockType.IMAGE:
-        return " ".join(str(block.payload.get(key) or "") for key in ("caption", "footnote"))
+        return " ".join(
+            coerce_payload_text(block.payload.get(key)) for key in ("caption", "footnote")
+        )
     return block.get_text()
 
 

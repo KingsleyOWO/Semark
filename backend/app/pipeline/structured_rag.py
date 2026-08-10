@@ -7,7 +7,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 
-from app.models.document_ir import BlockType, DocumentIR
+from app.models.document_ir import BlockType, DocumentIR, coerce_payload_text
 from app.pipeline.corpus_rules import get_rules as get_corpus_rules
 from app.pipeline.delivery import atomic_write_json, atomic_write_jsonl, atomic_write_text
 from app.pipeline.semantic.language import (
@@ -3534,7 +3534,7 @@ def _block_search_text(block: Any) -> str:
         payload.get("table_body", ""),
         payload.get("caption", ""),
     ]
-    return _plain_text(" ".join(str(part or "") for part in parts))
+    return _plain_text(" ".join(coerce_payload_text(part) for part in parts))
 
 
 def _clean_form_title(value: Any) -> str:

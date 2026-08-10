@@ -6,6 +6,8 @@ import re
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from app.models.document_ir import coerce_payload_text
+
 SemanticLanguage = Literal["zh-TW", "en"]
 SemanticLanguageSelection = Literal["auto", "zh-TW", "en"]
 VALID_SEMANTIC_OUTPUT_LANGUAGES = {"auto", "zh-TW", "en"}
@@ -204,7 +206,7 @@ def _document_text(document_ir: Any) -> str:
             for key in ("text", "table_body", "caption"):
                 value = payload.get(key)
                 if value:
-                    parts.append(_strip_html(str(value)))
+                    parts.append(_strip_html(coerce_payload_text(value)))
     return "\n".join(parts)
 
 

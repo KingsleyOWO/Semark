@@ -10,6 +10,19 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 
+def coerce_payload_text(value: Any) -> str:
+    """Coerce a MinerU payload field to text.
+
+    MinerU emits caption/footnote fields (img_caption, chart_caption, ...) as
+    lists of strings, and normalize copies them into the block payload
+    verbatim. Payloads are untyped dicts, so nothing else enforces the
+    `-> str` contract that every get_text() caller relies on.
+    """
+    if isinstance(value, list):
+        return " ".join(str(part) for part in value if part)
+    return str(value) if value else ""
+
+
 class BlockType(StrEnum):
     TEXT = "text"
     TABLE = "table"
@@ -118,17 +131,17 @@ class Block(BaseModel):
     def get_text(self) -> str:
         """Extract text content from block."""
         if self.type == BlockType.TEXT:
-            return self.payload.get("text", "")
+            return coerce_payload_text(self.payload.get("text"))
         elif self.type == BlockType.TABLE:
-            return self.payload.get("table_body", "")
+            return coerce_payload_text(self.payload.get("table_body"))
         elif self.type == BlockType.IMAGE:
-            return self.payload.get("caption", "")
+            return coerce_payload_text(self.payload.get("caption"))
         elif self.type == BlockType.EQUATION:
-            return self.payload.get("latex", "")
+            return coerce_payload_text(self.payload.get("latex"))
         elif self.type == BlockType.CODE:
-            return self.payload.get("code", "")
+            return coerce_payload_text(self.payload.get("code"))
         elif self.type == BlockType.LIST:
-            return "\n".join(self.payload.get("items", []))
+            return "\n".join(str(item) for item in self.payload.get("items", []) if item)
         return ""
 
     def get_heading_level(self) -> int | None:

@@ -50,7 +50,7 @@ REPORT_WITH_BIBLIOGRAPHY = [
     "本報告回顧2025年全球經濟情勢，並展望2026年的政策風險與產業動能。",
     "由於採紀錄與宣告(Book and Claim)原則，憑證的交易與實體移轉可以分離。",
     "## 參考文獻",
-    "示範研究院，2026/01，全球景氣回顧，DOI:10.29656/DEMO.202601",
+    "示範研究院，2026/01，全球景氣回顧，DOI:10.12345/DEMO.202601",
     "Demo Council, Principles for 6G: A Joint Statement, https://example.org/a",
     "Demo Agency, The Framework for IMT-2030: Objectives, https://example.org/b",
     "Demo Institute, Wireless Innovation Fund: Progress Update, https://example.org/c",

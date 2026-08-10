@@ -476,10 +476,31 @@ def _english_table_fragment_to_sections(rows: list[list[str]], title: str) -> st
     return "\n".join(lines).strip()
 
 
+# A figure a reader would quote off the page: optional sign, digits with
+# optional thousands separators and decimals, optional trailing percent.
+# Deliberately strict — OCR mash such as "4.64.74.7" or a stray ".7" must NOT
+# parse, so those keep counting as noise.
+_NUMERIC_DATA_RE = re.compile(r"[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?%?")
+
+
+def _is_numeric_data_cell(value: str) -> bool:
+    """True for a well-formed figure — the payload of a statistics table.
+
+    A lone digit does not count: garbled scans scatter single digits across a
+    layout grid, and one digit carries no measurement by itself.
+    """
+    compact = re.sub(r"\s+", "", str(value or ""))
+    return len(compact) >= 2 and bool(_NUMERIC_DATA_RE.fullmatch(compact))
+
+
 def _is_weak_table_cell(value: str) -> bool:
     compact = re.sub(r"\s+", "", str(value or ""))
     if not compact:
         return True
+    # Checked before the numeric-punctuation catch-all below, which cannot tell
+    # a measurement ("22.40") from punctuation debris (".", "-", ":").
+    if _is_numeric_data_cell(compact):
+        return False
     if re.fullmatch(r"[\d.,:：;；/\-]+", compact):
         return True
     if re.fullmatch(r"[□☐☑✓✔✕✗.。·•、,，:：;；_\-]+", compact):
@@ -495,6 +516,10 @@ def _is_meaningful_table_cell(value: str) -> bool:
     compact = re.sub(r"\s+", "", str(value or ""))
     if not compact or _is_weak_table_cell(compact):
         return False
+    # A statistics table carries its meaning in the numbers; requiring letters
+    # or CJK below would read every data column as contentless.
+    if _is_numeric_data_cell(compact):
+        return True
     cjk_count = len(re.findall(r"[\u4e00-\u9fff]", compact))
     alpha_count = len(re.findall(r"[A-Za-z]", compact))
     if cjk_count >= 2 or alpha_count >= 3:

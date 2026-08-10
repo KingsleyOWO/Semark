@@ -1323,10 +1323,35 @@ def _first_text_block_id_for_page(document_ir: DocumentIR, page_idx: int) -> str
     return ""
 
 
+_COLON_LABEL_RE = re.compile(r"\b[A-Za-z][A-Za-z0-9 /&().'’,-]{1,45}\s*:")
+_URI_SCHEME_TAIL_RE = re.compile(r"(?:https?|ftps?|doi|urn|isbn|issn)\s*:$", re.IGNORECASE)
+# A fillable label is a short noun phrase ("Date signed:"), not a sentence.
+_MAX_LABEL_WORDS = 3
+
+
+def _colon_label_hits(text: str) -> list[str]:
+    """Colon-terminated phrases that could plausibly be fillable field labels.
+
+    A reference list turns this heuristic against itself: `https:` and `DOI:`
+    are locators, and a colon-terminated citation title («The General Agreement
+    on Trade in Services:») is a sentence. Both are dropped so a report's
+    bibliography stops reading as a form's field labels.
+    """
+    hits: list[str] = []
+    for match in _COLON_LABEL_RE.findall(text):
+        label = match.strip()
+        if _URI_SCHEME_TAIL_RE.search(label):
+            continue
+        if len(label.rstrip(":").split()) > _MAX_LABEL_WORDS:
+            continue
+        hits.append(label)
+    return hits
+
+
 def _form_text_signal_score(rows: list[list[str]]) -> int:
     text = _plain_text(" ".join(" ".join(str(cell or "") for cell in row) for row in rows))
     checkbox_score = text.count("□") + text.count("☐") + text.count("☑")
-    colon_label_score = len(re.findall(r"\b[A-Za-z][A-Za-z0-9 /&().'’,-]{1,45}\s*:", text))
+    colon_label_score = len(_colon_label_hits(text))
     english_hits = _english_form_field_hits(text)
     signature_score = len(re.findall(r"\b(signature|signed|date signed|applicant|payee|taxpayer)\b", text, re.I))
     return checkbox_score * 2 + min(colon_label_score, 12) + len(english_hits) * 2 + min(signature_score, 6)
@@ -1341,7 +1366,10 @@ def is_form_like_document(document_ir: DocumentIR, rows: list[list[str]] | None 
         for row in (rows or _document_table_rows(document_ir))
     )
     text = _plain_text(f"{source_text} {row_text}")
-    form_name_score = len(re.findall(r"申請單|請領單|報支單|出差單|核銷單|請款單|申報單|異動單|增加單|移轉單|報廢單|申請表|登記表|檢核表|授權書|同意書|委託書", text))
+    # 申請單(?!位): 申請單位 is "applicant unit" — a department, written in every
+    # procedural notice — and matching its first three characters made any
+    # document that names a department score a form name.
+    form_name_score = len(re.findall(r"申請單(?!位)|請領單|報支單|出差單|核銷單|請款單|申報單|異動單|增加單|移轉單|報廢單|申請表|登記表|檢核表|授權書|同意書|委託書", text))
     english_form_score = len(
         re.findall(
             r"\b(application|authorization|authorisation|consent|claim|request|reimbursement|transcript|tax return)\b|\bform\b",
@@ -1351,7 +1379,7 @@ def is_form_like_document(document_ir: DocumentIR, rows: list[list[str]] | None 
     )
     field_score = len(re.findall(r"申請人|申請單位|申請日期|姓名|員工編號|事由|起訖|起始地點|到達地點|金額|合計|單位主管|簽名|簽章|領款人|核定", text))
     english_field_score = len(_english_form_field_hits(text))
-    colon_label_score = len(re.findall(r"\b[A-Za-z][A-Za-z0-9 /&().'’,-]{1,45}\s*:", text))
+    colon_label_score = len(_colon_label_hits(text))
     checkbox_score = text.count("□") + text.count("☐") + text.count("☑")
     if looks_like_reference_table(row_text) and form_name_score == 0 and english_form_score == 0 and checkbox_score == 0:
         return False

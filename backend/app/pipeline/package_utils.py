@@ -3,6 +3,7 @@
 import re
 from typing import Any
 
+from app.models.document_ir import coerce_payload_text
 from app.pipeline.semantic.language import normalize_semantic_output_language, page_label
 from app.pipeline.structured_rag import parse_html_table
 
@@ -25,9 +26,7 @@ _LATEX_CHECKBOX_COMPILED = [(re.compile(p, re.IGNORECASE), r) for p, r in LATEX_
 
 def caption_text(value: Any) -> str:
     """Coerce a MinerU caption (str or list of parts) to display text."""
-    if isinstance(value, list):
-        return " ".join(str(x) for x in value if x)
-    return str(value) if value else ""
+    return coerce_payload_text(value)
 
 
 def clean_latex_symbols(text: str) -> str:

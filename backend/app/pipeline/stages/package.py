@@ -55,6 +55,7 @@ from app.pipeline.quality_gate import (
 )
 from app.pipeline.repair_guard import repair_preserves_facts
 from app.pipeline.semantic.language import resolve_semantic_output_language
+from app.pipeline.stages.normalize import is_page_furniture
 from app.pipeline.structured_rag import (
     build_form_documents_rag,
     build_structured_rag,
@@ -64,6 +65,7 @@ from app.pipeline.structured_rag import (
     plan_document,
     write_structured_rag_outputs,
 )
+from app.pipeline.zh_text import fix_mainland_vocab, to_taiwan_traditional
 
 __all__ = [
     "PackageStage",
@@ -80,8 +82,8 @@ def render_vlm_text(value: Any) -> str:
     fields (all_text) carry inbox-region context across items, which
     per-item scrubbing would lose.
     """
-    return _fix_mainland_vocab(
-        _to_taiwan_traditional(scrub_transcribed_privacy(_render_vlm_value(value)))
+    return fix_mainland_vocab(
+        to_taiwan_traditional(scrub_transcribed_privacy(_render_vlm_value(value)))
     )
 
 
@@ -108,106 +110,6 @@ def _render_vlm_value(value: Any) -> str:
 # screenshots captioned as "Synology", a term appearing nowhere in the
 # document text or any figure's OCR).
 _LATIN_TERM_RE = re.compile(r"[A-Za-z][A-Za-z0-9'&._-]{2,}")
-
-
-_OPENCC_CONVERTERS: dict[str, Any] = {}
-
-
-def _get_opencc(profile: str) -> Any:
-    if profile not in _OPENCC_CONVERTERS:
-        try:
-            from opencc import OpenCC
-
-            _OPENCC_CONVERTERS[profile] = OpenCC(profile)
-        except Exception:
-            _OPENCC_CONVERTERS[profile] = None
-    return _OPENCC_CONVERTERS[profile]
-
-
-# VLM prose written in traditional characters still carries mainland
-# vocabulary (圖標/界面/分辨率) — no simplified chars, so the opencc detection
-# gate never sees it. Small, unambiguous pairs only; 界面活性劑 (chemistry)
-# is spared.
-_MAINLAND_VOCAB_FIXES = (
-    (re.compile(r"界面(?!活性)"), "介面"),
-    (re.compile(r"默認"), "預設"),
-    (re.compile(r"圖標"), "圖示"),
-    (re.compile(r"分辨率"), "解析度"),
-    (re.compile(r"視頻"), "影片"),
-    (re.compile(r"軟件"), "軟體"),
-    (re.compile(r"硬盤"), "硬碟"),
-    (re.compile(r"鼠標"), "滑鼠"),
-)
-
-
-def _fix_mainland_vocab(text: str) -> str:
-    if not text or not re.search(r"[一-鿿]", text):
-        return text
-    for pattern, replacement in _MAINLAND_VOCAB_FIXES:
-        text = pattern.sub(replacement, text)
-    return text
-
-
-# opencc rewrites 台→臺, 布→佈, 占→佔, 干→幹, 了→瞭 — but every left-hand form
-# is standard zh-TW (台灣, 新台幣, 公布, 布局, 占比, 干擾, 展示了). Two
-# consequences, both seen live on 2026-08-07: the detector below read ordinary
-# Taiwanese prose as simplified, and once a document did carry a genuinely
-# simplified glyph the converter rewrote these characters throughout.
-# Trade-off: a genuinely simplified 干净/一只 keeps the simplified glyph. The
-# converter only ever runs on mostly-zh-TW text here, where preserving the
-# author's spelling is the safer error.
-_ZH_TW_VARIANT_PAIRS = (("臺", "台"), ("佈", "布"), ("佔", "占"), ("幹", "干"), ("瞭", "了"))
-_ZH_TW_VARIANT_CHARS = frozenset(source for _, source in _ZH_TW_VARIANT_PAIRS)
-
-
-def _normalize_variants_for_detection(text: str) -> str:
-    """Fold the ambiguous pairs together so only genuinely simplified glyphs
-    count as evidence that a conversion is needed."""
-    for converted, source in _ZH_TW_VARIANT_PAIRS:
-        text = text.replace(converted, source)
-    return text
-
-
-def _restore_zh_tw_variants(source: str, converted: str) -> str:
-    """Put the author's own variant choice back after conversion, so a document
-    written with 台灣 keeps 台灣 and one written with 臺灣 keeps 臺灣."""
-    if len(source) != len(converted):
-        return converted
-    return "".join(
-        src if src in _ZH_TW_VARIANT_CHARS else conv
-        for src, conv in zip(source, converted, strict=True)
-    )
-
-
-def _to_taiwan_traditional(text: str) -> str:
-    """Convert VLM output that carries simplified Chinese to zh-TW.
-
-    The local VLM occasionally ruminates in simplified Chinese and mainland
-    terms (界面/默认/分辨率) inside otherwise zh-TW descriptions. Detection
-    first: text that the plain s2t pass leaves unchanged has no simplified
-    content and passes through byte-identical, so genuine zh-TW prose (and
-    English) is never rewritten. The 了/瞭 particle ambiguity is repaired on
-    both sides of the gate — the detector itself trips on it.
-    """
-    if not text or not re.search(r"[一-鿿]", text):
-        return text
-    detector = _get_opencc("s2t")
-    if detector is None:
-        return text
-    if _normalize_variants_for_detection(detector.convert(text)) == _normalize_variants_for_detection(text):
-        return text
-    # s2tw, not s2twp. One stray simplified glyph (税/脱 out of MinerU's text
-    # layer) is enough to trip the gate, and s2twp then applies its phrase
-    # table to the WHOLE document — rewriting correct zh-TW as it goes
-    # (數據→資料, 設備→裝置, 零組件→零元件, 台→臺). s2tw fixes the glyphs and
-    # leaves vocabulary alone; deliberate term localisation stays in the small,
-    # reviewed _MAINLAND_VOCAB_FIXES table above.
-    converter = _get_opencc("s2tw")
-    if converter is None:
-        return text
-    return _restore_zh_tw_variants(text, converter.convert(text))
-
-
 
 
 
@@ -5238,6 +5140,13 @@ class PackageStage:
             page_idx = block.page_idx
 
             if page_idx in excluded_page_indices:
+                continue
+
+            # Running heads, volume lines and folios carry no retrievable
+            # meaning; delivering them put a median of 20 stray lines into
+            # every rag.md and polluted 46% of chunks (measured 2026-08-10).
+            # They stay in the IR for provenance.
+            if is_page_furniture(block):
                 continue
 
             # A figure's non-empty ``structured_content`` marks its page "visually

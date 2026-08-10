@@ -11,6 +11,7 @@ import asyncio
 import json
 import re
 import shutil
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,7 @@ from app.models.document_ir import (
     PageInfo,
     SourceInfo,
 )
+from app.pipeline.zh_text import fix_mainland_vocab, to_taiwan_traditional
 from app.supported_files import SPREADSHEET_NATIVE_EXTENSIONS
 
 # MinerU page furniture types (running headers/footers, page numbers, margin
@@ -62,6 +64,76 @@ def _rejoin_broken_urls(text: str) -> str:
 # DOMAIN\xxx@Host-1」). The text is kept as body content — only the heading
 # level is dropped, so it stays out of every chunk's heading_path.
 _PURE_NUMERIC_HEADING_RE = re.compile(r"[\d\s\-:：./]+")
+
+# A bare folio in the page margin (「21」, 「220」). Anchored full-match only —
+# a year inside body prose must never qualify.
+_PAGE_NUMBER_RE = re.compile(r"\d{1,4}")
+
+# CJK and full-width punctuation: a line break inside this script carries no
+# space, while Latin prose wraps on one.
+_HAN_OR_FULLWIDTH_RE = re.compile(r"[一-鿿぀-ヿ？-ﾟ！-｠]")
+
+
+def _normalize_for_coverage(text: str) -> str:
+    """Whitespace- and escape-insensitive form for duplicate detection.
+
+    MinerU escapes markdown metacharacters in its text layer (``1\\~10月``)
+    while PyMuPDF returns the raw glyphs (``1~10月``). Comparing the two
+    verbatim cost four 4-grams and dropped a genuine duplicate to 0.59 against
+    a 0.60 threshold, so the fragment was re-added as an orphan line.
+    """
+    return re.sub(r"[\s\\]+", "", str(text or ""))
+
+
+# Every payload field that carries authored prose. Captions and footnotes
+# arrive as lists of strings from MinerU; table_body is HTML, and the converter
+# is character-level, so the markup passes through untouched.
+_ZH_TEXT_PAYLOAD_KEYS = (
+    "text",
+    "table_body",
+    "table_caption",
+    "table_footnote",
+    "caption",
+    "footnote",
+    "chart_content",
+)
+
+
+def _convert_payload_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return fix_mainland_vocab(to_taiwan_traditional(value))
+    if isinstance(value, list):
+        return [_convert_payload_value(item) for item in value]
+    return value
+
+
+def _bbox_containment(inner: Sequence[float], outer: Sequence[float]) -> float:
+    """Share of ``inner``'s area that lies inside ``outer`` (same coordinate space)."""
+    if len(inner) < 4 or len(outer) < 4:
+        return 0.0
+    area = max(0.0, inner[2] - inner[0]) * max(0.0, inner[3] - inner[1])
+    if area <= 0:
+        return 0.0
+    width = max(0.0, min(inner[2], outer[2]) - max(inner[0], outer[0]))
+    height = max(0.0, min(inner[3], outer[3]) - max(inner[1], outer[1]))
+    return (width * height) / area
+
+
+def _join_text_lines(left: str, right: str) -> str:
+    """Join two printed lines: CJK wraps without a separator, Latin needs one."""
+    if not left:
+        return right
+    if not right:
+        return left
+    if _HAN_OR_FULLWIDTH_RE.match(left[-1]) or _HAN_OR_FULLWIDTH_RE.match(right[0]):
+        return left + right
+    return f"{left} {right}"
+
+
+def _block_top(block: Block) -> int:
+    """Vertical position of a block on its page, 0 when unknown."""
+    bbox = block.bbox_norm or []
+    return int(bbox[1]) if len(bbox) >= 2 else 0
 _ACCOUNT_NOTIFICATION_RE = re.compile(r"[A-Za-z0-9]\\[A-Za-z0-9]")
 
 
@@ -104,6 +176,25 @@ class NormalizeStage:
     # Text supplement settings
     TEXT_SUPPLEMENT_MIN_LENGTH = 4  # Minimum text length to consider
     TEXT_SUPPLEMENT_COVERAGE_THRESHOLD = 0.3  # Min coverage to consider "covered"
+
+    # How far a supplement may look for the block that already carries it.
+    # One page covers a paragraph running over a page break; wider would let
+    # repeated boilerplate mask a genuine gap.
+    COVERAGE_PAGE_RADIUS = 1
+    COVERAGE_GRAM_RATIO = 0.6  # share of the fragment's 4-grams the block must hold
+    COVERAGE_CONTAINMENT = 0.9  # share of the candidate's box inside an existing block
+
+    # Line merging for PyMuPDF supplements. The extractor hands back one entry
+    # per printed line for these journals, so unmerged supplements arrive as
+    # 17-character fragments instead of paragraphs.
+    LINE_MERGE_X_OVERLAP = 0.6  # share of the narrower line's width that must align
+    LINE_MERGE_GAP_RATIO = 1.2  # vertical gap, as a multiple of the line height
+
+    # Page-furniture detection (bbox_norm is a 0-1000 space)
+    FURNITURE_TOP_BAND = 140  # y1 at or above this is the page head strip
+    FURNITURE_BOTTOM_BAND = 900  # y0 at or below this is the page foot strip
+    FURNITURE_MAX_CHARS = 40  # a running head is a label, never a paragraph
+    FURNITURE_MIN_PAGES = 2  # must recur, so one-off footers (DOI) survive
 
     def __init__(self, config: PipelineConfig | None = None):
         self.config = config or PipelineConfig()
@@ -166,6 +257,15 @@ class NormalizeStage:
                     content_list_path=content_list_path,
                     source_info=source_info,
                 )
+
+            # Tag the running heads/feet MinerU typed as ordinary text, so the
+            # delivery surfaces can drop them the same way they drop the
+            # furniture MinerU does label.
+            blocks = self._tag_layout_furniture(blocks, page_count=len(page_indices))
+
+            # Bring MinerU's OCR glyphs to zh-TW. Runs last, so the duplicate
+            # detection above compared the parser's text with itself.
+            blocks = self._normalize_zh_text(blocks)
 
             # Build page info
             pages = [
@@ -546,8 +646,11 @@ class NormalizeStage:
                 if page_width <= 0 or page_height <= 0:
                     continue
 
-                # Extract text blocks from PDF
-                pdf_text_blocks = self._extract_pdf_text_blocks(page)
+                # Extract text blocks from PDF, rebuilding paragraphs from the
+                # per-line entries the extractor returns.
+                pdf_text_blocks = self._merge_adjacent_pdf_lines(
+                    self._extract_pdf_text_blocks(page), page_height=page_height
+                )
 
                 # Find uncovered text blocks
                 for pdf_block in pdf_text_blocks:
@@ -558,22 +661,23 @@ class NormalizeStage:
                     if len(text.strip()) < self.TEXT_SUPPLEMENT_MIN_LENGTH:
                         continue
 
-                    # Skip if already covered by existing blocks (text similarity)
-                    if self._is_covered_by_blocks(bbox, text, page_blocks):
-                        continue
-
-                    # Skip if text appears inside a TABLE block (avoid extracting table content as text)
-                    if self._is_inside_table_content(text, page_blocks):
-                        continue
-
                     # Convert PyMuPDF point coords to MinerU's 0-1000 space so
-                    # sorting and enrich crops share one coordinate system
+                    # sorting, coverage geometry and enrich crops share one
+                    # coordinate system
                     bbox_norm = [
                         max(0, min(1000, int(bbox[0] * 1000 / page_width))),
                         max(0, min(1000, int(bbox[1] * 1000 / page_height))),
                         max(0, min(1000, int(bbox[2] * 1000 / page_width))),
                         max(0, min(1000, int(bbox[3] * 1000 / page_height))),
                     ]
+
+                    # Skip if already covered by existing blocks (text or geometry)
+                    if self._is_covered_by_blocks(bbox_norm, text, blocks, page_idx):
+                        continue
+
+                    # Skip if text appears inside a TABLE block (avoid extracting table content as text)
+                    if self._is_inside_table_content(text, page_blocks):
+                        continue
 
                     # Create supplemented block
                     block = Block(
@@ -598,17 +702,136 @@ class NormalizeStage:
             # Remove cross-page duplicates (repeated headers/footers)
             supplemented = self._remove_cross_page_duplicates(supplemented)
 
-            # Merge and re-sort all blocks
-            all_blocks = blocks + supplemented
-            all_blocks.sort(key=lambda b: (b.page_idx, b.bbox_norm[1] if b.bbox_norm else 0))
-
-            # Update reading_order based on new sort
-            for i, block in enumerate(all_blocks):
-                block.reading_order = i
+            all_blocks = self._merge_supplements_in_order(blocks, supplemented)
 
             return all_blocks, len(supplemented)
 
         return blocks, 0
+
+    def _merge_supplements_in_order(
+        self,
+        blocks: list[Block],
+        supplemented: list[Block],
+    ) -> list[Block]:
+        """Place supplements on their page without disturbing MinerU's order.
+
+        The previous merge re-sorted *every* block by vertical position alone.
+        In a two-column layout that interleaves the columns: live in
+        ``a273c9e754b4a257``, 「地位。然而…」 (right column, y=597) was
+        delivered ahead of the sentence it continues, 「回顧2025年…」 (left
+        column, y=598), and section bodies were shuffled across headings.
+        MinerU already threads the columns correctly, so its order is
+        authoritative; each supplement is simply attached after the last block
+        at or above it on the same page.
+        """
+        pending: dict[int, list[Block]] = {}
+        for block in supplemented:
+            pending.setdefault(block.page_idx, []).append(block)
+        for page_supplements in pending.values():
+            page_supplements.sort(key=_block_top)
+
+        blocks_by_page: dict[int, list[Block]] = {}
+        for block in blocks:
+            blocks_by_page.setdefault(block.page_idx, []).append(block)
+
+        merged: list[Block] = []
+        for page_idx in sorted(set(blocks_by_page) | set(pending)):
+            page_existing = blocks_by_page.get(page_idx, [])
+            page_supplements = pending.get(page_idx, [])
+            if not page_existing:
+                merged.extend(page_supplements)
+                continue
+
+            leading: list[Block] = []
+            attached: dict[int, list[Block]] = {}
+            for supplement in page_supplements:
+                anchor: int | None = None
+                for idx, existing in enumerate(page_existing):
+                    if _block_top(existing) <= _block_top(supplement):
+                        anchor = idx
+                if anchor is None:
+                    leading.append(supplement)
+                else:
+                    attached.setdefault(anchor, []).append(supplement)
+
+            merged.extend(leading)
+            for idx, existing in enumerate(page_existing):
+                merged.append(existing)
+                merged.extend(attached.get(idx, []))
+
+        for order, block in enumerate(merged):
+            block.reading_order = order
+        return merged
+
+    def _normalize_zh_text(self, blocks: list[Block]) -> list[Block]:
+        """Bring MinerU's text layer to zh-TW.
+
+        The converter used to be reachable only through ``render_vlm_text``,
+        so it saw the model's prose and never the parser's. MinerU's OCR
+        misreads individual glyphs (稅→税, 脫→脱, 質→质, 氫→氢) and every one
+        of them went out untouched: 849 across 88 of the store's 100 documents
+        on 2026-08-10.
+
+        Runs after supplementing, so the duplicate detection upstream compares
+        like with like, and over every text-bearing payload field rather than
+        ``text`` alone — table cells and captions carry the same misreads.
+        """
+        for block in blocks:
+            for key in _ZH_TEXT_PAYLOAD_KEYS:
+                if key in block.payload:
+                    block.payload[key] = _convert_payload_value(block.payload[key])
+        return blocks
+
+    def _in_margin_band(self, block: Block) -> bool:
+        """True when the block sits in the page's head or foot strip."""
+        bbox = block.bbox_norm or []
+        if len(bbox) < 4:
+            return False
+        return bbox[3] <= self.FURNITURE_TOP_BAND or bbox[1] >= self.FURNITURE_BOTTOM_BAND
+
+    def _tag_layout_furniture(self, blocks: list[Block], page_count: int) -> list[Block]:
+        """Tag running heads/feet and page numbers MinerU typed as plain text.
+
+        MinerU only labels a fraction of the furniture (``header``/``footer``/
+        ``page_number``); a journal's running head and volume line usually
+        arrive as ordinary ``text``. Live evidence (2026-08-10, 100-document
+        store): 1,826 such lines reached rag.md as body paragraphs and 851 of
+        1,843 chunks contained at least one.
+
+        Two signals, both requiring the block to sit in a margin band, so the
+        opening page's real title — the same string, but in the body — is never
+        touched:
+
+        * the same short string recurs in the margin of several pages;
+        * bare numbers occupy the margin on several pages (values differ, the
+          position is what repeats).
+        """
+        if page_count < self.FURNITURE_MIN_PAGES:
+            return blocks
+
+        candidates: list[tuple[Block, str]] = []
+        for block in blocks:
+            if block.type != BlockType.TEXT or is_page_furniture(block):
+                continue
+            if not self._in_margin_band(block):
+                continue
+            compact = re.sub(r"\s+", "", str(block.payload.get("text") or ""))
+            if compact and len(compact) <= self.FURNITURE_MAX_CHARS:
+                candidates.append((block, compact))
+
+        pages_by_text: dict[str, set[int]] = {}
+        numbered_pages: set[int] = set()
+        for block, compact in candidates:
+            pages_by_text.setdefault(compact, set()).add(block.page_idx)
+            if _PAGE_NUMBER_RE.fullmatch(compact):
+                numbered_pages.add(block.page_idx)
+
+        numbers_repeat = len(numbered_pages) >= self.FURNITURE_MIN_PAGES
+        for block, compact in candidates:
+            repeats = len(pages_by_text[compact]) >= self.FURNITURE_MIN_PAGES
+            if repeats or (numbers_repeat and _PAGE_NUMBER_RE.fullmatch(compact)):
+                block.payload["origin"] = "page_furniture"
+        return blocks
 
     def _remove_cross_page_duplicates(self, blocks: list[Block]) -> list[Block]:
         """
@@ -704,6 +927,72 @@ class NormalizeStage:
 
         return result
 
+    def _merge_adjacent_pdf_lines(
+        self,
+        pdf_blocks: list[dict[str, Any]],
+        page_height: float | None = None,
+    ) -> list[dict[str, Any]]:
+        """Rebuild paragraphs from the per-line entries PyMuPDF returns.
+
+        ``get_text("dict")`` groups by the PDF's own text blocks, which for
+        these journals is one entry per printed line. Emitting them unmerged is
+        what put 「望當前國際淨零碳排趨勢，各主要國家」 into rag.md as a
+        paragraph of its own. Lines join when they share a column and sit a
+        single line-height apart; a column change or a paragraph gap ends the
+        run.
+        """
+        ordered = sorted(
+            (b for b in pdf_blocks if str(b.get("text") or "").strip()),
+            key=lambda b: (round(float(b["bbox"][1]), 1), float(b["bbox"][0])),
+        )
+        merged: list[dict[str, Any]] = []
+        for candidate in ordered:
+            box = [float(v) for v in candidate["bbox"]]
+            if (
+                merged
+                and not self._in_page_margin(merged[-1]["bbox"], page_height)
+                and not self._in_page_margin(box, page_height)
+                and self._lines_are_continuous(merged[-1]["bbox"], box)
+            ):
+                previous = merged[-1]
+                previous["text"] = _join_text_lines(
+                    previous["text"].strip(), str(candidate["text"]).strip()
+                )
+                previous["bbox"] = [
+                    min(previous["bbox"][0], box[0]),
+                    min(previous["bbox"][1], box[1]),
+                    max(previous["bbox"][2], box[2]),
+                    max(previous["bbox"][3], box[3]),
+                ]
+                continue
+            merged.append({"text": str(candidate["text"]).strip(), "bbox": box})
+        return merged
+
+    def _in_page_margin(self, bbox: Sequence[float], page_height: float | None) -> bool:
+        """Whether a PyMuPDF line sits in the page head or foot strip.
+
+        Running heads, folios and the title beneath them are vertically close
+        and share a column, so pure geometry merges them into one entry — which
+        then cannot be dropped as furniture because half of it is content
+        (「示範5-6再生能源憑證制度之發展趨勢」). Furniture is never a
+        paragraph continuation, so the margins simply do not participate.
+        """
+        if not page_height or page_height <= 0 or len(bbox) < 4:
+            return False
+        top = self.FURNITURE_TOP_BAND / 1000 * page_height
+        bottom = self.FURNITURE_BOTTOM_BAND / 1000 * page_height
+        return bbox[3] <= top or bbox[1] >= bottom
+
+    def _lines_are_continuous(self, previous: list[float], current: list[float]) -> bool:
+        """Whether ``current`` continues the same paragraph as ``previous``."""
+        overlap = max(0.0, min(previous[2], current[2]) - max(previous[0], current[0]))
+        narrower = min(previous[2] - previous[0], current[2] - current[0])
+        if narrower <= 0 or overlap / narrower < self.LINE_MERGE_X_OVERLAP:
+            return False  # different column
+        line_height = max(current[3] - current[1], 1.0)
+        gap = current[1] - previous[3]
+        return gap <= line_height * self.LINE_MERGE_GAP_RATIO
+
     def _is_inside_table_content(self, text: str, blocks: list[Block]) -> bool:
         """
         Check if text appears inside a TABLE block's content.
@@ -739,9 +1028,10 @@ class NormalizeStage:
 
     def _is_covered_by_blocks(
         self,
-        target_bbox: list[float],
+        target_bbox: Sequence[float],
         target_text: str,
         blocks: list[Block],
+        page_idx: int,
     ) -> bool:
         """
         Check if target text is already covered by existing blocks.
@@ -749,59 +1039,58 @@ class NormalizeStage:
         Uses text content matching only - bbox overlap is unreliable
         due to MinerU bbox inaccuracy issues.
 
+        Scoped to the page and its immediate neighbours: MinerU merges a
+        paragraph that runs over a page break into a single block anchored on
+        the *starting* page, and PyMuPDF then re-reads the tail on the next
+        page as missing text. Comparing only within the page left those tails
+        in as orphan fragments (live: 2,617 across the 100-document store).
+        The radius stays at one page so repeated boilerplate elsewhere in the
+        document can never mask a genuine gap.
+
         Returns True if covered (should skip).
         """
-        target_text_clean = (target_text or "").strip().replace(" ", "").replace("\n", "")
+        target_text_clean = _normalize_for_coverage(target_text)
         if not target_text_clean or len(target_text_clean) < 4:
             return True  # Empty or too short text, skip
 
-        # Check if text content already exists in ANY block
         for block in blocks:
+            if abs(block.page_idx - page_idx) > self.COVERAGE_PAGE_RADIUS:
+                continue
+            # Geometry settles the cases text cannot: PyMuPDF reads the
+            # vertical running head 「示範政經瞭望」 in column order as
+            # 「示政瞭範經望」, which matches no string MinerU produced while
+            # sitting wholly inside the box MinerU already transcribed.
+            # Containment, not mere overlap — adjacent boxes must not qualify.
+            if block.page_idx == page_idx and _bbox_containment(
+                target_bbox, block.bbox_norm or []
+            ) >= self.COVERAGE_CONTAINMENT:
+                return True
             block_text = block.get_text() or ""
             if isinstance(block_text, list):
                 # IMAGE captions from MinerU are lists of strings
                 block_text = "\n".join(str(part) for part in block_text)
-            block_text = block_text.strip().replace(" ", "").replace("\n", "")
-            if self._texts_overlap(target_text_clean, block_text):
+            if self._block_covers_fragment(target_text_clean, _normalize_for_coverage(block_text)):
                 return True
 
         return False
 
-    def _texts_overlap(self, text1: str, text2: str) -> bool:
-        """
-        Check if two texts have significant overlap.
+    def _block_covers_fragment(self, fragment: str, block_text: str) -> bool:
+        """Whether ``block_text`` already carries everything in ``fragment``.
 
-        Returns True if:
-        - One is substring of another
-        - They share >60% common content
+        Directional on purpose. The previous helper asked whether *either*
+        string contained the other, so a one-character folio block ("5")
+        counted as covering any fragment containing a 5 — suppressing real
+        supplements for the wrong reason.
         """
-        if not text1 or not text2:
+        if not fragment or not block_text:
             return False
-
-        # Direct substring check
-        if text1 in text2 or text2 in text1:
+        if fragment in block_text:
             return True
-
-        # Check common content ratio
-        shorter = text1 if len(text1) <= len(text2) else text2
-        longer = text2 if len(text1) <= len(text2) else text1
-
-        # For short texts, require exact match or substring
-        if len(shorter) < 10:
-            return shorter in longer
-
-        # For longer texts, check if 60% of shorter text appears in longer
-        match_count = 0
-        for i in range(len(shorter) - 3):
-            if shorter[i:i+4] in longer:
-                match_count += 1
-
-        if len(shorter) > 3:
-            match_ratio = match_count / (len(shorter) - 3)
-            if match_ratio > 0.6:
-                return True
-
-        return False
+        if len(fragment) < 10:
+            return False  # too short to judge by overlap; containment only
+        grams = [fragment[i:i + 4] for i in range(len(fragment) - 3)]
+        hits = sum(1 for gram in grams if gram in block_text)
+        return hits / len(grams) > self.COVERAGE_GRAM_RATIO
 
     async def _render_and_enrich_pages(
         self,

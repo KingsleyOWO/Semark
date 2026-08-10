@@ -25,6 +25,7 @@ from app.pipeline.semantic.language import (
     resolve_semantic_output_language,
 )
 from app.pipeline.semantic.normalizer import is_version_text, split_merged_field_label
+from app.pipeline.stages.normalize import is_page_furniture
 from app.pipeline.structured_rag import is_form_like_document, looks_like_reference_table
 
 _QUALITY_GATE_MESSAGES_EN = {
@@ -1029,6 +1030,10 @@ def _check_authored_text_survival(
     missing: list[str] = []
     for block in document_ir.blocks:
         if block.type != BlockType.TEXT:
+            continue
+        # Page furniture is dropped from every delivery surface on purpose;
+        # counting it as authored prose would read the fix as a silent drop.
+        if is_page_furniture(block):
             continue
         text = str(block.payload.get("text", "") or "").strip()
         normalized = re.sub(r"\s+", "", text)

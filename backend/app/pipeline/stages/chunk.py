@@ -16,6 +16,7 @@ from app.config import PipelineConfig
 from app.models.document_ir import Block, BlockType, DocumentIR
 from app.pipeline.delivery import atomic_write_jsonl
 from app.pipeline.privacy import scrub_transcribed_privacy, set_privacy_scrub_enabled
+from app.pipeline.stages.normalize import is_page_furniture
 
 # Sections estimated below this many tokens merge with their neighbours so
 # retrieval never indexes near-empty chunks.
@@ -296,8 +297,13 @@ class ChunkStage:
         chunks: list[Chunk] = []
         chunk_idx = 0
 
+        # Running heads, volume lines and folios are provenance, not content:
+        # keeping them put page furniture into 46% of the store's chunks
+        # (measured 2026-08-10). Mirrors the rag.md render.
+        body_blocks = [block for block in document_ir.blocks if not is_page_furniture(block)]
+
         # Group blocks by sections (split at headings)
-        sections = self._build_sections(document_ir.blocks)
+        sections = self._build_sections(body_blocks)
         sections = self._merge_small_sections(sections, max_tokens)
 
         for section in sections:

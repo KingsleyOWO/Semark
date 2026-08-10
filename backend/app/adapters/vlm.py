@@ -27,11 +27,19 @@ from pathlib import Path
 from typing import Any
 
 from openai import AsyncOpenAI
+from PIL import Image
 from pydantic import BaseModel, Field, ValidationError
 
 from app.config import VLMApiMode, VLMConfig, VLMImageMode
 from app.pipeline.semantic.language import prompt_form_sections, prompt_language_instruction
 from app.pipeline.semantic.normalizer import fields_to_dicts, normalize_fields
+
+# qwen3-vl's image processor rejects any side that does not exceed its patch
+# factor of 32 px — the ollama runner panics in SmartResize and drops the
+# connection, so the enrichment is lost rather than degraded. MinerU happily
+# extracts crops that small (live: 32x31, 34x31, 37x31), so we screen them out
+# before they reach the model; nothing describable survives at that size anyway.
+VLM_MIN_IMAGE_SIDE = 32
 
 # ===================== Pydantic Schema Models =====================
 
@@ -1066,14 +1074,30 @@ class VLMAdapter:
 
             # Image 1: Main crop (primary subject)
             if image_path is not None:
+                # Sending an undersized crop kills the model runner mid-request;
+                # describing the block without it would only invite a made-up
+                # caption, so the enrichment is dropped instead.
+                undersized = self._undersized_image_reason(image_path)
+                if undersized:
+                    return EnrichmentOutput(
+                        success=False,
+                        kind=kind,
+                        error=f"Skipped: {undersized}",
+                        duration_seconds=time.time() - start_time,
+                    )
                 image_url = self._build_image_url(image_path, doc_id, run_id)
                 content.append({
                     "type": "image_url",
                     "image_url": {"url": image_url, "detail": "high"},
                 })
 
-            # Image 2: Page thumbnail (context) - optional
-            if page_thumbnail_path and page_thumbnail_path.exists():
+            # Image 2: Page thumbnail (context) - optional. Dropping an
+            # undersized thumbnail costs context, not the enrichment itself.
+            if (
+                page_thumbnail_path
+                and page_thumbnail_path.exists()
+                and not self._image_is_too_small(page_thumbnail_path)
+            ):
                 thumbnail_url = self._build_image_url(page_thumbnail_path, doc_id, run_id)
                 content.append({
                     "type": "image_url",
@@ -1195,6 +1219,32 @@ class VLMAdapter:
                 error=str(e),
                 duration_seconds=time.time() - start_time,
             )
+
+    def _image_dimensions(self, image_path: Path) -> tuple[int, int] | None:
+        """Read (width, height), or None when the file cannot be identified."""
+        try:
+            with Image.open(image_path) as image:
+                return image.size
+        except (OSError, ValueError):
+            return None
+
+    def _undersized_image_reason(self, image_path: Path) -> str | None:
+        """Reason this image must not be sent, or None when it is safe.
+
+        Unreadable files return None on purpose: we only divert what we can
+        prove is undersized, so a corrupt crop keeps its existing failure path
+        instead of being reclassified as a size problem.
+        """
+        size = self._image_dimensions(image_path)
+        if size is None or min(size) >= VLM_MIN_IMAGE_SIDE:
+            return None
+        return (
+            f"image {size[0]}x{size[1]} has a side below the {VLM_MIN_IMAGE_SIDE}px "
+            "minimum the vision model's image processor accepts"
+        )
+
+    def _image_is_too_small(self, image_path: Path) -> bool:
+        return self._undersized_image_reason(image_path) is not None
 
     def _build_image_url(
         self,

@@ -693,6 +693,15 @@ class ProbeResult:
         }
 
 
+def _model_names_match(configured: str, served: str) -> bool:
+    """Ollama resolves a bare name to its ``:latest`` tag, so ``llama3`` and
+    ``llama3:latest`` name the same model. No other tag is implicit — 7b and
+    70b stay distinct."""
+    if configured == served:
+        return True
+    return configured.removesuffix(":latest") == served.removesuffix(":latest")
+
+
 class VLMAdapter:
     """
     VLM adapter using OpenAI-compatible API.
@@ -1786,14 +1795,24 @@ class VLMAdapter:
         return text
 
     async def check_available(self) -> tuple[bool, str]:
-        """Check if VLM endpoint is available."""
+        """Whether enrichment can actually run against this endpoint.
+
+        A reachable endpoint that does not serve the configured model is *not*
+        available. enrich.py skips the stage on False, which stops once with a
+        reason a human can act on; returning True let a typo'd or unpulled
+        model fail every request instead.
+
+        An endpoint that enumerates no models cannot answer the question, so it
+        keeps the benefit of the doubt — unknown is not the same as missing.
+        """
         probe = await self.probe_capabilities()
-        if probe.available:
-            if probe.model_found:
-                return True, f"Model {self.config.model} available (vision: {probe.supports_vision})"
-            else:
-                return True, f"Connected, but model {self.config.model} not in list: {probe.models[:5]}"
-        return False, probe.error or "Unknown error"
+        if not probe.available:
+            return False, probe.error or "Unknown error"
+        if probe.model_found:
+            return True, f"Model {self.config.model} available (vision: {probe.supports_vision})"
+        if not probe.models:
+            return True, f"Connected; endpoint lists no models, assuming {self.config.model} is served"
+        return False, f"Model {self.config.model} not served by the endpoint: {probe.models[:5]}"
 
     async def probe_capabilities(self, force: bool = False) -> ProbeResult:
         """
@@ -1815,7 +1834,7 @@ class VLMAdapter:
             models = await self.client.models.list()
             model_ids = [m.id for m in models.data]
 
-            model_found = self.config.model in model_ids
+            model_found = any(_model_names_match(self.config.model, name) for name in model_ids)
 
             # Check vision support (Ollama specific)
             supports_vision = await self._check_vision_support()

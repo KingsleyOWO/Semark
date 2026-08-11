@@ -8,6 +8,7 @@ Responsibilities:
 """
 
 import asyncio
+import difflib
 import json
 import re
 import shutil
@@ -33,6 +34,8 @@ from app.models.document_ir import (
     PageInfo,
     SourceInfo,
 )
+from app.pipeline.corpus_rules import DEFAULT_RULESET_PATH, CorpusRules
+from app.pipeline.corpus_rules import get_rules as get_corpus_rules
 from app.pipeline.zh_text import fix_mainland_vocab, to_taiwan_traditional
 from app.supported_files import SPREADSHEET_NATIVE_EXTENSIONS
 
@@ -72,6 +75,95 @@ _PAGE_NUMBER_RE = re.compile(r"\d{1,4}")
 # CJK and full-width punctuation: a line break inside this script carries no
 # space, while Latin prose wraps on one.
 _HAN_OR_FULLWIDTH_RE = re.compile(r"[一-鿿぀-ヿ？-ﾟ！-｠]")
+
+# Han only. Used to tell an authored fragment from logo/watermark glyphs that
+# the OCR swept into a title box; these journals write titles in Chinese, so a
+# purely Latin/numeric fragment the running head omits is page decoration.
+_HAN_RE = re.compile(r"[㐀-䶿一-鿿豈-﫿]")
+
+# A space the OCR invented between two Han characters. Advert copy is set in
+# small display type and comes back shredded (live: 「本 書分別從政策面」,
+# 「本 書 引1 別從政 策 面」), so the advert patterns are matched against a
+# view with those gaps closed. Only Han-Han gaps close, so Latin words
+# ("TAIWAN HYDROGEN") keep their real spacing.
+_INTER_HAN_SPACE_RE = re.compile(r"(?<=[㐀-䶿一-鿿豈-﫿])\s+(?=[㐀-䶿一-鿿豈-﫿])")
+
+_PROMOTIONAL_INSERT_MARKER = "promotional_insert_patterns"
+
+
+def _compile_patterns(sources: Sequence[str]) -> tuple[re.Pattern[str], ...]:
+    compiled: list[re.Pattern[str]] = []
+    for source in sources:
+        try:
+            compiled.append(re.compile(str(source)))
+        except re.error:
+            continue
+    return tuple(compiled)
+
+
+_promotional_insert_cache: tuple[tuple[str, ...], tuple[re.Pattern[str], ...]] | None = None
+_bundled_promotional_insert_sources: tuple[str, ...] | None = None
+
+
+def _bundled_promotional_insert_patterns() -> tuple[str, ...]:
+    global _bundled_promotional_insert_sources
+    if _bundled_promotional_insert_sources is None:
+        bundled = CorpusRules.from_dict(
+            json.loads(DEFAULT_RULESET_PATH.read_text(encoding="utf-8"))
+        )
+        _bundled_promotional_insert_sources = tuple(
+            bundled.marker_list(_PROMOTIONAL_INSERT_MARKER)
+        )
+    return _bundled_promotional_insert_sources
+
+
+def _promotional_insert_patterns() -> tuple[re.Pattern[str], ...]:
+    """Advert signal regexes, one per *independent* signal, from the ruleset.
+
+    The rules are data (``document_markers.promotional_insert_patterns``), not
+    code, so a different publication can retune them without a release. Two
+    of them must fire before a column is dropped, which is why each entry is
+    one semantic family — a hotline and an online-order line are separate
+    entries because a page carrying both is unambiguously selling something.
+
+    A corpus ruleset that predates the key falls back to the bundled default:
+    ``rulesets/local.json`` replaces the whole ruleset rather than layering on
+    it, so keying off "absent" instead of "empty" is what stops the fix from
+    silently becoming a no-op on the corpus it was written for. An explicit
+    ``[]`` still turns the pass off.
+    """
+    global _promotional_insert_cache
+    markers = get_corpus_rules().document_markers
+    if _PROMOTIONAL_INSERT_MARKER in markers:
+        sources = tuple(markers[_PROMOTIONAL_INSERT_MARKER])
+    else:
+        sources = _bundled_promotional_insert_patterns()
+    if _promotional_insert_cache is None or _promotional_insert_cache[0] != sources:
+        _promotional_insert_cache = (sources, _compile_patterns(sources))
+    return _promotional_insert_cache[1]
+
+
+def _compact_with_offsets(raw: str) -> tuple[str, list[int]]:
+    """Whitespace-free view of ``raw`` plus each kept character's original offset.
+
+    Comparison has to ignore whitespace — the vertical column break arrives as
+    a stray space (「我國頻譜 使用現況」) — while the repaired string must be
+    emitted from the *original* text so real spacing (「Think Global」, the gap
+    after a 眉題) survives.
+    """
+    chars: list[str] = []
+    offsets: list[int] = []
+    for offset, char in enumerate(raw):
+        if not char.isspace():
+            chars.append(char)
+            offsets.append(offset)
+    return "".join(chars), offsets
+
+
+def _matched_char_count(left: str, right: str) -> int:
+    """Characters the two strings agree on, in order."""
+    matcher = difflib.SequenceMatcher(None, left, right, autojunk=False)
+    return sum(block.size for block in matcher.get_matching_blocks())
 
 
 def _normalize_for_coverage(text: str) -> str:
@@ -151,6 +243,21 @@ def is_page_furniture(block: Block) -> bool:
     return block.payload.get("origin") == "page_furniture"
 
 
+def is_promotional_insert(block: Block) -> bool:
+    """Return True when a block belongs to a publisher's bound-in advert."""
+    return block.payload.get("origin") == "promotional_insert"
+
+
+def is_non_content(block: Block) -> bool:
+    """True for every block the delivery surfaces drop as non-authored matter.
+
+    One predicate so a new origin cannot be honoured by rag.md but forgotten
+    by the chunker or — the expensive mistake — by the completeness gate,
+    which would then read the deliberate drop as silent data loss.
+    """
+    return is_page_furniture(block) or is_promotional_insert(block)
+
+
 @dataclass
 class NormalizeStageResult:
     """Result from normalize stage."""
@@ -195,6 +302,43 @@ class NormalizeStage:
     FURNITURE_BOTTOM_BAND = 900  # y0 at or below this is the page foot strip
     FURNITURE_MAX_CHARS = 40  # a running head is a label, never a paragraph
     FURNITURE_MIN_PAGES = 2  # must recur, so one-off footers (DOI) survive
+
+    # Column split for the bound-in-advert pass. Derived per document from the
+    # vertical strip fewest blocks cross (the printed gutter), never from a
+    # constant: x≈520 is what *this* corpus happens to measure, and a journal
+    # with a different page grid would have every column call inverted by a
+    # hardcoded value. Live over 167 documents the derived split lands in
+    # 480-544, i.e. it reproduces the measured gutter from the geometry alone.
+    COLUMN_SPLIT_SEARCH_LO = 0.25  # ignore the outer quarters: no gutter there
+    COLUMN_SPLIT_SEARCH_HI = 0.75
+    COLUMN_SPLIT_STEP = 5  # 0-1000 space, so 0.5% of the page width
+    COLUMN_SPLIT_MIN_SPAN = 200  # a narrower content strip has no two columns
+    COLUMN_SPLIT_MIN_BOXES = 8  # too few boxes and the "gutter" is just a gap
+
+    # Bound-in advert detection.
+    PROMO_MIN_BLOCKS = 4  # 3 blocks is a figure with a caption, not an advert
+    PROMO_MIN_SIGNALS = 2  # one commerce word can occur in prose; two cannot
+
+    # Rebuilding an OCR-damaged heading from its running head.
+    # Over the 167-document store the "share of the shorter string the two
+    # agree on" score is bimodal with nothing at all in between: every genuine
+    # title/running-head pair scores 0.909-1.0, every coincidental one (the
+    # journal name, a DOI, a folio) scores 0.5 or less. 0.75 sits in the empty
+    # band, so the threshold is not tuned to either tail.
+    TITLE_REPAIR_MIN_CONTAINMENT = 0.75
+    # Two characters agreeing is coincidence, not a title: 「20」 in the margin
+    # scored a perfect containment against a heading that contained a 2050.
+    TITLE_REPAIR_MIN_MATCH_CHARS = 6
+    # Context around a disagreement when asking the body which spelling it uses.
+    # One character each side is enough to make 「淨零」/「浮零」 decisive while
+    # still being short enough to actually occur in the prose.
+    TITLE_REPAIR_CONTEXT_CHARS = 1
+    # A disagreement at the very start or end of a title is ambiguous: it is
+    # either a misread glyph (live: a title opening on 「至球」 where the head
+    # opens on 「全球」) or two different pieces of text (a 眉題 against a
+    # series label). A misread is a character or two; anything longer is
+    # treated as authored text and left with the heading.
+    TITLE_REPAIR_BOUNDARY_EDIT_CHARS = 3
 
     def __init__(self, config: PipelineConfig | None = None):
         self.config = config or PipelineConfig()
@@ -263,9 +407,25 @@ class NormalizeStage:
             # furniture MinerU does label.
             blocks = self._tag_layout_furniture(blocks, page_count=len(page_indices))
 
-            # Bring MinerU's OCR glyphs to zh-TW. Runs last, so the duplicate
-            # detection above compared the parser's text with itself.
+            # Now that the running heads are identified, use them to repair the
+            # heading the vertical-title OCR damaged. Must follow the tagging
+            # (it looks the heads up by tag) and precede the zh-TW pass, so
+            # whatever the head contributes is normalized like everything else.
+            blocks = self._repair_headings_from_running_heads(blocks)
+
+            # Bring MinerU's OCR glyphs to zh-TW. Runs after every pass that
+            # compares text with text, so the duplicate detection above
+            # compared the parser's output with itself.
             blocks = self._normalize_zh_text(blocks)
+
+            # Tag the publisher's advert bound into the last page's second
+            # column. Deliberately *after* the zh-TW pass: its signals are
+            # written in zh-TW and MinerU's OCR emits mainland glyphs
+            # sporadically (税/质/氢 — 849 across 88 documents on 2026-08-10),
+            # so matching earlier would miss the ones it mangled. It must also
+            # follow the heading repair, which looks running heads up by tag
+            # and would lose any head this pass re-tagged.
+            blocks = self._tag_promotional_inserts(blocks)
 
             # Build page info
             pages = [
@@ -831,6 +991,364 @@ class NormalizeStage:
             repeats = len(pages_by_text[compact]) >= self.FURNITURE_MIN_PAGES
             if repeats or (numbers_repeat and _PAGE_NUMBER_RE.fullmatch(compact)):
                 block.payload["origin"] = "page_furniture"
+        return blocks
+
+    def _repair_headings_from_running_heads(self, blocks: list[Block]) -> list[Block]:
+        """Rebuild a heading the vertical-title OCR damaged, using the running head.
+
+        These journals set the cover title *vertically*. MinerU reads a
+        vertical column glyph by glyph and drops or substitutes characters —
+        live (2026-08-10, 167-document store): 「AI」 came back as 「A」, 「6G」
+        as 「G」, 「全球」 as 「至球」, 「戰略」 as 「戦略」, enumeration commas
+        vanished, and lettering from the cover logo was swept into the box. The
+        block carries ``text_level=1``, so the damaged string becomes the
+        document's H1 and reaches every delivery surface.
+
+        The same title is printed horizontally as a running head on the inner
+        pages, comes from the PDF's text layer, and is character-perfect — but
+        ``_tag_layout_furniture`` (which must run first) marks it
+        ``origin="page_furniture"`` and rag.md, the chunker and the
+        completeness gate all drop it. So the corpus kept the broken spelling
+        and discarded the clean one in 49 of 167 documents.
+
+        The running head is therefore the character-level authority. What it is
+        *not* is an authority on which parts of the title exist, and blindly
+        adopting it loses or invents text, so four guards apply:
+
+        * a heading some running head repeats verbatim (whitespace aside) is
+          never rewritten — 71 documents are already correct and must stay
+          byte-identical;
+        * material only the heading carries *in front* of the shared core is
+          kept: that is the 眉題, a four-to-ten character kicker the running
+          head routinely omits;
+        * material only the running head carries is never adopted — it prefixes
+          series labels (「【…篇】系列N-N」) and appends subtitles the cover
+          does not print;
+        * where the two disagree character for character the document's own
+          body prose breaks the tie, because the running head is not always the
+          right one: live, every head in one document read 「淨零」 as
+          「浮零」 while the cover was correct.
+
+        Trailing material only the heading carries is dropped unless it holds
+        Han: in this corpus that tail is always logo lettering the running head
+        omits, while a leading Latin label (a technology generation, a standard
+        name) is authored text and is kept regardless.
+        """
+        heads: dict[str, dict[str, Any]] = {}
+        for block in blocks:
+            if block.type != BlockType.TEXT or not is_page_furniture(block):
+                continue
+            raw = str(block.payload.get("text") or "")
+            compact = re.sub(r"\s+", "", raw)
+            if len(compact) < self.TITLE_REPAIR_MIN_MATCH_CHARS:
+                continue
+            entry = heads.setdefault(compact, {"text": raw, "pages": set()})
+            entry["pages"].add(block.page_idx)
+        if not heads:
+            return blocks
+
+        headings = [
+            block
+            for block in blocks
+            if block.type == BlockType.TEXT
+            and block.payload.get("text_level") == 1
+            and not is_page_furniture(block)
+        ]
+        if not headings:
+            return blocks
+
+        # The corroboration pool: authored prose only. Headings are excluded so
+        # a damaged title can never vouch for itself, furniture because the
+        # running head is the very claim under test.
+        body = "".join(
+            re.sub(r"\s+", "", str(block.payload.get("text") or ""))
+            for block in blocks
+            if block.type == BlockType.TEXT
+            and not is_page_furniture(block)
+            and block.payload.get("text_level") != 1
+        )
+
+        for heading in headings:
+            raw = str(heading.payload.get("text") or "")
+            compact = re.sub(r"\s+", "", raw)
+            if len(compact) < self.TITLE_REPAIR_MIN_MATCH_CHARS or compact in heads:
+                continue  # too short to judge, or a running head already confirms it
+
+            candidates = []
+            for head_compact, entry in heads.items():
+                matched = _matched_char_count(compact, head_compact)
+                if matched < self.TITLE_REPAIR_MIN_MATCH_CHARS:
+                    continue
+                containment = matched / min(len(compact), len(head_compact))
+                if containment < self.TITLE_REPAIR_MIN_CONTAINMENT:
+                    continue
+                candidates.append((len(entry["pages"]), containment, entry["text"]))
+            if not candidates:
+                continue
+
+            # Pages first: where the OCR read the same head differently on
+            # different pages, the reading that recurs is the one to trust.
+            head_text = max(candidates, key=lambda item: (item[0], item[1], len(item[2])))[2]
+            repaired = self._merge_heading_with_running_head(raw, head_text, body)
+            if repaired and re.sub(r"\s+", "", repaired) != compact:
+                heading.payload["text"] = repaired
+        return blocks
+
+    def _merge_heading_with_running_head(
+        self,
+        heading: str,
+        head_text: str,
+        body: str,
+    ) -> str | None:
+        """Splice the running head's characters into the heading's own structure.
+
+        Within the stretch the two strings have in common the running head
+        wins, character for character — that is the whole point. What sits
+        *outside* that stretch belongs to whichever string prints it: the
+        heading keeps its 眉題, and the head keeps its series label to itself.
+        """
+        heading_compact, heading_offsets = _compact_with_offsets(heading)
+        head_compact, head_offsets = _compact_with_offsets(head_text)
+        matcher = difflib.SequenceMatcher(None, heading_compact, head_compact, autojunk=False)
+        opcodes = list(matcher.get_opcodes())
+        if not any(tag == "equal" for tag, *_ in opcodes):
+            return None
+
+        # Peel the two ends off first. An edit that only one string has
+        # material for is that string's own; an edit both have material for is
+        # a misread, and belongs to the core where the head has the last word.
+        lead = ""
+        tail = ""
+        tag, i1, i2, _, _ = opcodes[0]
+        role = self._boundary_edit_role(tag, i2 - i1)
+        if role != "core":
+            opcodes.pop(0)
+            if role == "heading":
+                lead = heading[: heading_offsets[i2]]
+        if opcodes:
+            tag, i1, i2, _, _ = opcodes[-1]
+            role = self._boundary_edit_role(tag, i2 - i1)
+            if role != "core":
+                opcodes.pop()
+                if role == "heading":
+                    tail = heading[heading_offsets[i1 - 1] + 1:] if i1 else heading
+        if not opcodes:
+            return None
+
+        core_start, core_end = opcodes[0][1], opcodes[-1][2]
+        core: list[str] = []
+        for tag, i1, i2, j1, j2 in opcodes:
+            if tag == "delete":
+                continue  # glyphs bled into the column: a folio, a watermark
+            if tag == "replace" and self._body_prefers_heading_spelling(
+                heading_compact[max(core_start, i1 - self.TITLE_REPAIR_CONTEXT_CHARS): i1],
+                heading_compact[i2: min(core_end, i2 + self.TITLE_REPAIR_CONTEXT_CHARS)],
+                heading_compact[i1:i2],
+                head_compact[j1:j2],
+                body,
+            ):
+                core.append(heading_compact[i1:i2])
+                continue
+            core.append(head_text[head_offsets[j1]: head_offsets[j2 - 1] + 1])
+
+        if not _HAN_RE.search(tail):
+            tail = ""  # logo lettering trailing the title column
+        return (lead + "".join(core) + tail).strip() or None
+
+    def _boundary_edit_role(self, tag: str, heading_size: int) -> str:
+        """Who owns the text at one end of the alignment: the heading, the head, or both.
+
+        ``delete`` — only the heading prints it, so it is the 眉題 or the logo
+        swept in after the last line. ``insert`` — only the running head prints
+        it, and the cover's own scope is what the H1 records, so it is dropped.
+        ``replace`` — both print something there; short enough and it is one
+        misread glyph the head can correct, longer and the two are simply
+        different text and the heading's own wins.
+        """
+        if tag == "equal":
+            return "core"
+        if tag == "insert":
+            return "head"
+        if tag == "delete":
+            return "heading"
+        return "core" if heading_size <= self.TITLE_REPAIR_BOUNDARY_EDIT_CHARS else "heading"
+
+    def _body_prefers_heading_spelling(
+        self,
+        left: str,
+        right: str,
+        heading_form: str,
+        head_form: str,
+        body: str,
+    ) -> bool:
+        """Whether the body spells this fragment the heading's way, not the head's.
+
+        Only an unambiguous vote counts: the heading's reading has to occur in
+        the prose and the running head's must not. Anything else — both occur,
+        neither occurs, no context to disambiguate — leaves the running head in
+        charge, which is the default this whole repair rests on. Erring towards
+        the heading only ever declines a repair; erring the other way is how a
+        misread running head would overwrite a title that was already right.
+
+        The full context is tried first and each one-sided pair after it, so a
+        disagreement is still decided when the prose does not happen to repeat
+        the surrounding phrase verbatim: 「2050淨零」 may appear nowhere while
+        「淨零」 appears throughout.
+        """
+        candidates = [(left, right)]
+        if right:
+            candidates.append(("", right))
+        if left:
+            candidates.append((left, ""))
+        for before, after in candidates:
+            heading_probe = f"{before}{heading_form}{after}"
+            if len(heading_probe) < 2:
+                continue
+            if heading_probe in body and f"{before}{head_form}{after}" not in body:
+                return True
+        return False
+
+    def _column_split_x(self, blocks: list[Block]) -> float | None:
+        """The x of the printed gutter, or None when the page grid is one column.
+
+        Found the way a reader finds it: the vertical strip that the fewest
+        block boxes cross. Measured over the whole document rather than one
+        page, because the grid is a property of the publication and a single
+        page can be dominated by a full-width figure.
+
+        Returns None rather than guessing when there is nothing to split (too
+        few boxes, too narrow a content strip). A one-column document then
+        never has a "second column" for the advert pass to act on.
+        """
+        boxes = [
+            block.bbox_norm
+            for block in blocks
+            if block.bbox_norm
+            and len(block.bbox_norm) >= 4
+            and block.bbox_norm[2] > block.bbox_norm[0]
+        ]
+        if len(boxes) < self.COLUMN_SPLIT_MIN_BOXES:
+            return None
+        x_lo = min(box[0] for box in boxes)
+        x_hi = max(box[2] for box in boxes)
+        span = x_hi - x_lo
+        if span < self.COLUMN_SPLIT_MIN_SPAN:
+            return None
+        probes = list(
+            range(
+                int(x_lo + self.COLUMN_SPLIT_SEARCH_LO * span),
+                int(x_lo + self.COLUMN_SPLIT_SEARCH_HI * span) + 1,
+                self.COLUMN_SPLIT_STEP,
+            )
+        )
+        if not probes:
+            return None
+        crossings = [sum(1 for box in boxes if box[0] < x < box[2]) for x in probes]
+        fewest = min(crossings)
+        # The widest run at the minimum, so a one-probe notch inside a column
+        # never beats the real gutter; its centre is the split.
+        best_width = -1
+        best_span = (probes[0], probes[0])
+        index = 0
+        while index < len(crossings):
+            if crossings[index] != fewest:
+                index += 1
+                continue
+            end = index
+            while end + 1 < len(crossings) and crossings[end + 1] == fewest:
+                end += 1
+            if end - index > best_width:
+                best_width = end - index
+                best_span = (probes[index], probes[end])
+            index = end + 1
+        return (best_span[0] + best_span[1]) / 2
+
+    def _tag_promotional_inserts(self, blocks: list[Block]) -> list[Block]:
+        """Tag a publisher's advert bound into the last page's second column.
+
+        These journals sell books on the back of the article: a title, a price
+        (「售價：NT$500」), a publication month, a blurb, an ordering hotline, a
+        cover shot, a QR code and partner logos, filling the second column of
+        the **last** page. It is not the author's text and answers no query,
+        but the whole column reached rag.md and the chunks. Live evidence
+        (2026-08-11, 167-document store): 32 documents, 479 blocks, of which
+        105 are images that were billed as VLM figure enrichment.
+
+        ``_tag_layout_furniture`` cannot see it — that pass wants a short
+        string in a margin band recurring across pages, and an advert is a
+        page-middle block appearing once. So this is a second, region-level
+        path rather than a fix to the first.
+
+        The region is a **column**, never a page. On 141 of the 167 last pages
+        the second column holds something (up to 829 characters of genuine
+        text where there is no advert), and the *first* column of every advert
+        page still carries the article's ■參考文獻 / ■注釋 and the tail of the
+        prose — 121 to 1,469 characters measured. Dropping the page would
+        delete the references in all 32 cases.
+
+        Three conditions, all needed:
+
+        * the last page — 0 of the 32 adverts sit anywhere else;
+        * the second column, split at the derived gutter (see
+          ``_column_split_x``), with page furniture left to its own tag;
+        * at least ``PROMO_MIN_BLOCKS`` blocks carrying at least
+          ``PROMO_MIN_SIGNALS`` *different* signals from the ruleset.
+
+        Signals that were tried and rejected, because re-adding them is the
+        obvious next idea and each one is a regression:
+
+        * a bare ``系列\\s*\\d`` — the journal numbers its own articles
+          「系列3-6」/「系列1-4」 in the running head, so it matched real
+          columns;
+        * "the last page is short" — 141 last pages have a populated second
+          column, the largest holding 829 characters of article text;
+        * "mostly pictures, little text" — that is the cover page (p0).
+
+        None of the signals that *are* shipped is safe on its own, which is
+        what ``PROMO_MIN_SIGNALS`` is for: 主編 occurs in a bibliography entry,
+        「\\d折」 in prose about retail pricing, and 本書 in a book review. Two of
+        them agreeing, in the second column of the last page, over at least
+        four blocks, is the claim being made — not any single word.
+
+        Measured with the shipped ruleset over all 167 documents: 32 columns
+        tagged, no tagged block containing 參考文獻/注釋/References, and zero
+        matches over the other 1,580 page-columns in the store.
+        """
+        patterns = _promotional_insert_patterns()
+        if not patterns:
+            return blocks
+        split_x = self._column_split_x(blocks)
+        if split_x is None:
+            return blocks
+
+        page_indices = [block.page_idx for block in blocks]
+        if not page_indices:
+            return blocks
+        last_page = max(page_indices)
+
+        region = [
+            block
+            for block in blocks
+            if block.page_idx == last_page
+            and block.bbox_norm
+            and len(block.bbox_norm) >= 4
+            and block.bbox_norm[0] >= split_x
+            and not is_page_furniture(block)
+        ]
+        if len(region) < self.PROMO_MIN_BLOCKS:
+            return blocks
+
+        # One line per block, so a signal can never be spelled by two
+        # neighbouring blocks running together.
+        region_text = "\n".join(
+            _INTER_HAN_SPACE_RE.sub("", str(block.payload.get("text") or "")) for block in region
+        )
+        matched = sum(1 for pattern in patterns if pattern.search(region_text))
+        if matched < self.PROMO_MIN_SIGNALS:
+            return blocks
+
+        for block in region:
+            block.payload["origin"] = "promotional_insert"
         return blocks
 
     def _remove_cross_page_duplicates(self, blocks: list[Block]) -> list[Block]:

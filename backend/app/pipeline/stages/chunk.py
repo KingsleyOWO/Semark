@@ -16,7 +16,7 @@ from app.config import PipelineConfig
 from app.models.document_ir import Block, BlockType, DocumentIR
 from app.pipeline.delivery import atomic_write_jsonl
 from app.pipeline.privacy import scrub_transcribed_privacy, set_privacy_scrub_enabled
-from app.pipeline.stages.normalize import is_page_furniture
+from app.pipeline.stages.normalize import is_non_content
 
 # Sections estimated below this many tokens merge with their neighbours so
 # retrieval never indexes near-empty chunks.
@@ -299,8 +299,10 @@ class ChunkStage:
 
         # Running heads, volume lines and folios are provenance, not content:
         # keeping them put page furniture into 46% of the store's chunks
-        # (measured 2026-08-10). Mirrors the rag.md render.
-        body_blocks = [block for block in document_ir.blocks if not is_page_furniture(block)]
+        # (measured 2026-08-10). The publisher's back-page advert is the same
+        # kind of non-content and rides on the same tag. Mirrors the rag.md
+        # render.
+        body_blocks = [block for block in document_ir.blocks if not is_non_content(block)]
 
         # Group blocks by sections (split at headings)
         sections = self._build_sections(body_blocks)
@@ -718,7 +720,11 @@ def _table_body_to_markdown(body: str) -> str:
     """
     Convert an HTML table to a markdown pipe table.
 
-    Rowspan/colspan cells repeat their value across the spanned grid cells.
+    A rowspan repeats its value down the rows it covers. A colspan repeats its
+    value sideways in the HEADER ROW ONLY; in a data row the value is written to
+    the first spanned column and the rest are left blank. See the grid loop for
+    why.
+
     Markup that does not parse into table rows has its tags stripped instead;
     tag-free bodies pass through unchanged.
     """
@@ -735,9 +741,27 @@ def _table_body_to_markdown(body: str) -> str:
         return _strip_html_tags(body)
 
     # Expand rowspan/colspan into a rectangular grid by repeating values.
+    #
+    # Sideways fill is a header-row privilege. A `<td colspan=2>` in the header
+    # really does name both sub-columns, but in a DATA row it is one value that
+    # happens to straddle two columns, and copying it into the second one states
+    # something the document never said (live: a spectrum-planning table under
+    # 屆期時間 | 頻段 | 釋出時間 whose last row is
+    # `<td rowspan=1 colspan=2>3500MHz：3300~3570…</td>`; filling it asserted
+    # 釋出時間 =「3500MHz：3300~3570…」). 38 of the 128 tables in the 2026-08
+    # corpus carry a colspan outside row 0 — wrapped paragraphs, 總計 rows and
+    # full-width 資料來源 notes — and none of them is a header. The rag.md render
+    # draws the same line in expand_table_header_rows(); this parser stays
+    # independent of the packaging modules on purpose, so the rule is restated
+    # rather than imported.
+    #
+    # Row 0 is the header here because that is what a markdown pipe table makes
+    # it. Every genuine multi-row header in the corpus keeps its continuation
+    # rows colspan-free, so filling row 0 alone leaves no real header unnamed.
     grid: list[list[str]] = []
     carry: dict[int, tuple[str, int]] = {}
-    for cells in parser.rows:
+    for row_idx, cells in enumerate(parser.rows):
+        fill_sideways = row_idx == 0
         row: list[str] = []
         col = 0
         for text, rowspan, colspan in cells:
@@ -748,10 +772,11 @@ def _table_body_to_markdown(body: str) -> str:
                 row.append(carried_text)
                 col += 1
             clean = " ".join(text.split()).replace("|", "\\|")
-            for _ in range(colspan):
-                row.append(clean)
+            for offset in range(colspan):
+                value = clean if (offset == 0 or fill_sideways) else ""
+                row.append(value)
                 if rowspan > 1:
-                    carry[col] = (clean, rowspan - 1)
+                    carry[col] = (value, rowspan - 1)
                 col += 1
         while col in carry:
             carried_text, remaining = carry.pop(col)

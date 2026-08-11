@@ -380,6 +380,37 @@ async def build_structured_rag_with_vlm_fallback(
     )
 
 
+_TABLE_CAPTION_TITLE_RE = re.compile(r"^\s*(?:表|附表|Table)\s*[\d一二三四五六七八九十]")
+
+
+def _looks_like_table_caption_title(text: str) -> bool:
+    """True for a real 「表 N …」 caption, not for prose that merely says 表.
+
+    The title used to be `next(text for text in texts if "表" in text)`. That
+    substring also matches 表現／代表／發表／圖表／表示／外表, so an abstract
+    paragraph won the title slot in 43 of the 167 documents in the 2026-08
+    corpus (longest title: 310 characters). plan.title is what names a
+    caption-less table (52 of 128 tables) via infer_table_asset_title(), so the
+    tables inherited half a sentence of prose as their name.
+    """
+
+    compact = re.sub(r"\s+", "", text)
+    # A bare 「表1」 label is a figure marker, not a document title; live, one
+    # article had its real H1 displaced by exactly that.
+    if len(compact) < 4 or len(compact) > 60:
+        return False
+    if re.search(r"[。；;]", compact):
+        return False
+    return bool(_TABLE_CAPTION_TITLE_RE.match(text))
+
+
+def _looks_like_heading_title(text: str) -> bool:
+    """True for a heading block short enough to be a title rather than a paragraph."""
+
+    compact = re.sub(r"\s+", "", text)
+    return bool(4 <= len(compact) <= 60 and not re.search(r"[。；;]", compact))
+
+
 def plan_document(document_ir: DocumentIR) -> DocumentPlan:
     """Plan a document-specific extraction schema from headings and table headers."""
 
@@ -388,12 +419,17 @@ def plan_document(document_ir: DocumentIR) -> DocumentPlan:
         for block in document_ir.blocks[:12]
         if block.type == BlockType.TEXT
     ]
-    title = _clean_document_title(
-        next(
-            (text for text in texts if "表" in text),
-            texts[0] if texts else document_ir.source.path,
-        )
-    )
+    heading_texts = [
+        str(block.payload.get("text", ""))
+        for block in document_ir.blocks[:12]
+        if block.type == BlockType.TEXT and _safe_int(block.payload.get("text_level"), 0) > 0
+    ]
+    title_source = next((text for text in texts if _looks_like_table_caption_title(text)), "")
+    if not title_source:
+        title_source = next((text for text in heading_texts if _looks_like_heading_title(text)), "")
+    if not title_source:
+        title_source = texts[0] if texts else document_ir.source.path
+    title = _clean_document_title(title_source)
     context = "\n".join(texts)
     table_headers = " ".join(
         _plain_text(str(block.payload.get("table_body", "")))[:500]
@@ -675,18 +711,92 @@ def _merge_note_lines(lines: list[str]) -> list[str]:
     return merged
 
 
+@dataclass(frozen=True)
+class TableGrid:
+    """A parsed table plus the span data and row identity parse_html_table drops.
+
+    ``rows`` is exactly what parse_html_table() returns, so existing callers can
+    keep reading it. ``cells`` keeps one entry per physical ``<tr>`` (with the
+    rowspan/colspan MinerU gave us), and ``source_row_index`` maps ``rows[i]``
+    back to its physical row — parse_html_table() drops all-blank rows, so the
+    two indexes drift apart and reading spans at a grid index silently looks at
+    the wrong ``<tr>``. ``cells`` is empty for bodies without any ``<tr>``.
+    """
+
+    rows: list[list[str]]
+    cells: list[list[dict[str, Any]]]
+    source_row_index: list[int]
+
+
 def parse_html_table(table_body: str) -> list[list[str]]:
     """Parse table HTML into a rectangular-ish grid, expanding row/col spans."""
 
+    return parse_html_table_grid(table_body).rows
+
+
+def parse_html_table_grid(table_body: str) -> TableGrid:
+    """Parse table HTML into a grid that also carries its span metadata."""
+
     if "<tr" not in table_body.lower():
-        return _parse_plain_rows(table_body)
+        rows = _parse_plain_rows(table_body)
+        return TableGrid(rows=rows, cells=[], source_row_index=list(range(len(rows))))
 
     parser = _TableHTMLParser()
     parser.feed(table_body)
 
     grid: list[list[str]] = []
+    source_row_index: list[int] = []
+    for source_idx, normalized in enumerate(_expand_table_rows(parser.rows)):
+        if any(normalized):
+            grid.append(normalized)
+            source_row_index.append(source_idx)
+
+    return TableGrid(rows=grid, cells=parser.rows, source_row_index=source_row_index)
+
+
+def table_row_spans(grid: TableGrid, source_row_idx: int) -> list[tuple[int, int]]:
+    """Return (rowspan, colspan) for each source cell of one physical ``<tr>``."""
+
+    if source_row_idx < 0 or source_row_idx >= len(grid.cells):
+        return []
+    return [
+        (max(1, int(cell.get("rowspan") or 1)), max(1, int(cell.get("colspan") or 1)))
+        for cell in grid.cells[source_row_idx]
+    ]
+
+
+def expand_table_header_rows(grid: TableGrid, start: int, count: int) -> list[list[str]]:
+    """Return ``count`` physical rows from ``start`` with colspans filled sideways.
+
+    Only header rows may be filled. A colspan in a DATA row means one value that
+    happens to straddle two columns (live: a spectrum table whose last row is
+    `<td colspan=2>3500MHz：3300~3570…</td>`); repeating it there invents a value
+    for a column the source never filled in.
+    """
+
+    if not grid.cells or start < 0 or count < 1:
+        return []
+    rows = _expand_table_rows(grid.cells, fill_start=start, fill_stop=start + count)
+    return rows[start : start + count]
+
+
+def _expand_table_rows(
+    cells_by_row: list[list[dict[str, Any]]],
+    *,
+    fill_start: int = 0,
+    fill_stop: int = 0,
+) -> list[list[str]]:
+    """Flatten physical rows into a grid, expanding row/col spans.
+
+    Rows in ``[fill_start, fill_stop)`` repeat a colspan cell's text across the
+    whole span; every other row keeps the historical behaviour of writing the
+    text into the first spanned column and padding the rest with "".
+    """
+
+    grid: list[list[str]] = []
     rowspans: dict[int, tuple[int, str]] = {}
-    for parsed_row in parser.rows:
+    for source_idx, parsed_row in enumerate(cells_by_row):
+        fill_sideways = fill_start <= source_idx < fill_stop
         row: list[str] = []
         col_idx = 0
         for cell in parsed_row:
@@ -703,9 +813,10 @@ def parse_html_table(table_body: str) -> list[list[str]]:
             rowspan = max(1, int(cell.get("rowspan") or 1))
             colspan = max(1, int(cell.get("colspan") or 1))
             for offset in range(colspan):
-                row.append(text if offset == 0 else "")
+                value = text if (offset == 0 or fill_sideways) else ""
+                row.append(value)
                 if rowspan > 1:
-                    rowspans[col_idx + offset] = (rowspan - 1, text if offset == 0 else "")
+                    rowspans[col_idx + offset] = (rowspan - 1, value)
             col_idx += colspan
 
         while col_idx in rowspans:
@@ -717,9 +828,7 @@ def parse_html_table(table_body: str) -> list[list[str]]:
                 rowspans[col_idx] = (remaining - 1, text)
             col_idx += 1
 
-        normalized = [_normalize_cell(cell) for cell in row]
-        if any(normalized):
-            grid.append(normalized)
+        grid.append([_normalize_cell(cell) for cell in row])
 
     return grid
 

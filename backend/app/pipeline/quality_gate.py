@@ -25,7 +25,7 @@ from app.pipeline.semantic.language import (
     resolve_semantic_output_language,
 )
 from app.pipeline.semantic.normalizer import is_version_text, split_merged_field_label
-from app.pipeline.stages.normalize import is_page_furniture
+from app.pipeline.stages.normalize import is_non_content
 from app.pipeline.structured_rag import is_form_like_document, looks_like_reference_table
 
 _QUALITY_GATE_MESSAGES_EN = {
@@ -1031,9 +1031,14 @@ def _check_authored_text_survival(
     for block in document_ir.blocks:
         if block.type != BlockType.TEXT:
             continue
-        # Page furniture is dropped from every delivery surface on purpose;
-        # counting it as authored prose would read the fix as a silent drop.
-        if is_page_furniture(block):
+        # Page furniture and the publisher's back-page advert are dropped from
+        # every delivery surface on purpose; counting them as authored prose
+        # would read the fix as a silent drop. Advert copy in particular reads
+        # exactly like authored prose to the heuristic below (「本書分析俄烏戰爭
+        # 後的市場新局…」), and it is not a hypothetical: over the 32 documents
+        # that carry one, dropping the advert lands survival at 0.87-0.98, four
+        # of them under 0.90 — one or two blocks from a bogus failure here.
+        if is_non_content(block):
             continue
         text = str(block.payload.get("text", "") or "").strip()
         normalized = re.sub(r"\s+", "", text)

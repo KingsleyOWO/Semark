@@ -55,7 +55,7 @@ from app.pipeline.quality_gate import (
 )
 from app.pipeline.repair_guard import repair_preserves_facts
 from app.pipeline.semantic.language import resolve_semantic_output_language
-from app.pipeline.stages.normalize import is_page_furniture
+from app.pipeline.stages.normalize import is_non_content
 from app.pipeline.structured_rag import (
     build_form_documents_rag,
     build_structured_rag,
@@ -111,7 +111,16 @@ def _render_vlm_value(value: Any) -> str:
 # document text or any figure's OCR).
 _LATIN_TERM_RE = re.compile(r"[A-Za-z][A-Za-z0-9'&._-]{2,}")
 
-
+# A figure label printed in the document body ("圖3 …", "Figure 2 …"). 10% of
+# figures carry a parser caption and a further 8% can borrow such a label from
+# the same page; for the remaining 81% there is no trustworthy number, and
+# minting one ("圖7") would contradict the article's own cross-references.
+_VISUAL_FIGURE_LABEL_RE = re.compile(
+    r"^(?:圖|表|附圖|附表|Figure|Fig\.?|Table)\s*[0-9０-９一二三四五六七八九十]"
+)
+# The honest, unnumbered fallback used when nothing names the figure.
+_GENERIC_VISUAL_TITLES = {"圖表語意", "Figure semantics"}
+_VISUAL_CONTAINER_TITLE_MAX_LEN = 24
 
 
 def _decode_json_string_fragment(value: str) -> str:
@@ -3421,6 +3430,129 @@ class PackageStage:
         text = re.sub(r"\s+-\s+", " - ", text)
         return text.strip() if line == line.lstrip() else text.rstrip()
 
+    # --- Table names recovered from the adjacent layout line -----------------
+    #
+    # A table's name is printed on the line above the grid. When MinerU attaches
+    # no ``table_caption`` the name is still in the IR, as an ordinary text block
+    # nobody ever asked. The rules below are a *layout* heuristic tuned on a
+    # two-column magazine corpus (2026-08: 46 of 52 caption-less tables recovered,
+    # 0 false fires on the 76 tables whose real caption is known); a different
+    # corpus — forms, 公文, single-column reports — must re-measure before
+    # trusting them. Hence the deliberately narrow guards:
+    #   * same page only, upward only, at most 3 candidate blocks;
+    #   * the first block that is neither a heading nor a caption-shaped line
+    #     stops the scan, so a body paragraph can never become a table name;
+    #   * a vertical bbox gap cap keeps page furniture (running heads sitting at
+    #     the very top of the page) from reaching a table lower down.
+    _TABLE_CAPTION_ANNOTATION_RE = re.compile(r"^(?:單位|注|註|資料來源|Unit|Note|Source)\s*[:：]")
+    _TABLE_CAPTION_PAGE_NOISE_RE = re.compile(r"^[\s\d\-–—．.、]+$")
+    # 「附表」/「表 2」 printed on its own is the figure marker, not a name; reading
+    # order often emits it *after* the name it sits beside, so it is skipped
+    # rather than accepted.
+    _TABLE_CAPTION_BARE_LABEL_RE = re.compile(
+        r"^(?:附?表|Table)\s*[0-9０-９一二三四五六七八九十]*\s*[.、:：]?$"
+    )
+    _TABLE_CAPTION_NUMBERED_RE = re.compile(r"^(?:附?表|Table)\s*[0-9０-９一二三四五六七八九十]")
+    _TABLE_CAPTION_MAX_CANDIDATES = 3
+    _TABLE_CAPTION_MAX_SCAN = 6
+    # bbox_norm is a 0-1000 space; observed real captions sat 23-45 units above
+    # the grid, page furniture 130+.
+    _TABLE_CAPTION_MAX_GAP = 80
+    _TABLE_CAPTION_MAX_LEN = 40
+    _TABLE_CAPTION_MAX_ANNOTATION_LEN = 30
+    _TABLE_CAPTION_SENTENCE_END = "。！？；;!?：:，,、"
+
+    @classmethod
+    def _is_skippable_table_caption_neighbour(cls, text: str) -> bool:
+        if not text:
+            return True
+        if cls._TABLE_CAPTION_PAGE_NOISE_RE.match(text):
+            return True
+        if cls._TABLE_CAPTION_BARE_LABEL_RE.match(text):
+            return True
+        return bool(
+            len(text) <= cls._TABLE_CAPTION_MAX_ANNOTATION_LEN
+            and cls._TABLE_CAPTION_ANNOTATION_RE.match(text)
+        )
+
+    @classmethod
+    def _nearest_table_caption(cls, document_ir: DocumentIR, table_block: Block) -> str:
+        """Recover a caption-less table's name from the adjacent line above it."""
+
+        blocks = document_ir.blocks
+        try:
+            index = next(
+                idx for idx, block in enumerate(blocks) if block.block_id == table_block.block_id
+            )
+        except StopIteration:
+            return ""
+
+        table_bbox = table_block.bbox_norm or []
+        table_top = table_bbox[1] if len(table_bbox) >= 4 else None
+        candidates = 0
+        scanned = 0
+        for block in reversed(blocks[:index]):
+            if candidates >= cls._TABLE_CAPTION_MAX_CANDIDATES or scanned >= cls._TABLE_CAPTION_MAX_SCAN:
+                break
+            scanned += 1
+            if block.page_idx != table_block.page_idx or block.type != BlockType.TEXT:
+                break
+            text = re.sub(r"\s+", " ", str(block.payload.get("text") or "")).strip()
+            if cls._is_skippable_table_caption_neighbour(text):
+                continue
+            candidates += 1
+            bbox = block.bbox_norm or []
+            has_geometry = table_top is not None and len(bbox) >= 4
+            if has_geometry:
+                gap = table_top - bbox[3]
+                # Negative gap: the block sits beside or below the grid (a
+                # footnote emitted early), so it is not the printed caption.
+                if gap < 0 or gap > cls._TABLE_CAPTION_MAX_GAP:
+                    break
+            level = int(block.payload.get("text_level", 0) or 0)
+            if level > 0 or cls._TABLE_CAPTION_NUMBERED_RE.match(text):
+                return text
+            # Unmarked caption line: short, no sentence punctuation, and only
+            # trusted when it is the block immediately above the grid and the
+            # geometry confirms it (no bbox, no guess).
+            if (
+                has_geometry
+                and candidates == 1
+                and len(text) <= cls._TABLE_CAPTION_MAX_LEN
+                and text[-1] not in cls._TABLE_CAPTION_SENTENCE_END
+            ):
+                return text
+            break
+        return ""
+
+    @classmethod
+    def _drop_recovered_table_heading(cls, table_text: str, title: str, nearby_caption: str) -> str:
+        """Drop the table renderer's own ``## <title>`` when the document already
+        prints that line right above the grid.
+
+        ``semantic_table_to_text`` opens with ``## <title>`` and then repeats the
+        name as ``表格名稱：<title>``. Once the title is recovered *from* the
+        adjacent layout block, that block is rendered too, so the outline would
+        carry the same heading twice in a row. The ``表格名稱：`` line stays — it
+        is what keeps the name inside the table's own chunk.
+        """
+
+        if not table_text or not nearby_caption:
+            return table_text
+        key = re.sub(r"\s+", "", cls._clean_export_title(title)).lower()
+        if not key or key != re.sub(r"\s+", "", cls._clean_export_title(nearby_caption)).lower():
+            return table_text
+        lines = table_text.splitlines()
+        heading = re.match(r"^#{1,6}\s+(.+?)\s*$", lines[0].strip()) if lines else None
+        if not heading:
+            return table_text
+        if re.sub(r"\s+", "", cls._clean_export_title(heading.group(1))).lower() != key:
+            return table_text
+        rest = lines[1:]
+        while rest and not rest[0].strip():
+            rest.pop(0)
+        return "\n".join(rest)
+
     def _improve_table_asset_title_from_body(
         self,
         table_body: str,
@@ -4120,13 +4252,164 @@ class PackageStage:
             return lines
         return [line for line in lines if not any(term in line for term in terms)]
 
+    @classmethod
+    def _visual_container_title(
+        cls,
+        document_ir: DocumentIR,
+        block: Block,
+        asset: AssetEntry | None,
+        output: dict[str, Any],
+        semantic_output_language: str = "zh-TW",
+    ) -> str:
+        """Name the figure whose semantic sections follow, or say nothing.
+
+        Ordered by how much the corpus can be trusted for it:
+        1. the parser's own caption (10% of figures);
+        2. a 「圖N …」 label block on the same page, chosen by **bbox distance**
+           — reading order hands the first label to every figure on the page
+           (observed: three figures all captioned 「圖1」);
+        3. the VLM ``semantic_caption``, cut at its first sentence, since the
+           whole sentence used to be pasted in as a title;
+        4. an unnumbered generic label. Never a synthesized 「圖N」.
+        """
+
+        language = "en" if semantic_output_language == "en" else "zh-TW"
+        caption = cls._clean_export_title(caption_text(block.payload.get("caption", "")))
+        if not caption and asset is not None:
+            caption = cls._clean_export_title(asset.title) if not asset.title.startswith("Figure ") else ""
+        if caption:
+            return caption[:100]
+
+        label = cls._nearest_visual_label(document_ir, block)
+        if label:
+            return label[:100]
+
+        semantic_caption = render_vlm_text((output or {}).get("semantic_caption", "")).strip()
+        heading = cls._shorten_visual_caption(semantic_caption)
+        if heading:
+            return heading
+
+        return "Figure semantics" if language == "en" else "圖表語意"
+
+    @staticmethod
+    def _shorten_visual_caption(caption: str) -> str:
+        """A whole VLM sentence is a description, not a heading.
+
+        Live output used a 80-character run-on as the figure's name. Cut to the
+        first sentence, then — if that is still long — to the last clause
+        boundary that fits, so the heading never breaks mid-phrase.
+        """
+
+        text = re.sub(r"\s+", " ", str(caption or "")).strip()
+        if not text:
+            return ""
+        sentence = re.split(r"[。.!?！？\n]", text, maxsplit=1)[0].strip() or text
+        if len(sentence) > _VISUAL_CONTAINER_TITLE_MAX_LEN:
+            window = sentence[:_VISUAL_CONTAINER_TITLE_MAX_LEN]
+            cut = max(window.rfind(mark) for mark in "，,、：:；;（(")
+            sentence = window[:cut] if cut >= 8 else window
+        return sentence.rstrip("，,、：:；;（(「『【[〔 ").strip()
+
+    # A label may only be claimed by a figure it actually touches. bbox_norm is a
+    # 0-1000 space; the 25 correctly-paired labels in the 2026-08 corpus sat 2-45
+    # units from their figure, while the 4 mismatches (a source-note logo, two
+    # further panels of one composite figure, a stray label) sat 186-539 away.
+    _VISUAL_LABEL_MAX_GAP = 80
+    # 「圖1」 printed on its own, with the figure's name typeset as a separate
+    # block to its right on the same line.
+    _VISUAL_BARE_LABEL_RE = re.compile(
+        r"^(?:圖|表|附圖|附表|Figure|Fig\.?|Table)\s*[0-9０-９一二三四五六七八九十]{1,3}\s*[.、:：]?$"
+    )
+    _VISUAL_LABEL_NAME_MAX_DX = 120
+
+    @classmethod
+    def _nearest_visual_label(cls, document_ir: DocumentIR, block: Block) -> str:
+        """The same-page 「圖N …」 label physically closest to ``block``."""
+
+        bbox = block.bbox_norm or []
+        if len(bbox) < 4:
+            return ""
+        best: tuple[float, Block, str] | None = None
+        for candidate in document_ir.blocks:
+            if candidate.page_idx != block.page_idx or candidate.type != BlockType.TEXT:
+                continue
+            candidate_bbox = candidate.bbox_norm or []
+            if len(candidate_bbox) < 4:
+                continue
+            text = re.sub(r"\s+", " ", str(candidate.payload.get("text") or "")).strip()
+            if not text or not _VISUAL_FIGURE_LABEL_RE.match(text):
+                continue
+            if candidate_bbox[3] <= bbox[1]:
+                distance = bbox[1] - candidate_bbox[3]
+            elif candidate_bbox[1] >= bbox[3]:
+                distance = candidate_bbox[1] - bbox[3]
+            else:
+                distance = 0
+            if distance > cls._VISUAL_LABEL_MAX_GAP:
+                continue
+            if best is None or distance < best[0]:
+                best = (distance, candidate, text)
+        if best is None:
+            return ""
+        _, label_block, label_text = best
+        if cls._VISUAL_BARE_LABEL_RE.match(label_text):
+            name = cls._visual_label_name_beside(document_ir, label_block)
+            if name:
+                return f"{label_text} {name}"
+        return label_text
+
+    @classmethod
+    def _visual_label_name_beside(cls, document_ir: DocumentIR, label_block: Block) -> str:
+        """The figure name typeset on the same line, just right of 「圖N」."""
+
+        bbox = label_block.bbox_norm or []
+        if len(bbox) < 4:
+            return ""
+        height = max(1, bbox[3] - bbox[1])
+        best: tuple[int, str] | None = None
+        for candidate in document_ir.blocks:
+            if candidate is label_block or candidate.type != BlockType.TEXT:
+                continue
+            if candidate.page_idx != label_block.page_idx:
+                continue
+            candidate_bbox = candidate.bbox_norm or []
+            if len(candidate_bbox) < 4 or candidate_bbox[0] < bbox[2]:
+                continue
+            overlap = min(candidate_bbox[3], bbox[3]) - max(candidate_bbox[1], bbox[1])
+            if overlap < height * 0.5:
+                continue
+            dx = candidate_bbox[0] - bbox[2]
+            if dx > cls._VISUAL_LABEL_NAME_MAX_DX:
+                continue
+            text = re.sub(r"\s+", " ", str(candidate.payload.get("text") or "")).strip()
+            if not text:
+                continue
+            if best is None or dx < best[0]:
+                best = (dx, text)
+        return best[1] if best else ""
+
     def _render_visual_semantic_content(
         self,
         title: str,
         output: dict[str, Any],
         semantic_output_language: str = "zh-TW",
+        heading_level: int = 2,
+        container_title: str = "",
     ) -> str:
-        """Convert VLM figure output into retrieval-friendly semantic markdown."""
+        """Convert VLM figure output into retrieval-friendly semantic markdown.
+
+        ``heading_level`` sets the depth of the flow-template sections. The
+        default 2 is right for a split asset document, which carries its own
+        ``#`` title. Woven into the rag.md body the same ``##`` collides with the
+        article's own chapter headings, so that caller passes ``0``, which renders
+        the sections as bold labels instead of outline entries.
+
+        ``container_title`` names the figure the sections describe. It is emitted
+        once, as a single ``###`` heading (one level below the article's ``##``
+        chapters), and only for the flow template — the plain-line branch merges
+        into surrounding prose and would gain nothing but outline noise from a
+        heading per figure.
+        """
 
         language = "en" if semantic_output_language == "en" else "zh-TW"
         output = coerce_visual_vlm_output(output)
@@ -4218,7 +4501,9 @@ class PackageStage:
         title_text = title.strip() or fallback_title
         if language != "en":
             title_text = self._normalize_zh_visual_label(title_text)
-        generic_title = title_text.lower().startswith("figure ")
+        # The unnumbered container fallback names nothing, so quoting it back as
+        # 「本文件是「圖表語意」的…」 reads as a bug; treat it like ``Figure N``.
+        generic_title = title_text.lower().startswith("figure ") or title_text in _GENERIC_VISUAL_TITLES
         if generic_title:
             title_text = fallback_title
         keywords_text = (", " if language == "en" else "、").join(keywords[:10])
@@ -4255,8 +4540,18 @@ class PackageStage:
             branches = [line for line in path_lines if any(marker in line for marker in ("(是)", "(否)", "（是）", "（否）"))]
 
         parts: list[str] = []
+
+        def section(label: str) -> str:
+            """One section label, at the depth this rendering context needs."""
+            prefix = "" if not parts else "\n"
+            if heading_level >= 1:
+                return f"{prefix}{'#' * min(heading_level, 6)} {label}"
+            return f"{prefix}**{label}**"
+
+        if container_title:
+            parts.append(f"### {container_title}")
         if language == "en":
-            parts.append("## Semantic Summary")
+            parts.append(section("Semantic Summary"))
             summary = (
                 "This document organizes the workflow shown in the flowchart."
                 if generic_title
@@ -4271,7 +4566,7 @@ class PackageStage:
                 summary += f" Useful query topics: {keywords_text}."
             parts.append(summary)
         else:
-            parts.append("## 語意摘要")
+            parts.append(section("語意摘要"))
             summary = "本文件整理流程圖中的作業流程。" if generic_title else f"本文件是「{title_text}」的流程圖語意化內容。"
             if start_node and end_text:
                 if len(terminal_nodes) > 1:
@@ -4285,28 +4580,28 @@ class PackageStage:
             parts.append(summary)
 
         if roles:
-            parts.append("\n## 主要角色與單位")
+            parts.append(section("主要角色與單位"))
             parts.extend(f"- {role}" for role in roles[:12])
 
         if branches:
-            parts.append("\n## " + ("Decisions and Branches" if language == "en" else "判斷與分支"))
+            parts.append(section("Decisions and Branches" if language == "en" else "判斷與分支"))
             for line in branches[:8]:
                 parts.append(f"- {line}")
 
         if deadline_items:
-            parts.append("\n## 時限與依據")
+            parts.append(section("時限與依據"))
             parts.extend(f"- {item}" for item in deadline_items[:12])
 
         if keywords:
-            parts.append("\n## " + ("Common Query Topics" if language == "en" else "常見查詢主題"))
+            parts.append(section("Common Query Topics" if language == "en" else "常見查詢主題"))
             parts.extend(f"- {keyword}" for keyword in keywords[:10])
 
         if facts:
-            parts.append("\n## " + ("Key Facts" if language == "en" else "重要事實"))
+            parts.append(section("Key Facts" if language == "en" else "重要事實"))
             parts.extend(f"- {fact}" for fact in facts[:10])
 
         if path_lines:
-            parts.append("\n## " + ("Detailed Flow Paths" if language == "en" else "詳細流程路徑"))
+            parts.append(section("Detailed Flow Paths" if language == "en" else "詳細流程路徑"))
             parts.extend(f"- {line}" for line in path_lines)
             path_text_key = re.sub(r"\s+", "", " ".join(path_lines)).lower()
             missing_text_lines = [
@@ -4316,10 +4611,10 @@ class PackageStage:
                 and re.sub(r"\s+", "", line).lower() not in path_text_key
             ]
             if missing_text_lines:
-                parts.append("\n## " + ("Text in Image" if language == "en" else "圖中文字"))
+                parts.append(section("Text in Image" if language == "en" else "圖中文字"))
                 parts.extend(f"- {line}" for line in missing_text_lines[:40])
         elif all_text_lines:
-            parts.append("\n## " + ("Text in Image" if language == "en" else "圖中文字"))
+            parts.append(section("Text in Image" if language == "en" else "圖中文字"))
             parts.extend(f"- {line}" for line in all_text_lines)
 
         return "\n".join(parts).strip()
@@ -4367,19 +4662,39 @@ class PackageStage:
                 return False
         return True
 
+    # Section labels survive a render-then-reparse round trip: the renderer
+    # writes them into ``retrieval_text`` and this parser reads them back out.
+    # Both forms the renderer can emit — a heading at any depth and a bold label
+    # — must be recognized, or demoting the sections would silently truncate
+    # 「圖中文字」 extraction with no symptom anywhere in the output.
+    @classmethod
+    def _visual_section_label(cls, line: str) -> str:
+        """The section label this line declares, or '' when it declares none."""
+
+        if line.startswith("#"):
+            match = re.match(r"^#{1,6}\s+(.*?)\s*$", line)
+            return match.group(1).strip() if match else ""
+        if line.startswith("**") and line.endswith("**") and len(line) > 4:
+            return line[2:-2].strip()
+        return ""
+
     def _extract_visual_text_lines_from_retrieval_text(self, retrieval_text: str, language: str) -> list[str]:
-        heading_pattern = r"^##\s*(?:Text in Image|圖中文字)\s*$" if language == "en" else r"^##\s*(?:圖中文字|Text in Image)\s*$"
+        del language  # Both localizations are accepted regardless of the target.
+        wanted = {"text in image", "圖中文字"}
         lines: list[str] = []
         collecting = False
         for raw_line in str(retrieval_text or "").splitlines():
             line = raw_line.strip()
             if not line:
                 continue
-            if re.match(heading_pattern, line, re.I):
-                collecting = True
+            label = self._visual_section_label(line)
+            if label:
+                if label.strip().lower() in wanted:
+                    collecting = True
+                    continue
+                if collecting:
+                    break
                 continue
-            if collecting and line.startswith("## "):
-                break
             if not collecting:
                 continue
             line = re.sub(r"^[-*•]\s*", "", line).strip()
@@ -4756,8 +5071,12 @@ class PackageStage:
                         continue
 
                     asset_id = f"tbl{table_idx:04d}"
+                    # The IR's own ``table_caption`` stays untouched: rewriting it
+                    # would leak the guess into chunk metadata and the quality
+                    # gate. The recovered line is passed as a weaker signal.
                     title = infer_table_asset_title(
                         caption=caption,
+                        nearby_caption=self._nearest_table_caption(document_ir, block),
                         source_title=source_plan.title,
                         page_idx=block.page_idx,
                         table_idx=table_idx,
@@ -5145,8 +5464,11 @@ class PackageStage:
             # Running heads, volume lines and folios carry no retrievable
             # meaning; delivering them put a median of 20 stray lines into
             # every rag.md and polluted 46% of chunks (measured 2026-08-10).
-            # They stay in the IR for provenance.
-            if is_page_furniture(block):
+            # The same goes for the publisher's advert bound into the last
+            # page's second column (book title, price, hotline, QR code):
+            # 32 of the 167 documents shipped one as body prose. Both stay in
+            # the IR for provenance.
+            if is_non_content(block):
                 continue
 
             # A figure's non-empty ``structured_content`` marks its page "visually
@@ -5252,16 +5574,27 @@ class PackageStage:
                 if asset and self._is_decorative_figure_asset(asset):
                     # Decorative figure (arrow/icon/no-text): drop it entirely, as before.
                     continue
-                fallback_title = "Flowchart" if semantic_output_language == "en" else "流程圖"
-                asset_title = asset.title if asset else fallback_title
-                visual_content = self._render_visual_semantic_content(
-                    asset_title,
-                    self._ground_visual_output_terms(
-                        block_enrichment.get("output", {}),
-                        grounding_tokens,
-                        semantic_output_language=semantic_output_language,
-                    ),
+                grounded_output = self._ground_visual_output_terms(
+                    block_enrichment.get("output", {}),
+                    grounding_tokens,
                     semantic_output_language=semantic_output_language,
+                )
+                # Body weave, not a standalone asset document: the figure's
+                # sections must sit *under* the article's own ``##`` chapters and
+                # must say which figure they describe.
+                container_title = self._visual_container_title(
+                    document_ir,
+                    block,
+                    asset,
+                    grounded_output,
+                    semantic_output_language=semantic_output_language,
+                )
+                visual_content = self._render_visual_semantic_content(
+                    container_title,
+                    grounded_output,
+                    semantic_output_language=semantic_output_language,
+                    heading_level=0,
+                    container_title=container_title,
                 ).strip()
                 if visual_content:
                     content = visual_content + "\n\n"
@@ -5282,6 +5615,7 @@ class PackageStage:
                 block,
                 asset_map,
                 semantic_output_language=semantic_output_language,
+                document_ir=document_ir,
             )
 
             if block_lines:
@@ -5498,6 +5832,7 @@ class PackageStage:
         block: Block,
         asset_map: dict[str, AssetEntry],
         semantic_output_language: str = "zh-TW",
+        document_ir: DocumentIR | None = None,
     ) -> list[str]:
         """Render a single block for rag.md."""
         lines: list[str] = []
@@ -5522,8 +5857,10 @@ class PackageStage:
                 caption = " ".join(str(x) for x in caption if x)
 
             # Convert HTML table to semantic retrieval text; avoid raw HTML or legacy TABLE/ROW format.
+            nearby_caption = self._nearest_table_caption(document_ir, block) if document_ir else ""
             title = asset.title if asset else infer_table_asset_title(
                 caption=caption,
+                nearby_caption=nearby_caption,
                 source_title="",
                 page_idx=block.page_idx,
                 table_idx=0,
@@ -5534,6 +5871,7 @@ class PackageStage:
                 title,
                 semantic_output_language=semantic_output_language,
             )
+            table_text = self._drop_recovered_table_heading(table_text, title, nearby_caption)
             if table_text:
                 lines.append(table_text)
             else:
@@ -5555,7 +5893,11 @@ class PackageStage:
                 lines.append(f"[[asset:{asset.asset_id}]]")
 
         elif block.type == BlockType.IMAGE:
-            caption = block.payload.get("caption", "")
+            # MinerU emits img_caption as a list; an uncoerced list appended to
+            # ``lines`` blows up the caller's "\n".join with a TypeError, taking
+            # the whole package stage down for any figure that has a caption but
+            # no exported asset.
+            caption = caption_text(block.payload.get("caption", ""))
 
             if asset and self._is_decorative_figure_asset(asset):
                 return []

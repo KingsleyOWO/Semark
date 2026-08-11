@@ -5,7 +5,12 @@ from typing import Any
 
 from app.models.document_ir import coerce_payload_text
 from app.pipeline.semantic.language import normalize_semantic_output_language, page_label
-from app.pipeline.structured_rag import parse_html_table
+from app.pipeline.structured_rag import (
+    TableGrid,
+    expand_table_header_rows,
+    parse_html_table_grid,
+    table_row_spans,
+)
 
 # LaTeX symbol patterns for cleanup
 LATEX_CHECKBOX_PATTERNS = [
@@ -143,6 +148,14 @@ def html_table_to_text(html: str, caption: str | list | None = None) -> str:
 
 
 
+def _cleaned_caption_text(value: str | list | None) -> str:
+    if isinstance(value, list):
+        text = " ".join(str(x) for x in value if str(x).strip())
+    else:
+        text = str(value or "")
+    return clean_latex_symbols(re.sub(r"\s+", " ", text).strip())
+
+
 def infer_table_asset_title(
     *,
     caption: str | list | None,
@@ -150,16 +163,24 @@ def infer_table_asset_title(
     page_idx: int | None = None,
     table_idx: int = 0,
     semantic_output_language: str = "zh-TW",
+    nearby_caption: str | list | None = None,
 ) -> str:
-    """Infer a human-readable title for split table documents."""
+    """Infer a human-readable title for split table documents.
 
-    if isinstance(caption, list):
-        caption_text = " ".join(str(x) for x in caption if str(x).strip())
-    else:
-        caption_text = str(caption or "")
-    caption_text = clean_latex_symbols(re.sub(r"\s+", " ", caption_text).strip())
+    ``nearby_caption`` is the line printed directly above the grid, recovered by
+    the caller from adjacent layout blocks when MinerU attached no
+    ``table_caption`` (52 of 128 tables in the 2026-08 corpus). A table's name is
+    a *local* thing, so it outranks the document-level ``source_title``, which is
+    only a last resort — an article title names the article, not its third table.
+    """
+
+    caption_text = _cleaned_caption_text(caption)
     if caption_text and not _is_generic_table_title(caption_text):
         return caption_text[:100]
+
+    nearby_text = _cleaned_caption_text(nearby_caption)
+    if nearby_text and not _is_generic_table_title(nearby_text):
+        return nearby_text[:100]
 
     language = _resolve_render_language(semantic_output_language)
     table_label = "Table" if language == "en" else "表格"
@@ -201,7 +222,8 @@ def semantic_table_to_text(
     a self-contained record so RAG can answer by row keys such as classification
     number, item name, amount, owner unit, or retention period.
     """
-    rows = parse_html_table(html)
+    grid = parse_html_table_grid(html)
+    rows = grid.rows
     if not rows:
         return ""
 
@@ -217,9 +239,14 @@ def semantic_table_to_text(
     if header_idx is None:
         return table_fragment_to_text(rows, title, semantic_output_language=language)
 
-    header = [_clean_table_cell(cell) for cell in rows[header_idx]]
+    merged = _merge_header_rows(grid, header_idx)
+    if merged is None:
+        header = [_clean_table_cell(cell) for cell in rows[header_idx]]
+        data_start = header_idx + 1
+    else:
+        header, data_start = merged
     context_rows = rows[:header_idx]
-    data_rows = rows[header_idx + 1 :]
+    data_rows = rows[data_start:]
     width = len(header)
 
     lines: list[str] = [
@@ -237,6 +264,7 @@ def semantic_table_to_text(
     lines.extend(["", f"## {_table_heading('rows', language)}"])
 
     last_values: dict[int, str] = {}
+    heading_counts: dict[str, int] = {}
     record_idx = 0
     for raw_row in data_rows:
         row = [_clean_table_cell(cell) for cell in raw_row]
@@ -276,6 +304,12 @@ def semantic_table_to_text(
 
         record_idx += 1
         heading = _semantic_table_record_heading(data_pairs, record_idx)
+        # A row key must identify one row. Even first+second column collides on
+        # tables that repeat a merged key cell (live: 「### 長 甲部門」 twice
+        # under a shared 保存年限 key), so the second one is numbered.
+        heading_counts[heading] = heading_counts.get(heading, 0) + 1
+        if heading_counts[heading] > 1:
+            heading = f"{heading} #{heading_counts[heading]}"
         separator = ": " if language == "en" else "："
         lines.extend(["", f"### {heading}"])
         for key, value in data_pairs:
@@ -656,6 +690,122 @@ def _detect_semantic_table_header_index(rows: list[list[str]]) -> int | None:
 
 _TABLE_MARKER_CELLS = {"●", "○", "◎", "✓", "✔", "V", "v"}
 
+# A header block deeper than three physical rows is a layout accident, not a
+# header; capping it keeps a runaway rowspan from eating the data rows.
+_MAX_HEADER_ROWS = 3
+
+# A column label is a label. When MinerU folds a body paragraph into the header
+# row and gives it a rowspan, the row underneath is real data wearing a
+# sub-label's clothes (live: a case-study table whose header row carries a
+# 75-character 描述… cell, so 公用事業／能源輸出最佳化／E.ON — an actual record —
+# was about to be promoted to column names). Every genuine two-row header in the
+# corpus keeps its top row at 25 characters or less.
+_MAX_HEADER_LABEL_CHARS = 40
+
+
+def _merge_header_rows(grid: TableGrid, header_idx: int) -> tuple[list[str], int] | None:
+    """Merge a possibly multi-row table header into one row of column names.
+
+    Returns ``(header, data_start)`` where ``data_start`` indexes ``grid.rows``,
+    or None when there is no span data to work with (plain-text table bodies).
+
+    MinerU gives us complete colspan/rowspan data — 67 of the 128 tables in the
+    2026-08 corpus carry a span of 2 or more — and we used to drop it twice:
+    a `<td colspan=2>` header named only its first sub-column (926 「欄位N」
+    placeholders across 22 tables), and taking rows[header_idx] alone pushed the
+    sub-label row into the data records (「- 產品名稱：產品名稱」, 8 tables).
+    """
+
+    if not grid.cells or header_idx >= len(grid.source_row_index):
+        return None
+    header_start = grid.source_row_index[header_idx]
+    header_rows = _header_row_count(grid, header_start)
+    expanded = expand_table_header_rows(grid, header_start, header_rows)
+    if not expanded:
+        return None
+
+    # Guard 3: the table is as wide as its EXPANDED HEADER row, never as wide as
+    # the widest grid row. Rowspan carry-over makes some rows wider than the
+    # header (live: a five-industry matrix with an 8-wide row against a 6-wide
+    # header); sizing by the global maximum appends nameless columns and
+    # manufactures new 欄位N placeholders instead of removing them.
+    width = len(expanded[0])
+    names: list[str] = []
+    for column in range(width):
+        parts: list[str] = []
+        for row in expanded:
+            value = _clean_table_cell(row[column]) if column < len(row) else ""
+            if value and value not in parts:
+                parts.append(value)
+        names.append("－".join(parts))
+
+    data_start = len(grid.rows)
+    for idx in range(header_idx + 1, len(grid.rows)):
+        if grid.source_row_index[idx] >= header_start + header_rows:
+            data_start = idx
+            break
+    return _dedupe_header_names(names), data_start
+
+
+def _header_row_count(grid: TableGrid, header_start: int) -> int:
+    """How many physical rows the header block spans (1 unless proven otherwise).
+
+    Guard 1: a second header row is only claimed when the top header row has BOTH
+    a colspan >= 2 and a rowspan >= 2. Rowspan alone is a tall single-row header
+    whose next row is real data (live: 「頻率範圍 | 頻寬 | 使用現況(rowspan=2)」,
+    and a satellite-band table with the same shape); claiming that row swallows
+    the first record. All 15 corpus tables that really do have a two-row header
+    satisfy both conditions.
+    """
+
+    spans = table_row_spans(grid, header_start)
+    if not spans:
+        return 1
+    if not any(colspan >= 2 for _, colspan in spans):
+        return 1
+    depth = max(rowspan for rowspan, _ in spans)
+    if depth < 2:
+        return 1
+    if any(
+        len(_clean_table_cell(cell.get("text"))) > _MAX_HEADER_LABEL_CHARS
+        for cell in grid.cells[header_start]
+    ):
+        return 1
+
+    count = min(depth, _MAX_HEADER_ROWS)
+    top_width = sum(colspan for _, colspan in spans)
+    for offset in range(1, count):
+        row_idx = header_start + offset
+        if row_idx >= len(grid.cells):
+            return 1
+        # Every continuation row must exactly complete the top row's width once
+        # the cells that span down into it are accounted for. Anything else means
+        # we guessed the block wrong, and a wrong guess costs a data row.
+        carried = sum(colspan for rowspan, colspan in spans if rowspan > offset)
+        own = sum(colspan for _, colspan in table_row_spans(grid, row_idx))
+        if own + carried != top_width:
+            return 1
+    return count
+
+
+def _dedupe_header_names(names: list[str]) -> list[str]:
+    """Suffix repeated column names so every value stays attributable.
+
+    Colspan fill legitimately repeats a group label across its sub-columns, and
+    some source tables simply repeat a name; either way a record that renders
+    「- 國家：」 twice cannot be read back.
+    """
+
+    seen: dict[str, int] = {}
+    result: list[str] = []
+    for name in names:
+        if not name:
+            result.append(name)
+            continue
+        seen[name] = seen.get(name, 0) + 1
+        result.append(name if seen[name] == 1 else f"{name}({seen[name]})")
+    return result
+
 
 def _looks_like_structural_header(header: list[str], data_rows: list[list[str]]) -> bool:
     """Matrix tables (e.g. rooms as columns, equipment as rows, ● marks in
@@ -732,8 +882,18 @@ def _semantic_table_record_heading(pairs: list[tuple[str, str]], record_idx: int
         value = values.get(key)
         if value:
             return value[:80]
+    # The last resort used to be the first column alone, which is a row key only
+    # when the first column happens to be unique. Live: 「### 長」 five times in
+    # one 保存年限 table and 「### 2030年」 twice in a spectrum table — 93 headings
+    # across 22 tables / 14 documents were unusable as retrieval keys. The second
+    # value is what separates them, except for a matrix marker (●/✓), which says
+    # nothing about which row this is.
     first_value = pairs[0][1] if pairs else ""
-    return (first_value or f"資料列 {record_idx}")[:80]
+    second_value = pairs[1][1] if len(pairs) > 1 else ""
+    if second_value in _TABLE_MARKER_CELLS:
+        second_value = ""
+    fallback = " ".join(part for part in (first_value, second_value) if part)
+    return (fallback or f"資料列 {record_idx}")[:80]
 
 
 def clean_html_table(html: str) -> str:

@@ -25,6 +25,7 @@ from app.db.database import Database
 from app.models.document_ir import Block, BlockType, DocumentIR
 from app.pipeline.org_chart_parser import OrgChartParser
 from app.pipeline.semantic.language import resolve_semantic_output_language
+from app.pipeline.stages.normalize import is_promotional_insert
 from app.pipeline.structured_rag import looks_like_reference_table
 
 # Scanned visual page detection: a page whose IR is dominated by IMAGE
@@ -1274,6 +1275,21 @@ class EnrichStage:
 
         for block in document_ir.blocks:
             kind = self._get_enrichment_kind(block, document_ir, is_form_document)
+
+            # The publisher's back-page advert never reaches any delivery
+            # surface, so describing its artwork is money spent on output
+            # nobody reads: 105 book covers, QR codes and partner logos across
+            # 32 of the store's 167 documents were billed as figure enrichment
+            # (measured 2026-08-11). Counted after ``kind`` so the number is
+            # the VLM calls actually saved, and skipped here rather than inside
+            # ``_get_enrichment_kind`` so that saving stays visible in the
+            # stats instead of blending into ``mineru_only_blocks``.
+            if kind and is_promotional_insert(block):
+                gating_stats["skip_reasons"]["promotional_insert"] = (
+                    gating_stats["skip_reasons"].get("promotional_insert", 0) + 1
+                )
+                continue
+
             if kind:
                 gating_stats["vlm_candidate_blocks"] += 1
                 gating_stats["vlm_candidates_by_kind"][kind] = (

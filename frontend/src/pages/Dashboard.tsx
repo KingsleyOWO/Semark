@@ -341,8 +341,10 @@ export function Dashboard() {
   const handleBatchUpload = async (files: File[]) => {
     if (files.length === 0) return
 
-    // 限制最多 200 個文件
-    const MAX_FILES = 200
+    // 一次最多 1000 個檔案。這是操作面的保護閥，不是資源限制:上傳走
+    // 一檔一請求、前端固定 3 條併發,峰值記憶體由併發數決定而不是檔案數,
+    // 所以放寬只是把整批的耗時拉長,不會多吃記憶體。
+    const MAX_FILES = 1000
     if (files.length > MAX_FILES) {
       alert(t('dashboard.confirmMaxFiles', { max: MAX_FILES, count: files.length }))
       return

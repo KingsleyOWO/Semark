@@ -22,7 +22,7 @@ from app.adapters.vlm import EnrichmentOutput, VLMAdapter
 from app.config import PipelineConfig, settings
 from app.core.cache import CacheManager, compute_config_hash
 from app.db.database import Database
-from app.models.document_ir import Block, BlockType, DocumentIR
+from app.models.document_ir import Block, BlockType, DocumentIR, coerce_payload_text
 from app.pipeline.org_chart_parser import OrgChartParser
 from app.pipeline.semantic.language import resolve_semantic_output_language
 from app.pipeline.stages.normalize import is_promotional_insert
@@ -1359,8 +1359,10 @@ class EnrichStage:
 
         if block.type == BlockType.IMAGE:
             # Enrich figures that lack good captions
-            caption = block.payload.get("caption", "")
-            block.payload.get("footnote", "")
+            # ``len()`` on MinerU's raw caption list counts parts, not
+            # characters, so the "too short" test below was reading 1 or 2 for
+            # every captioned figure and always firing.
+            caption = coerce_payload_text(block.payload.get("caption"))
 
             if self.enrich_config.vlm_enrich_figures:
                 # Enrich if caption is missing or too short

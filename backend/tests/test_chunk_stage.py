@@ -188,6 +188,34 @@ def test_table_block_text_includes_footnote():
     assert "預借" in text
 
 
+def test_table_title_never_ships_as_a_python_list_repr():
+    """MinerU returns table_caption as a list every time.
+
+    Interpolating it raw put the list repr in the chunk's table title —
+    ``**['台灣、印度、印尼獲投件數與金額', '單位：件數；億美元']**`` — in 76 places
+    across the reference corpus, and chunks.jsonl is what feeds retrieval.
+    Normalize now flattens captions at build time; this pins the chunk-side
+    guard so a block that reaches the renderer unflattened still prints text.
+    """
+    from app.models.document_ir import Block, BlockType
+
+    block = Block(
+        block_id="tbl1",
+        type=BlockType.TABLE,
+        page_idx=0,
+        payload={
+            "table_caption": ["示範島獲投件數與金額", "單位：件數；億美元"],
+            "table_body": "<table><tr><td>件數</td><td>金額</td></tr></table>",
+        },
+    )
+
+    text = ChunkStage()._block_to_text(block)
+
+    assert "**示範島獲投件數與金額 單位：件數；億美元**" in text
+    assert "[" not in text.splitlines()[0]
+    assert "'" not in text.splitlines()[0]
+
+
 def test_chunks_mask_domain_accounts_from_parser_text(tmp_path):
     from app.models.document_ir import DocumentIR, EngineInfo, PageInfo, SourceInfo
 

@@ -5028,11 +5028,7 @@ class PackageStage:
                 # Export table assets, or form assets when VLM classified a native
                 # spreadsheet/layout table as a fillable form.
                 table_body = block.payload.get("table_body", "")
-                caption = block.payload.get("table_caption", "")
-
-                # Ensure caption is a string (could be list from MinerU)
-                if isinstance(caption, list):
-                    caption = " ".join(str(x) for x in caption if x)
+                caption = caption_text(block.payload.get("table_caption"))
 
                 if table_body:
                     needs_review = enrichment.get("quality", {}).get("needs_review", False)
@@ -5316,11 +5312,7 @@ class PackageStage:
 
         elif block.type == BlockType.TABLE:
             table_body = block.payload.get("table_body", "")
-            caption = block.payload.get("table_caption")
-
-            # Ensure caption is a string (MinerU may return list)
-            if isinstance(caption, list):
-                caption = " ".join(str(x) for x in caption if x)
+            caption = caption_text(block.payload.get("table_caption"))
 
             if caption:
                 lines.append(f"**{clean_latex_symbols(caption)}**")
@@ -5850,11 +5842,7 @@ class PackageStage:
 
         elif block.type == BlockType.TABLE:
             table_body = block.payload.get("table_body", "")
-            caption = block.payload.get("table_caption")
-
-            # Ensure caption is a string (MinerU may return list)
-            if isinstance(caption, list):
-                caption = " ".join(str(x) for x in caption if x)
+            caption = caption_text(block.payload.get("table_caption"))
 
             # Convert HTML table to semantic retrieval text; avoid raw HTML or legacy TABLE/ROW format.
             nearby_caption = self._nearest_table_caption(document_ir, block) if document_ir else ""

@@ -33,6 +33,7 @@ from app.models.document_ir import (
     EngineInfo,
     PageInfo,
     SourceInfo,
+    coerce_payload_text,
 )
 from app.pipeline.corpus_rules import DEFAULT_RULESET_PATH, CorpusRules
 from app.pipeline.corpus_rules import get_rules as get_corpus_rules
@@ -604,7 +605,7 @@ class NormalizeStage:
             if item_type == "chart":
                 payload = {
                     "img_path": item.get("img_path", ""),
-                    "caption": item.get("chart_caption"),
+                    "caption": coerce_payload_text(item.get("chart_caption")),
                     "footnote": item.get("chart_footnote"),
                     "origin": "chart",
                 }
@@ -614,7 +615,7 @@ class NormalizeStage:
                 return payload
             payload = {
                 "img_path": item.get("img_path", ""),
-                "caption": item.get("img_caption"),
+                "caption": coerce_payload_text(item.get("img_caption")),
                 "footnote": item.get("img_footnote"),
             }
             # Add origin marker for table-converted images
@@ -624,10 +625,17 @@ class NormalizeStage:
         elif block_type == BlockType.TABLE:
             payload = {
                 "table_body": item.get("table_body", ""),
-                "table_caption": item.get("table_caption"),
+                # MinerU returns this as a list every time (128/128 across the
+                # reference corpus), so a renderer that interpolates it raw
+                # prints the list repr — chunks.jsonl shipped 76 table titles
+                # as ``**['…']**``. Flatten once here rather than at each of
+                # the read sites, which is what let one of them drift.
+                "table_caption": coerce_payload_text(item.get("table_caption")),
                 # Slide reminders printed under a table arrive in
                 # table_footnote, not as a separate text block — dropping the
-                # field silently loses authored content.
+                # field silently loses authored content. Footnotes stay a list:
+                # their consumers join them with newlines, and flattening would
+                # run separate printed lines together.
                 "table_footnote": item.get("table_footnote"),
             }
             # Keep the table crop so the parsed HTML can be verified against it

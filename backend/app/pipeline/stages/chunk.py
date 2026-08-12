@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from app.config import PipelineConfig
-from app.models.document_ir import Block, BlockType, DocumentIR
+from app.models.document_ir import Block, BlockType, DocumentIR, coerce_payload_text
 from app.pipeline.delivery import atomic_write_jsonl
 from app.pipeline.privacy import scrub_transcribed_privacy, set_privacy_scrub_enabled
 from app.pipeline.stages.normalize import is_non_content
@@ -622,7 +622,7 @@ class ChunkStage:
             return text
 
         elif block.type == BlockType.TABLE:
-            caption = block.payload.get("table_caption", "")
+            caption = coerce_payload_text(block.payload.get("table_caption"))
             body = _table_body_to_markdown(block.payload.get("table_body", ""))
             footnote = block.payload.get("table_footnote")
             if isinstance(footnote, str):
@@ -634,7 +634,7 @@ class ChunkStage:
         elif block.type == BlockType.IMAGE:
             if block.block_id in self._decorative_blocks:
                 return ""
-            caption = block.payload.get("caption", "")
+            caption = coerce_payload_text(block.payload.get("caption"))
             # Prefer the VLM figure retrieval text so the figure's information is
             # searchable in the chunk body, rather than a model-unreadable
             # ``[Image: caption]`` placeholder. Falls back to the placeholder when

@@ -63,7 +63,10 @@ def test_chart_maps_to_image_with_content_preserved():
     assert block is not None
     assert block.type == BlockType.IMAGE
     assert block.payload["img_path"] == "images/chart_01.jpg"
-    assert block.payload["caption"] == ["圖一 歷年成長率"]
+    # Captions are flattened to text at build time so no renderer has to know
+    # MinerU returns a list; footnotes stay a list because their consumers join
+    # them with newlines and flattening would run separate printed lines together.
+    assert block.payload["caption"] == "圖一 歷年成長率"
     assert block.payload["footnote"] == ["資料來源：主計總處"]
     assert block.payload["chart_content"] == "2021 15% 2022 20% 2023 25%"
     assert block.payload["origin"] == "chart"

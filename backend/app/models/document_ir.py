@@ -14,9 +14,12 @@ def coerce_payload_text(value: Any) -> str:
     """Coerce a MinerU payload field to text.
 
     MinerU emits caption/footnote fields (img_caption, chart_caption, ...) as
-    lists of strings, and normalize copies them into the block payload
-    verbatim. Payloads are untyped dicts, so nothing else enforces the
-    `-> str` contract that every get_text() caller relies on.
+    lists of strings. Normalize now coerces the caption fields when it builds
+    the payload, so blocks from _build_payload already satisfy the `-> str`
+    contract. This stays the read-side guard for the shapes normalize does not
+    flatten: footnotes (kept as lists so their line breaks survive), payloads
+    built by other producers, and document_ir.json written before the
+    build-time coercion landed.
     """
     if isinstance(value, list):
         return " ".join(str(part) for part in value if part)

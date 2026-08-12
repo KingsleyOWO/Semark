@@ -178,6 +178,43 @@ def _normalize_for_coverage(text: str) -> str:
     return re.sub(r"[\s\\]+", "", str(text or ""))
 
 
+def _coverage_texts(block: Block) -> tuple[str, str, str]:
+    """A block's text as stored, with tags stripped, and its annotations.
+
+    PyMuPDF reads a table as one box that also covers the 注／資料來源 lines
+    printed under the border and the caption above it, while MinerU files those
+    into ``table_footnote``/``table_caption``. Measured against ``table_body``
+    alone, the PPDR table on page 4 of the 2024 spectrum report matched 0.39 of
+    its own 4-grams — under the 0.60 threshold — so the whole table came back as
+    a supplemented text block and rag.md carried it twice: once as proper
+    records, once as an unsegmented run of every cell. Adding the two fields
+    takes the same fragment to 0.85.
+
+    Tags are stripped for the same reason: with them in place a 4-gram is cut at
+    every cell boundary, which cost this fragment another 0.11.
+
+    Three strings rather than one because the widened forms are not trustworthy
+    on their own — the stored text keeps the original comparison intact, and the
+    other two are admitted only under the conditions in
+    ``_table_covers_fragment``.
+    """
+    text = block.get_text() or ""
+    if isinstance(text, list):
+        # IMAGE captions from MinerU are lists of strings
+        text = "\n".join(str(part) for part in text)
+    if block.type != BlockType.TABLE:
+        return text, text, ""
+
+    annotations: list[str] = []
+    for key in ("table_caption", "table_footnote"):
+        value = block.payload.get(key)
+        if isinstance(value, list):
+            annotations.extend(str(part) for part in value if part)
+        elif value:
+            annotations.append(str(value))
+    return text, re.sub(r"<[^>]+>", " ", text), "\n".join(annotations)
+
+
 # Every payload field that carries authored prose. Captions and footnotes
 # arrive as lists of strings from MinerU; table_body is HTML, and the converter
 # is character-level, so the markup passes through untouched.
@@ -290,6 +327,13 @@ class NormalizeStage:
     # repeated boilerplate mask a genuine gap.
     COVERAGE_PAGE_RADIUS = 1
     COVERAGE_GRAM_RATIO = 0.6  # share of the fragment's 4-grams the block must hold
+    # What a table's caption/footnote must reach to suppress a fragment on its
+    # own. Far above COVERAGE_GRAM_RATIO because those fields are boilerplate:
+    # see _table_covers_fragment.
+    COVERAGE_ANNOTATION_RATIO = 0.95
+    # How long a fragment must be before a table's widened text may delete it on
+    # a fuzzy match. Shorter than this and only an exact match will do.
+    COVERAGE_TABLE_DUMP_MIN_CHARS = 100
     COVERAGE_CONTAINMENT = 0.9  # share of the candidate's box inside an existing block
 
     # Line merging for PyMuPDF supplements. The extractor hands back one entry
@@ -1591,11 +1635,19 @@ class NormalizeStage:
                 target_bbox, block.bbox_norm or []
             ) >= self.COVERAGE_CONTAINMENT:
                 return True
-            block_text = block.get_text() or ""
-            if isinstance(block_text, list):
-                # IMAGE captions from MinerU are lists of strings
-                block_text = "\n".join(str(part) for part in block_text)
-            if self._block_covers_fragment(target_text_clean, _normalize_for_coverage(block_text)):
+            stored, stripped, annotations = _coverage_texts(block)
+            if block.type == BlockType.TABLE:
+                covered = self._table_covers_fragment(
+                    target_text_clean,
+                    _normalize_for_coverage(stored),
+                    _normalize_for_coverage(stripped),
+                    _normalize_for_coverage(annotations),
+                )
+            else:
+                covered = self._block_covers_fragment(
+                    target_text_clean, _normalize_for_coverage(stored)
+                )
+            if covered:
                 return True
 
         return False
@@ -1617,6 +1669,62 @@ class NormalizeStage:
         grams = [fragment[i:i + 4] for i in range(len(fragment) - 3)]
         hits = sum(1 for gram in grams if gram in block_text)
         return hits / len(grams) > self.COVERAGE_GRAM_RATIO
+
+    def _table_covers_fragment(
+        self, fragment: str, stored: str, stripped: str, annotations: str
+    ) -> bool:
+        """As above, but a table may also answer for what is printed around it.
+
+        PyMuPDF reads a table as one box covering the caption above the border
+        and the 注／資料來源 lines below it, which MinerU files into separate
+        payload fields, and it reads across cell boundaries that the stored HTML
+        keeps apart. Both have to be admitted or the whole box comes back as a
+        TEXT block and rag.md carries the table twice. Neither can be admitted
+        freely, for opposite reasons:
+
+        The annotations are boilerplate. Nearly every table in the corpus signs
+        off 「資料來源：本研究整理(2025)。」, so a *figure's* source line
+        「資料來源：本研究繪製(2025)。」 shares 0.64 of its 4-grams with the
+        footnote of a table one page away, and 「資料來源：APEC(2024)。」 shares
+        0.69 with a table's 「資料來源：APEC(2017)。」 — both over the threshold.
+        Letting them carry a fragment alone deleted eight such lines across the
+        167-document store, silently: the line simply is not in rag.md.
+
+        The stripped body invents 4-grams that were never printed — 「國家PPD」
+        exists only once the cell boundary between 「國家」 and 「PPDR機制」 is
+        gone — so it matches loose runs of table vocabulary that a genuine
+        missing paragraph beside a table can also have.
+
+        Hence: an exact match always counts, and a fuzzy one only for a fragment
+        long enough to *be* the re-read box. The smallest true whole-table
+        fragment in the store is 106 characters; every shorter one is a caption
+        or a source line, where a stray duplicate costs a repeated phrase but a
+        deletion costs the only copy. Above that floor the annotations may still
+        only confirm what the body already largely accounts for, unless they
+        effectively are the fragment (``COVERAGE_ANNOTATION_RATIO`` — the lines
+        that must survive top out at 0.786, a table's own re-read note at 0.95).
+        """
+        if not fragment:
+            return False
+        if self._block_covers_fragment(fragment, stored):
+            return True  # the comparison as it stood before any of this
+        if fragment in stripped or (annotations and fragment in annotations):
+            return True
+        if len(fragment) < self.COVERAGE_TABLE_DUMP_MIN_CHARS:
+            return False
+
+        grams = [fragment[i:i + 4] for i in range(len(fragment) - 3)]
+        own = sum(1 for gram in grams if gram in stripped)
+        if not annotations:
+            return own / len(grams) > self.COVERAGE_GRAM_RATIO
+
+        borrowed = sum(
+            1 for gram in grams if gram not in stripped and gram in annotations
+        )
+        ratio = (own + borrowed) / len(grams)
+        if ratio <= self.COVERAGE_GRAM_RATIO:
+            return False
+        return own >= borrowed or ratio >= self.COVERAGE_ANNOTATION_RATIO
 
     async def _render_and_enrich_pages(
         self,

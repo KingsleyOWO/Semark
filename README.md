@@ -15,11 +15,12 @@ Use Semark when you need:
 - PDF to structured Markdown for RAG and LLM applications.
 - MinerU-based document parsing with a usable web UI and API.
 - VLM-assisted extraction for forms, figures, flowcharts, diagrams, and visual documents.
+- Table repair: when the parser collapses a row's cell boundaries into one merged cell, the table image is re-read and the grid rebuilt, so the columns stay separate in the output.
 - Screenshot-heavy how-to guides: UI screenshots become semantic descriptions, menu/button paths, and on-screen text instead of dead images.
 - Automatic file splitting for long documents that contain multiple forms, tables, flowcharts, or attachments.
 - Main-text-only export: download exactly the main document shown in the viewer, without the split attachments, in MD/DOCX/TXT.
 - Masking of personal information that OCR/VLM would otherwise transcribe from screenshots into the output.
-- Bilingual Traditional Chinese and English semantic outputs.
+- Bilingual Traditional Chinese and English semantic outputs, with technical proper nouns left in English.
 - Docker or local deployment for private documents without forcing cloud model usage.
 
 ## Demo Preview
@@ -61,7 +62,7 @@ Each demo pairs a real public source page with the generated RAG-ready semantic 
 
 The screenshots are dead image links (the portal panels' VA10091 / SAM.gov / contact facts simply do not exist as text), an OCR typo "AAuthorized" got promoted to a heading, and a mid-procedure step became a section title.
 
-**What Semark delivers** (main document, excerpt — [full artifacts](examples/demos/en-screenshot-guide-01/))
+**What Semark delivers** (main document, excerpt — [full main document](examples/demos/en-screenshot-guide-01/output.md))
 
 ```markdown
 # Welcome to the VA Customer Engagement Portal (CEP)
@@ -174,7 +175,7 @@ Grouped by meaning for completion:
 
 The entire data-entry screen — every field, every hint value, the red boxes — is that one dead image link. A retriever can answer nothing about the form from this.
 
-**What Semark delivers** (main document, excerpt — [full artifacts](examples/demos/zh-screenshot-guide-01/))
+**What Semark delivers** (main document, excerpt — [full main document](examples/demos/zh-screenshot-guide-01/output.md))
 
 ```markdown
 # 列印國庫繳款書操作說明
@@ -289,9 +290,9 @@ The masking is a best-effort safety net for common patterns, not a guarantee. If
 1. **Ingest**: upload PDF, Office, HTML, or image files through the UI/API.
 2. **Parse**: MinerU extracts layout, OCR text, tables, page images, and document blocks.
 3. **Normalize**: the backend builds a unified document IR with source maps and page references.
-4. **Enrich**: optional VLM calls analyze forms, figures, diagrams, flowcharts, and visually dense pages.
+4. **Enrich**: optional VLM calls analyze forms, figures, diagrams, flowcharts, and visually dense pages. Tables whose cell boundaries the parser lost are re-read from the table crop and rebuilt.
 5. **Package**: rule-based semantic rendering plus an optional reviewer model creates final RAG-ready Markdown and split child files for independent forms, tables, flowcharts, figures, or attachments.
-6. **Quality Gate**: the pipeline checks structure, language consistency, missing semantic output, and repair metadata.
+6. **Quality Gate**: the pipeline checks structure, language consistency, missing semantic output, mis-split child documents, and repair metadata.
 7. **Export**: users can view, download, or ingest the main document, split semantic documents, chunks JSONL, assets, and quality reports.
 
 ## What It Handles
@@ -587,6 +588,12 @@ Two model roles are supported:
 - `SEMARK_REVIEW_VLM_*`: reviewer model used by the final quality gate to audit the generated semantic output and guide controlled repair checks. If unset, the reviewer falls back to `SEMARK_VLM_*`.
 
 No default command sends documents to a cloud model; remote endpoints are opt-in through configuration.
+
+### Collapsed Table Repair
+
+Table repair is a separate switch from table enrichment. `vlm_enrich_tables` buys summaries for tables that parsed cleanly. `vlm_repair_collapsed_tables` — a `PipelineConfig` field, on by default, with no environment variable — re-reads only the tables whose cell boundaries the parser collapsed into one merged cell (26 of 128 tables in the reference corpus) and rebuilds the grid from the table image, so the cost is bounded by how badly the parse failed.
+
+The original parse is kept alongside the repair as `table_body_mineru`, and every guard fails closed: a ragged grid, or a transcription holding less than 60% of the printed characters, is rejected and the original stands. A table with no crop image is not eligible. Because the image is treated as the authority, a table the model misreads is replaced by a wrong grid rather than a garbled one — those guards are what stands between the two.
 
 ### Semantic Output Language
 

@@ -13,6 +13,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -48,7 +49,11 @@ class OutputFormat(StrEnum):
 class DownloadRequest(BaseModel):
     """Request model for batch download."""
 
-    run_ids: list[str] = Field(..., min_length=1, max_length=500)
+    # One id per document, not per run: the client collapses re-processed runs
+    # before sending (``dedupe_by_doc`` would too, but only AFTER validation, so
+    # an over-long list is rejected before dedupe can help). 2000 leaves ~2x
+    # headroom over a 1000-document corpus.
+    run_ids: list[str] = Field(..., min_length=1, max_length=2000)
     file_types: list[FileType] = Field(
         default=[FileType.DOCUMENTS],
         description="File types to include in download",
@@ -108,7 +113,7 @@ async def download_runs(
 
     Returns a ZIP file containing requested outputs from all specified runs.
 
-    - **run_ids**: List of run IDs to download (max 100)
+    - **run_ids**: List of run IDs to download (max 2000, one per document)
     - **file_types**: Which output files to include (source, documents, quality, etc.)
     - **format**: Output format for markdown files (md, docx, txt, json)
 
@@ -131,7 +136,35 @@ async def download_runs(
     if request.dedupe_by_doc:
         runs_with_docs = _dedupe_runs_by_doc(runs_with_docs)
 
-    # Create ZIP in memory
+    zip_buffer = await run_in_threadpool(_build_download_zip, runs_with_docs, request)
+
+    # Generate filename
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"runs_download_{timestamp}.zip"
+
+    return StreamingResponse(
+        zip_buffer,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+        },
+    )
+
+
+def _build_download_zip(runs_with_docs: list, request: DownloadRequest) -> io.BytesIO:
+    """
+    Build the whole ZIP in memory and return it positioned at the start.
+
+    Every step here is blocking — reading each artifact off disk, converting
+    markdown to docx, deflating — and there is no ``await`` anywhere in it, so
+    running it inline froze the entire event loop for as long as the archive
+    took to assemble. Measured on a 167-document corpus: a docx download held
+    the process for 14.5s, during which an unrelated ``/api/health`` request
+    took 9.7s instead of its usual sub-millisecond. Callers must hand this to a
+    worker thread so one big download stays one slow request instead of an
+    outage for everyone else.
+    """
+
     zip_buffer = io.BytesIO()
     manifest_files = []
     used_entry_names: set[str] = set()
@@ -237,18 +270,7 @@ async def download_runs(
             zf.writestr("manifest.json", manifest.model_dump_json(indent=2))
 
     zip_buffer.seek(0)
-
-    # Generate filename
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"runs_download_{timestamp}.zip"
-
-    return StreamingResponse(
-        zip_buffer,
-        media_type="application/zip",
-        headers={
-            "Content-Disposition": f'attachment; filename="{filename}"',
-        },
-    )
+    return zip_buffer
 
 
 @router.get("/{run_id}/documents/{document_id}/download")

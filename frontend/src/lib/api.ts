@@ -618,7 +618,23 @@ export async function downloadRuns(request: DownloadRequest): Promise<Response> 
     let errorDetail: string
     try {
       const errorJson = JSON.parse(errorText)
-      errorDetail = errorJson.detail || JSON.stringify(errorJson)
+      const detail = errorJson.detail
+      // FastAPI validation errors arrive as a list of {type, loc, msg, input}.
+      // Interpolating that list straight into a template string rendered the
+      // whole failure as "HTTP 422: [object Object]", which reads as the
+      // button doing nothing. Pull the human-readable messages out instead.
+      if (Array.isArray(detail)) {
+        const messages = detail
+          .map((item) =>
+            item && typeof item === 'object' && typeof item.msg === 'string' ? item.msg : String(item)
+          )
+          .filter(Boolean)
+        errorDetail = messages.length ? messages.join('; ') : JSON.stringify(detail)
+      } else if (typeof detail === 'string' && detail) {
+        errorDetail = detail
+      } else {
+        errorDetail = JSON.stringify(errorJson)
+      }
     } catch {
       errorDetail = errorText || res.statusText
     }

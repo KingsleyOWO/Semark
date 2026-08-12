@@ -200,7 +200,14 @@ export function Assets() {
   }
 
   async function downloadSelectedRuns({ content, format }: DownloadSelection) {
-    const runIds = Array.from(selectedRunDownloadIds)
+    // Send one run per document, not every checked run. `dedupe_by_doc` makes
+    // the server collapse re-processed runs anyway, but it runs AFTER request
+    // validation, and `run_ids` is capped at 500 — a corpus checked "select
+    // all" sent 764 ids for 167 documents and got a 422 before dedupe ever
+    // happened. `newestSelectedRuns` is already that collapsed set (it is what
+    // the count in the ZIP filename reports), so the request is unchanged in
+    // meaning and no longer trips the cap.
+    const runIds = newestSelectedRuns.map((run) => run.run_id)
     if (runIds.length === 0) return
 
     // Single document + 主文 → download the file itself instead of a one-file ZIP.

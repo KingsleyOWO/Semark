@@ -140,7 +140,7 @@ async def _shutdown_task_queue_and_db(task_queue: TaskQueue) -> None:
 app = FastAPI(
     title="Semark API",
     description="Semantic Markdown for RAG from PDF, Office, HTML, and images",
-    version="0.3.0",
+    version="0.3.1",
     lifespan=lifespan,
 )
 

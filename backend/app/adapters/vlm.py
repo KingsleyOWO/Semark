@@ -443,6 +443,36 @@ Guidelines:
 Context from document:
 {context}""",
     },
+    "table_reconstruct": {
+        "version": "v1",
+        "system": """You are a careful table transcriber. You read a table from its image and report the grid you see.
+
+Unlike other tasks, the parser text supplied to you is NOT ground truth: it is a suspected-bad parse of this same table. The image is the only authority.
+
+IMPORTANT: You must respond ONLY with valid JSON. Do not include any explanation or markdown formatting.""",
+        "user": """The parser may have lost this table's cell boundaries and merged an entire row into one cell. Read the table from the image and report its real grid.
+
+Respond with JSON in this shape:
+
+{{
+  "parse_was_wrong": true,
+  "header": ["column name", "..."],
+  "rows": [["cell", "..."], ["cell", "..."]],
+  "needs_review": false
+}}
+
+Rules:
+- Compare the image against the parser text below. Set parse_was_wrong to false and return empty header/rows if the parser text already matches the table you see — a wide merged cell is often legitimate.
+- Every row in "rows" must have the same number of cells as "header". Use "" for a blank cell.
+- A cell that the printed table spans across several columns repeats its text in each column it covers.
+- Transcribe only what is printed. Do not compute totals, translate, or tidy wording.
+- Preserve Traditional Chinese and any English exactly as printed, including units and footnote markers.
+- Text that wraps onto several printed lines inside one cell belongs to that one cell; join it without inventing a separator.
+- Set needs_review to true if the image is unreadable or you had to guess a boundary.
+
+Suspected-bad parser text for this table:
+{context}""",
+    },
     "structured_table_records": {
         "version": "v1",
         "system": """You are a careful document table extractor.
@@ -851,6 +881,41 @@ class VLMAdapter:
         return await self._enrich(
             image_path=image_path,
             kind="table_summary",
+            context=enhanced_context,
+            doc_id=doc_id,
+            run_id=run_id,
+            page_idx=page_idx,
+            bbox=bbox,
+            page_thumbnail_path=page_thumbnail_path,
+        )
+
+    async def reconstruct_table(
+        self,
+        image_path: Path,
+        table_body: str,
+        context_text: str = "",
+        doc_id: str | None = None,
+        run_id: str | None = None,
+        page_idx: int | None = None,
+        bbox: list[int] | None = None,
+        page_thumbnail_path: Path | None = None,
+    ) -> EnrichmentOutput:
+        """Re-read a table whose parsed cell boundaries look collapsed.
+
+        The whole table text goes in the prompt rather than the preview
+        ``enrich_table`` sends: the model is being asked to judge whether that
+        text is wrong, which it cannot do from the first few rows.
+
+        Returns parse_was_wrong, header[], rows[][], and needs_review.
+        """
+        parser_text = table_body or "(parser produced no table text)"
+        enhanced_context = parser_text
+        if context_text:
+            enhanced_context = f"{parser_text}\n\n[Surrounding document text:\n{context_text}]"
+
+        return await self._enrich(
+            image_path=image_path,
+            kind="table_reconstruct",
             context=enhanced_context,
             doc_id=doc_id,
             run_id=run_id,

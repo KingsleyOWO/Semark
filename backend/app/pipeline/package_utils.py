@@ -34,6 +34,48 @@ def caption_text(value: Any) -> str:
     return coerce_payload_text(value)
 
 
+# A cell wide enough to be a whole collapsed data row rather than a merged
+# label. Calibrated on the reference corpus: 26 of 128 tables carry one, the
+# same population the earlier survey counted by hand.
+WIDE_COLSPAN_MIN_CHARS = 40
+
+_WIDE_COLSPAN_CELL_RE = re.compile(
+    r"<t[dh][^>]*\bcolspan\s*=\s*\"?(\d+)\"?[^>]*>(.*?)</t[dh]>",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def wide_colspan_cells(table_body: str, min_chars: int = WIDE_COLSPAN_MIN_CHARS) -> list[str]:
+    """Cells spanning 2+ columns that hold more text than a merged label should.
+
+    MinerU sometimes loses a row's cell boundaries and emits the entire row as
+    one ``colspan=6`` cell. The text alone cannot say whether that happened:
+    the columns are interleaved by printed line, not by column, and CJK wraps
+    without a separator, so a collapsed row can arrive with no whitespace at
+    all ("…任務關鍵通訊與消" + another column + "費電子平台合作"). A long merged
+    note cell looks the same to a regex.
+
+    So this is deliberately a wide net, not a verdict: it selects the tables
+    worth showing to a model that can see the crop, and that model decides
+    whether the parse is actually wrong.
+    """
+    if not table_body:
+        return []
+    found: list[str] = []
+    for match in _WIDE_COLSPAN_CELL_RE.finditer(table_body):
+        if int(match.group(1)) < 2:
+            continue
+        text = re.sub(r"<[^>]+>", " ", match.group(2)).replace("&nbsp;", " ").strip()
+        if len(text) >= min_chars:
+            found.append(text)
+    return found
+
+
+def table_may_have_collapsed_rows(table_body: str) -> bool:
+    """Whether ``table_body`` is worth re-reading from its crop image."""
+    return bool(wide_colspan_cells(table_body))
+
+
 # The opening of a table's own note/attribution row. Deliberately narrow: a row
 # that does not announce itself this way is treated as data, both here and in
 # the reconstruction guard in enrich, which stays strict rather than discounting

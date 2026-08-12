@@ -24,6 +24,10 @@ from app.core.cache import CacheManager, compute_config_hash
 from app.db.database import Database
 from app.models.document_ir import Block, BlockType, DocumentIR, coerce_payload_text
 from app.pipeline.org_chart_parser import OrgChartParser
+from app.pipeline.package_utils import (
+    TABLE_NOTE_ROW_RE,
+    table_may_have_collapsed_rows,
+)
 from app.pipeline.semantic.language import resolve_semantic_output_language
 from app.pipeline.stages.normalize import is_promotional_insert
 from app.pipeline.structured_rag import looks_like_reference_table
@@ -532,6 +536,13 @@ class EnrichStage:
                     )
                     if cached:
                         stats["cache_hits"] += 1
+                        # The repair lives in the IR, not in the enrichment
+                        # record, so a cache hit has to re-apply it or the
+                        # cached run silently ships the collapsed table.
+                        if kind == "table_reconstruct":
+                            stats["tables_repaired"] = stats.get("tables_repaired", 0) + int(
+                                self._apply_table_reconstruction(block, cached)
+                            )
                         # Read needs_review from cached output (don't override with False)
                         cached_needs_review = cached.get("needs_review", False) if isinstance(cached, dict) else False
                         enrichments.append(
@@ -561,7 +572,9 @@ class EnrichStage:
                 # Get image path for visual enrichment.
                 # Native tables may have no crop image; table summaries and form-like
                 # spreadsheet tables can still use structured table text as ground truth.
-                image_path = self._get_block_image(block, parse_cache_path)
+                image_path = self._get_block_image(
+                    block, parse_cache_path, allow_table_crop=kind == "table_reconstruct"
+                )
                 text_only_form_table = (
                     kind in ("form_asset", "form_guide") and block.type == BlockType.TABLE
                 )
@@ -588,10 +601,13 @@ class EnrichStage:
                         )
 
                 # Extract table data for table_summary (reduces hallucination)
+                # and for table_reconstruct (the text under suspicion).
                 table_body = None
                 table_headers = None
                 table_body_for_vlm = None  # May be truncated
-                if kind == "table_summary" and block.type == BlockType.TABLE:
+                if kind == "table_reconstruct" and block.type == BlockType.TABLE:
+                    table_body = block.payload.get("table_body", "")
+                elif kind == "table_summary" and block.type == BlockType.TABLE:
                     table_body = block.payload.get("table_body", "")
                     # Use truncated body if available (from gating)
                     if table_gating and table_gating.truncated and table_gating.truncated_body:
@@ -657,6 +673,14 @@ class EnrichStage:
                         "tokens_used": result.tokens_used,
                         "duration_seconds": result.duration_seconds,
                     }
+                    # A reconstructed table is written straight back into the
+                    # shared DocumentIR, so package and chunk both render the
+                    # repaired grid without either needing to know this ran.
+                    if kind == "table_reconstruct":
+                        repaired = self._apply_table_reconstruction(block, result.output)
+                        quality_dict["table_body_replaced"] = repaired
+                        stats["tables_repaired"] = stats.get("tables_repaired", 0) + int(repaired)
+
                     # Add table gating info for table_summary
                     if kind == "table_summary" and table_gating:
                         quality_dict["table_stats"] = table_gating.stats.to_dict()
@@ -1342,6 +1366,108 @@ class EnrichStage:
                 return True
         return False
 
+    @staticmethod
+    def _grid_to_html(
+        header: list[str],
+        rows: list[list[str]],
+        full_width_rows: list[str] | None = None,
+    ) -> str:
+        def cell(tag: str, value: str) -> str:
+            escaped = (
+                str(value)
+                .replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+            )
+            return f"<{tag}>{escaped}</{tag}>"
+
+        parts = ["<table>", "<tr>" + "".join(cell("td", h) for h in header) + "</tr>"]
+        for row in rows:
+            parts.append("<tr>" + "".join(cell("td", c) for c in row) + "</tr>")
+        for note in full_width_rows or []:
+            escaped = (
+                str(note).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            )
+            parts.append(f'<tr><td colspan="{len(header)}">{escaped}</td></tr>')
+        parts.append("</table>")
+        return "".join(parts)
+
+    @staticmethod
+    def _apply_table_reconstruction(block: Block, output: Any) -> bool:
+        """Swap in the grid the VLM read off the crop, if it is a usable one.
+
+        Every rejection below leaves the original parse in place. A collapsed
+        table is bad but honest; a half-transcribed replacement would be worse,
+        because nothing downstream can tell it is incomplete.
+        """
+        if not isinstance(output, dict) or not output.get("parse_was_wrong"):
+            return False
+
+        header = [str(c) for c in (output.get("header") or [])]
+        raw_rows = output.get("rows")
+        if not header or not isinstance(raw_rows, list) or not raw_rows:
+            return False
+
+        rows: list[list[str]] = []
+        for row in raw_rows:
+            # A ragged grid means the model lost the column count, which is the
+            # very thing it was asked to recover. Treat it as a failed read.
+            if not isinstance(row, list) or len(row) != len(header):
+                return False
+            rows.append([str(c) for c in row])
+
+        original = block.payload.get("table_body", "") or ""
+
+        def squeeze(text: str) -> str:
+            return re.sub(r"\s", "", text)
+
+        # A table's trailing 注/資料來源 row is a full-width merged cell — the
+        # same shape as a collapsed data row — and the model, asked for a grid,
+        # drops it. Carry over any full-width row the reconstruction does not
+        # already account for, so the source attribution survives. Judged
+        # against the reconstruction rather than by matching note wording,
+        # because a genuinely collapsed row does reappear there as real cells.
+        # Only rows that announce themselves as notes are carried. A collapsed
+        # data row is full-width too, and carrying that one would both
+        # reinstate the garbage and, by discounting it below, blunt the very
+        # guard meant to catch a short read.
+        rebuilt_text = squeeze("".join(header + [c for r in rows for c in r]))
+        carried = [
+            note
+            for note in EnrichStage._full_width_row_texts(original)
+            if TABLE_NOTE_ROW_RE.match(note)
+            and squeeze(note)[:12]
+            and squeeze(note)[:12] not in rebuilt_text
+        ]
+
+        # Dropped rows are the likely failure here, and they are invisible once
+        # the HTML is replaced, so require the transcription to account for most
+        # of the printed characters. Carried-over notes are not transcribed, so
+        # they are discounted from the target — leaving them in the denominator
+        # made a long 資料來源 row look like a third of the table gone missing.
+        original_chars = len(squeeze(re.sub(r"<[^>]+>", "", original)))
+        carried_chars = sum(len(squeeze(note)) for note in carried)
+        target_chars = max(0, original_chars - carried_chars)
+        if target_chars and len(rebuilt_text) < target_chars * 0.6:
+            return False
+
+        block.payload["table_body_mineru"] = original
+        block.payload["table_body"] = EnrichStage._grid_to_html(header, rows, carried)
+        block.payload["table_body_source"] = "vlm_reconstruct"
+        return True
+
+    @staticmethod
+    def _full_width_row_texts(table_html: str) -> list[str]:  # noqa: D401
+        """Text of rows made of a single cell spanning the whole table."""
+        texts: list[str] = []
+        for row_html in re.findall(r"<tr[^>]*>(.*?)</tr>", table_html or "", re.DOTALL):
+            cells = re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", row_html, re.DOTALL)
+            filled = [re.sub(r"<[^>]+>", " ", c).strip() for c in cells]
+            filled = [c for c in filled if c]
+            if len(filled) == 1 and re.search(r"colspan\s*=\s*\"?[2-9]", row_html, re.IGNORECASE):
+                texts.append(re.sub(r"\s+", " ", filled[0]).strip())
+        return texts
+
     def _get_enrichment_kind(
         self,
         block: Block,
@@ -1378,6 +1504,16 @@ class EnrichStage:
                 and self._is_form_like_table(table_body)
             ):
                 return "form_asset"
+
+            # Repair comes before summarisation: a table whose row boundaries
+            # collapsed has nothing worth summarising until it is re-read, and
+            # the summary prompt would be handed the bad grid as ground truth.
+            if (
+                self.enrich_config.vlm_repair_collapsed_tables
+                and block.payload.get("img_path")
+                and table_may_have_collapsed_rows(table_body)
+            ):
+                return "table_reconstruct"
 
             if self.enrich_config.vlm_enrich_tables:
                 # Enrich data tables that pass the gating criteria
@@ -1800,9 +1936,20 @@ class EnrichStage:
         self,
         block: Block,
         parse_cache_path: Path | None,
+        allow_table_crop: bool = False,
     ) -> Path | None:
-        """Get image path for a block."""
-        if block.type == BlockType.IMAGE:
+        """Get image path for a block.
+
+        ``allow_table_crop`` opts a caller into the table crop that normalize
+        keeps so the parsed HTML can be checked against the picture. It is off
+        by default because the form and table-summary flows deliberately run
+        text-only on tables; only the repair flow needs to see the image.
+        Without it a table kind is produced and then dropped as "missing an
+        analysable image", which is how table_reconstruct fired on 26 tables
+        and enriched none of them.
+        """
+        allowed = (BlockType.IMAGE, BlockType.TABLE) if allow_table_crop else (BlockType.IMAGE,)
+        if block.type in allowed:
             img_path = block.payload.get("img_path", "")
             if img_path and parse_cache_path:
                 # Try relative path
@@ -1946,6 +2093,12 @@ class EnrichStage:
                 doc_id=doc_id, run_id=run_id, page_idx=page_idx, bbox=bbox,
                 page_thumbnail_path=page_thumbnail_path,
                 extra_vars={"semantic_output_language": self._semantic_output_language},
+            )
+        elif kind == "table_reconstruct":
+            return await self.vlm_adapter.reconstruct_table(
+                image_path, table_body=table_body or "", context_text=context,
+                doc_id=doc_id, run_id=run_id, page_idx=page_idx, bbox=bbox,
+                page_thumbnail_path=page_thumbnail_path,
             )
         elif kind == "table_summary":
             # Pass MinerU table data to reduce hallucination

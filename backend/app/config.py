@@ -161,6 +161,11 @@ class EnrichConfig(BaseModel):
     vlm_enrich_forms: bool = True  # Form field extraction + filling guide
     vlm_enrich_figures: bool = True  # Figure/diagram captioning
     vlm_enrich_tables: bool = False  # Table summarization (expensive)
+    # Re-read tables whose parsed cell boundaries look collapsed. Independent of
+    # vlm_enrich_tables: that switch buys summaries for tables that parsed fine,
+    # this one repairs tables that did not, and only those — 26 of 128 tables in
+    # the reference corpus, so the cost is bounded by how badly the parse failed.
+    vlm_repair_collapsed_tables: bool = True
 
     # Gating heuristics for forms
     form_filename_patterns: list[str] = Field(

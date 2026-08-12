@@ -34,6 +34,33 @@ def caption_text(value: Any) -> str:
     return coerce_payload_text(value)
 
 
+# The opening of a table's own note/attribution row. Deliberately narrow: a row
+# that does not announce itself this way is treated as data, both here and in
+# the reconstruction guard in enrich, which stays strict rather than discounting
+# content it cannot classify.
+TABLE_NOTE_ROW_RE = re.compile(
+    r"^\s*(注[：:]|註[：:]|附註|說明[：:]|資料來源|來源[：:]|Note[s]?\s*[:：]|Source\s*[:：])",
+    re.IGNORECASE,
+)
+
+
+def is_table_note_row(row: list[str]) -> bool:
+    """A 注／資料來源 line printed inside the table's own border.
+
+    Papers print the attribution as a final merged cell spanning the table, so
+    after grid expansion it is one non-empty cell in a data-shaped row. The
+    record renderer would key it by the first column and promote it to a row
+    heading — 「### 資料來源：…」 followed by 「- HS 4位碼：資料來源：…」 —
+    which reads as a data row that does not exist. Matched on the row's own
+    wording rather than on shape, because a row that lost its cell boundaries
+    has the same shape and is a genuine data row.
+    """
+    non_empty = [cell for cell in row if cell]
+    if len(non_empty) != 1:
+        return False
+    return bool(TABLE_NOTE_ROW_RE.match(non_empty[0].strip()))
+
+
 def clean_latex_symbols(text: str) -> str:
     """
     Convert common LaTeX symbols to Unicode equivalents.
@@ -265,6 +292,7 @@ def semantic_table_to_text(
 
     last_values: dict[int, str] = {}
     heading_counts: dict[str, int] = {}
+    note_lines: list[str] = []
     record_idx = 0
     for raw_row in data_rows:
         row = [_clean_table_cell(cell) for cell in raw_row]
@@ -275,6 +303,11 @@ def semantic_table_to_text(
         elif len(row) > width:
             row = row[:width]
         if _is_repeated_table_header(row, header):
+            continue
+        if is_table_note_row(row):
+            note = _row_to_inline_text(row)
+            if note and note not in note_lines:
+                note_lines.append(note)
             continue
         if _is_table_section_row(row):
             section_text = _row_to_inline_text(row)
@@ -317,6 +350,12 @@ def semantic_table_to_text(
 
     if record_idx == 0:
         return table_fragment_to_text(rows, title, semantic_output_language=language)
+
+    # Attribution belongs to the table as a whole, so it trails the records
+    # rather than sitting between two of them.
+    if note_lines:
+        lines.append("")
+        lines.extend(note_lines)
 
     return "\n".join(lines).strip()
 

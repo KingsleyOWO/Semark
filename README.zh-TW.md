@@ -284,6 +284,7 @@ Semark 把「截圖為主的文件」（軟體操作手冊、內部教學、新�
 - 本機或雲端模型端點：[VLM Enrichment and Review](#vlm-enrichment-and-review)。
 - 內建範例與可選 public corpus 下載：[Demo Samples](#demo-samples)。
 - 不跑模型也能先看預期輸出：[Demo Preview](#demo-preview)。
+- 這一版改了什麼：[Release Notes 2026-08-12（v0.3.1）](RELEASE_NOTES_20260812.zh-TW.md)。
 
 ## 大致運作方式
 

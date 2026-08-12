@@ -33,7 +33,8 @@ docker-compose.deploy.local.yml
 # Local tooling and release artifacts
 CLAUDE_CODE_LSP_SETUP.md
 DGX_SPARK_HANDOFF.md
-RELEASE_NOTES_*.md
+# Release notes are published; this one is a DGX handoff and holds internal LAN addresses.
+RELEASE_NOTES_20260602.md
 PROJECT_STATUS*.md
 docs/PROJECT_STATUS*.md
 backend/docs/dgx_*.md

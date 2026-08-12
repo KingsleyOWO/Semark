@@ -284,6 +284,7 @@ The masking is a best-effort safety net for common patterns, not a guarantee. If
 - Local or cloud model endpoints: [VLM Enrichment and Review](#vlm-enrichment-and-review).
 - Built-in samples and optional public downloads: [Demo Samples](#demo-samples).
 - Expected output examples without running a model: [Demo Preview](#demo-preview).
+- What changed in the current release: [Release Notes 2026-08-12 (v0.3.1)](RELEASE_NOTES_20260812.md).
 
 ## How It Works
 

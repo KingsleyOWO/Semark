@@ -672,6 +672,12 @@ export interface DownloadRequest {
   format: DownloadOutputFormat
   document_ids?: string[]
   dedupe_by_doc?: boolean
+  /**
+   * Put every markdown file at the ZIP root instead of one folder per source
+   * document. A 300-document export otherwise extracts to 300 folders that have
+   * to be opened one at a time to reach the files.
+   */
+  flatten?: boolean
 }
 
 /**

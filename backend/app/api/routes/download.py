@@ -6,6 +6,7 @@ Provides batch download with format conversion and ZIP packaging.
 
 import io
 import json
+import re
 import zipfile
 from datetime import datetime
 from enum import StrEnum
@@ -71,6 +72,14 @@ class DownloadRequest(BaseModel):
         description=(
             "Keep only the newest run per document, so re-processed documents "
             "are exported once instead of once per run."
+        ),
+    )
+    flatten: bool = Field(
+        default=False,
+        description=(
+            "Put every split document at the archive root instead of in a "
+            "per-source folder. A 300-document export otherwise extracts to 300 "
+            "folders that have to be opened one by one to reach the markdown."
         ),
     )
 
@@ -188,9 +197,17 @@ def _build_download_zip(runs_with_docs: list, request: DownloadRequest) -> io.By
                             request.format,
                             document_ids=request.document_ids,
                             archive_folder_name=archive_folder_name,
+                            flatten=request.flatten,
                         )
                         if document_files:
                             for filename, content in document_files:
+                                # Only flat exports can collide: the folder form
+                                # already isolates each source under its own
+                                # run-suffixed directory.
+                                if request.flatten:
+                                    filename = _dedupe_zip_entry_name(
+                                        filename, run.run_id, used_entry_names
+                                    )
                                 zf.writestr(filename, content)
                                 manifest_files.append(
                                     {
@@ -416,8 +433,9 @@ def _source_name_for(source_path: str | None, run_id: str) -> str:
 
 def _dedupe_zip_entry_name(filename: str, run_id: str, used_names: set[str]) -> str:
     """
-    Batch zips store non-document file types flat at the archive root, so two
-    runs of the same source would otherwise overwrite each other on extraction.
+    Batch zips store non-document file types — and, when ``flatten`` is set,
+    split documents too — flat at the archive root, so two runs of the same
+    source would otherwise overwrite each other on extraction.
     """
     if filename not in used_names:
         used_names.add(filename)
@@ -484,6 +502,7 @@ def _get_document_files(
     format: OutputFormat = OutputFormat.MD,
     document_ids: list[str] | None = None,
     archive_folder_name: str | None = None,
+    flatten: bool = False,
 ) -> list[tuple[str, bytes]]:
     documents_dir = outputs_path / "documents"
     if not documents_dir.exists():
@@ -527,7 +546,11 @@ def _get_document_files(
             title=title,
             format=format,
         )
-        files.append((f"{archive_folder_name}_documents/{filename}", content))
+        # Flat exports drop the per-source folder. The file name already starts
+        # with the source name (``報告_main.md``, ``報告_table01.md``), so the
+        # folder only bought protection against two sources sharing a stem —
+        # which the caller's dedupe pass handles instead.
+        files.append((filename if flatten else f"{archive_folder_name}_documents/{filename}", content))
     return files
 
 
@@ -573,6 +596,100 @@ def _get_document_entries(outputs_path: Path, source_name: str | None = None) ->
     return entries
 
 
+# Characters a ZIP entry must not carry: they are path separators or reserved
+# on Windows. The full-width forms (：？！) are legal and common in the Chinese
+# titles this reads from, so only the ASCII set is stripped.
+_ILLEGAL_FILENAME_CHARS = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
+
+# Titles longer than this are descriptions, not names. Split-asset titles fall
+# back to the VLM's semantic caption when the source carries no caption, which
+# produces a whole sentence ("圖片顯示「作者」二字，以白色字體呈現於…") — true,
+# useful for retrieval, useless as a file name.
+_ASSET_TITLE_MAX_LEN = 40
+_MAIN_TITLE_MAX_LEN = 60
+
+# Openings that mark a VLM description even when it fits the length limit.
+_DESCRIPTION_OPENERS = (
+    "圖片顯示",
+    "畫面顯示",
+    "此圖",
+    "本圖",
+    "該圖",
+    "這張圖",
+    "圖中",
+    "此表",
+    "本表",
+    "該表",
+    "此為",
+    "the image",
+    "this figure",
+    "this image",
+    "this table",
+    "the figure",
+)
+
+# "Figure 1" / "表 3" / "主文" — a title that only restates the kind prefix
+# standing right in front of it. Repeating it makes the name longer and says
+# nothing new.
+_PLACEHOLDER_TITLE = re.compile(
+    r"^(figure|fig|table|tbl|form|image|document|main|untitled"
+    r"|圖|圖片|圖表|表|表格|表單|附件|文件|主文|本文|正文)\s*\d*$",
+    re.IGNORECASE,
+)
+
+
+def _clean_filename_fragment(title: str, max_len: int) -> str:
+    """Reduce a document title to something safe to paste into a file name."""
+
+    cleaned = _ILLEGAL_FILENAME_CHARS.sub(" ", title)
+    cleaned = " ".join(cleaned.split())
+    # Trailing dots and spaces are silently dropped by Windows, which would turn
+    # two distinct names into one on extraction.
+    cleaned = cleaned[:max_len].strip().rstrip(". ")
+    return cleaned
+
+
+def _filename_title_fragment(title: str, is_main: bool, source_name: str = "") -> str:
+    """
+    The readable tail of a download file name, or "" when the title cannot serve.
+
+    Measured over the 2026-08 corpus (141 documents, 301 split assets): every
+    main title was a real article title — none empty, numeric, or duplicated.
+    Asset titles split almost evenly between real captions (48%) and VLM
+    descriptions (48%), with 5% bare "Figure N" placeholders. Appending all of
+    them would name half the files after a sentence, so assets have to earn it;
+    the ones that do not keep exactly the name they have today.
+    """
+
+    stripped = title.strip()
+    if not stripped:
+        return ""
+    if _PLACEHOLDER_TITLE.match(stripped):
+        return ""
+
+    if is_main:
+        fragment = _clean_filename_fragment(stripped, _MAIN_TITLE_MAX_LEN)
+    else:
+        if len(stripped) > _ASSET_TITLE_MAX_LEN:
+            return ""
+        lowered = stripped.lower()
+        if any(lowered.startswith(opener) for opener in _DESCRIPTION_OPENERS):
+            return ""
+        fragment = _clean_filename_fragment(stripped, _ASSET_TITLE_MAX_LEN)
+
+    # That corpus uploaded numeric filenames, so title and source name never
+    # met. Elsewhere the upload is named after the article it holds, and
+    # appending the title verbatim yields 使用說明_main_使用說明.md.
+    if fragment and _folded(fragment) in _folded(source_name):
+        return ""
+    return fragment
+
+
+def _folded(value: str) -> str:
+    """Casefold and drop whitespace, so near-identical names compare equal."""
+    return "".join(value.split()).casefold()
+
+
 def _document_download_base_name(
     source_name: str,
     entry: dict,
@@ -582,7 +699,8 @@ def _document_download_base_name(
     document_id = str(entry.get("document_id") or "")
     kind = str(entry.get("kind") or "").strip().lower()
 
-    if document_id == "main" or kind == "main" or fallback_stem == "main":
+    is_main = document_id == "main" or kind == "main" or fallback_stem == "main"
+    if is_main:
         suffix = "main"
     else:
         prefix = _document_kind_prefix(
@@ -593,6 +711,14 @@ def _document_download_base_name(
         counters[prefix] = counters.get(prefix, 0) + 1
         suffix = f"{prefix}{counters[prefix]:02d}"
 
+    # The kind prefix stays in front of the title: it is what keeps the files
+    # sorted, parseable, and collision-free. The title is an added tail, never a
+    # replacement.
+    fragment = _filename_title_fragment(
+        str(entry.get("title") or ""), is_main=is_main, source_name=source_name
+    )
+    if fragment:
+        return f"{source_name}_{suffix}_{fragment}"
     return f"{source_name}_{suffix}"
 
 

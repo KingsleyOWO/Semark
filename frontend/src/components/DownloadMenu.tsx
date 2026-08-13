@@ -11,11 +11,14 @@ export type DownloadFormat = 'md' | 'docx' | 'txt'
 export interface DownloadSelection {
   content: DownloadContent
   format: DownloadFormat
+  /** True = every file at the ZIP root; false = one folder per source document. */
+  flatten: boolean
 }
 
 const FORMAT_OPTIONS: DownloadFormat[] = ['md', 'docx', 'txt']
 const FORMAT_STORAGE_KEY = 'semark.download.format'
 const CONTENT_STORAGE_KEY = 'semark.download.content'
+const FLATTEN_STORAGE_KEY = 'semark.download.flatten'
 
 function storedFormat(): DownloadFormat {
   const value = typeof window === 'undefined' ? null : window.localStorage.getItem(FORMAT_STORAGE_KEY)
@@ -27,6 +30,11 @@ function storedContent(): DownloadContent {
   return value === 'all' ? 'all' : 'main'
 }
 
+function storedFlatten(): boolean {
+  const value = typeof window === 'undefined' ? null : window.localStorage.getItem(FLATTEN_STORAGE_KEY)
+  return value === 'true'
+}
+
 interface DownloadMenuProps {
   /** Text on the trigger button (icon is added automatically). */
   triggerLabel: ReactNode
@@ -35,6 +43,12 @@ interface DownloadMenuProps {
   disabled?: boolean
   /** Show the 主文/全部文件 choice (batch across runs). */
   showContentChoice?: boolean
+  /**
+   * Show the ZIP layout choice. Only meaningful where the download packages
+   * split documents — the 主文 export is already flat, and a single-file
+   * download has no layout at all.
+   */
+  showFolderChoice?: boolean
   /** Optional scope line shown at the top of the menu. */
   summary?: string
   triggerVariant?: 'default' | 'outline'
@@ -47,6 +61,7 @@ export function DownloadMenu({
   onDownload,
   disabled = false,
   showContentChoice = false,
+  showFolderChoice = false,
   summary,
   triggerVariant = 'default',
   align = 'start',
@@ -56,8 +71,14 @@ export function DownloadMenu({
   const [open, setOpen] = useState(false)
   const [content, setContent] = useState<DownloadContent>(storedContent)
   const [format, setFormat] = useState<DownloadFormat>(storedFormat)
+  const [flatten, setFlatten] = useState<boolean>(storedFlatten)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  // The 主文 export writes straight to the ZIP root already, so the layout
+  // choice only applies to the 全部文件 side.
+  const effectiveContent: DownloadContent = showContentChoice ? content : 'all'
+  const folderChoiceApplies = showFolderChoice && effectiveContent === 'all'
 
   useEffect(() => {
     if (!open) setError(null)
@@ -73,11 +94,20 @@ export function DownloadMenu({
     window.localStorage.setItem(FORMAT_STORAGE_KEY, next)
   }
 
+  function chooseFlatten(next: boolean) {
+    setFlatten(next)
+    window.localStorage.setItem(FLATTEN_STORAGE_KEY, String(next))
+  }
+
   async function confirm() {
     setBusy(true)
     setError(null)
     try {
-      await onDownload({ content: showContentChoice ? content : 'all', format })
+      await onDownload({
+        content: effectiveContent,
+        format,
+        flatten: folderChoiceApplies && flatten,
+      })
       setOpen(false)
     } catch (err) {
       setError(err instanceof Error && err.message ? err.message : t('assets.downloadFailed'))
@@ -141,6 +171,23 @@ export function DownloadMenu({
               ))}
             </div>
           </div>
+          {folderChoiceApplies && (
+            <div className="mt-3 space-y-1.5">
+              <div className="text-xs font-medium text-muted-foreground">{t('assets.downloadLayout')}</div>
+              <ContentOption
+                selected={!flatten}
+                label={t('assets.layoutFolders')}
+                hint={t('assets.layoutFoldersHint')}
+                onSelect={() => chooseFlatten(false)}
+              />
+              <ContentOption
+                selected={flatten}
+                label={t('assets.layoutFlat')}
+                hint={t('assets.layoutFlatHint')}
+                onSelect={() => chooseFlatten(true)}
+              />
+            </div>
+          )}
           {error && <p className="mt-2 text-xs text-destructive">{error}</p>}
           <Button type="button" size="sm" className="mt-3 w-full" onClick={confirm} disabled={busy}>
             {busy ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Download className="mr-2 h-4 w-4" />}

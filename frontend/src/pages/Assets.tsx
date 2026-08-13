@@ -199,7 +199,7 @@ export function Assets() {
     setSelectedRunDownloadIds(new Set())
   }
 
-  async function downloadSelectedRuns({ content, format }: DownloadSelection) {
+  async function downloadSelectedRuns({ content, format, flatten }: DownloadSelection) {
     // Send one run per document, not every checked run. `dedupe_by_doc` makes
     // the server collapse re-processed runs anyway, but it runs AFTER request
     // validation, and `run_ids` is capped at 500 — a corpus checked "select
@@ -220,6 +220,7 @@ export function Assets() {
       file_types: [content === 'main' ? 'main_text' : 'documents'],
       format,
       dedupe_by_doc: true,
+      flatten,
     })
     const label = content === 'main' ? 'main_text' : 'documents'
     triggerBrowserDownload(
@@ -319,7 +320,7 @@ export function Assets() {
     },
   })
 
-  async function downloadCheckedDocuments({ format }: DownloadSelection) {
+  async function downloadCheckedDocuments({ format, flatten }: DownloadSelection) {
     if (!selectedRunId) return
     const documentIds = Array.from(selectedDownloadIds)
     if (documentIds.length === 0) return
@@ -335,6 +336,7 @@ export function Assets() {
       file_types: ['documents'],
       format,
       document_ids: documentIds,
+      flatten,
     })
     const base = selectedRun?.source_name || getFileName(selectedRun?.source_path || '') || selectedRunId
     triggerBrowserDownload(await response.blob(), `${base}_documents_${format}.zip`)
@@ -423,6 +425,7 @@ export function Assets() {
                 triggerLabel={t('assets.downloadRunsCount', { count: selectedRunDownloadCount })}
                 disabled={selectedRunDownloadCount === 0}
                 showContentChoice
+                showFolderChoice
                 summary={t('assets.downloadScopeSummary', {
                   runs: selectedRunDownloadCount,
                   docs: newestSelectedRuns.length,
@@ -514,6 +517,7 @@ export function Assets() {
               <DownloadMenu
                 triggerLabel={t('assets.downloadSelected', { count: selectedDownloadCount })}
                 disabled={!selectedRunId || selectedDownloadCount === 0}
+                showFolderChoice
                 onDownload={downloadCheckedDocuments}
               />
               <Button

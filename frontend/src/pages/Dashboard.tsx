@@ -4,6 +4,8 @@ import { Link } from 'react-router-dom'
 import {
   listRuns,
   listDocs,
+  listAllRuns,
+  listAllDocs,
   createRun,
   executeRun,
   cancelRun,
@@ -367,20 +369,56 @@ export function Dashboard() {
   }
 
   // Batch delete mutations
+  // 這兩個批次刪除的後端都是 per-item try/except，會把失敗的項目放進回應的
+  // `errors` 陣列並照樣回 200。舊寫法整個忽略 errors、也沒有 onError，所以
+  // 「刪了一半」和「整個請求失敗」在畫面上都長得跟成功一模一樣：選取被清空、
+  // 列表刷新，剩下的項目看起來就像刪不掉。
   const batchDeleteDocsMutation = useMutation({
     mutationFn: batchDeleteDocs,
-    onSuccess: () => {
+    onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ['docs'] })
       queryClient.invalidateQueries({ queryKey: ['runs'] })
       setSelectedDocIds(new Set())
+      if (result.errors.length > 0) {
+        alert(
+          t('dashboard.batchDeletePartial', {
+            failed: result.errors.length,
+            total: result.deleted.length + result.errors.length,
+            reason: result.errors[0].error,
+          })
+        )
+      }
+    },
+    onError: (err: unknown) => {
+      alert(
+        t('dashboard.batchDeleteFailed', {
+          reason: err instanceof Error && err.message ? err.message : String(err),
+        })
+      )
     },
   })
 
   const batchDeleteRunsMutation = useMutation({
     mutationFn: batchDeleteRuns,
-    onSuccess: () => {
+    onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ['runs'] })
       setSelectedRunIds(new Set())
+      if (result.errors.length > 0) {
+        alert(
+          t('dashboard.batchDeletePartial', {
+            failed: result.errors.length,
+            total: result.deleted.length + result.errors.length,
+            reason: result.errors[0].error,
+          })
+        )
+      }
+    },
+    onError: (err: unknown) => {
+      alert(
+        t('dashboard.batchDeleteFailed', {
+          reason: err instanceof Error && err.message ? err.message : String(err),
+        })
+      )
     },
   })
 
@@ -502,9 +540,18 @@ export function Dashboard() {
     if (!docsData?.total) return
     setIsSelectingAll(true)
     try {
-      // 獲取所有文檔（只需要 ID）
-      const allDocs = await listDocs(docsData.total, 0)
+      // 獲取所有文檔（只需要 ID）。這裡要分頁抓：/docs 的 limit 上限是 500，
+      // 舊寫法直接把 total 當 limit 送出去，語料一超過 500 筆就整包 422，而且
+      // 這個函式只有 try/finally 沒有 catch，錯誤被吞掉——按鈕轉一下就恢復，
+      // 一筆都沒選到卻沒有任何提示，接著按刪除自然刪不乾淨。
+      const allDocs = await listAllDocs()
       setSelectedDocIds(new Set(allDocs.docs.map((d) => d.doc_id)))
+    } catch (err) {
+      alert(
+        t('dashboard.selectAllFailed', {
+          reason: err instanceof Error && err.message ? err.message : String(err),
+        })
+      )
     } finally {
       setIsSelectingAll(false)
     }
@@ -525,8 +572,15 @@ export function Dashboard() {
     if (!runsData?.total) return
     setIsSelectingAllRuns(true)
     try {
-      const allRuns = await listRuns(undefined, runsData.total, 0)
+      // 同 selectAllDocsAllPages：/runs 的 limit 上限一樣是 500，必須分頁抓。
+      const allRuns = await listAllRuns()
       setSelectedRunIds(new Set(allRuns.runs.map((r) => r.run_id)))
+    } catch (err) {
+      alert(
+        t('dashboard.selectAllFailed', {
+          reason: err instanceof Error && err.message ? err.message : String(err),
+        })
+      )
     } finally {
       setIsSelectingAllRuns(false)
     }
@@ -784,11 +838,6 @@ export function Dashboard() {
                   onClick={selectAllDocsOnPage}
                   className="gap-1"
                 >
-                  {docs.every(d => selectedDocIds.has(d.doc_id)) && docs.length > 0 ? (
-                    <CheckSquare className="h-4 w-4" />
-                  ) : (
-                    <SquareIcon className="h-4 w-4" />
-                  )}
                   {t('common.selectPage')}
                 </Button>
                 {/* 全選所有（多頁時顯示） */}
@@ -800,11 +849,6 @@ export function Dashboard() {
                     disabled={isSelectingAll || selectedDocIds.size === (docsData?.total ?? 0)}
                     className="gap-1"
                   >
-                    {selectedDocIds.size === (docsData?.total ?? 0) ? (
-                      <CheckSquare className="h-4 w-4" />
-                    ) : (
-                      <SquareIcon className="h-4 w-4" />
-                    )}
                     {isSelectingAll ? t('common.loading') : t('dashboard.selectAllCount', { count: docsData?.total ?? 0 })}
                   </Button>
                 )}
@@ -934,11 +978,6 @@ export function Dashboard() {
                     onClick={selectAllRunsOnPage}
                     className="gap-1"
                   >
-                    {runs.every(r => selectedRunIds.has(r.run_id)) && runs.length > 0 ? (
-                      <CheckSquare className="h-4 w-4" />
-                    ) : (
-                      <SquareIcon className="h-4 w-4" />
-                    )}
                     {t('common.selectPage')}
                   </Button>
                   {/* 全選所有（多頁時顯示） */}
@@ -950,11 +989,6 @@ export function Dashboard() {
                       disabled={isSelectingAllRuns || selectedRunIds.size === (runsData?.total ?? 0)}
                       className="gap-1"
                     >
-                      {selectedRunIds.size === (runsData?.total ?? 0) ? (
-                        <CheckSquare className="h-4 w-4" />
-                      ) : (
-                        <SquareIcon className="h-4 w-4" />
-                      )}
                       {isSelectingAllRuns ? t('common.loading') : t('dashboard.selectAllCount', { count: runsData?.total ?? 0 })}
                     </Button>
                   )}

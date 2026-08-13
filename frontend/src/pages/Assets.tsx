@@ -257,21 +257,38 @@ export function Assets() {
   })
 
   const deleteRunOutputsMutation = useMutation({
+    // Deleting a whole selection used to abort on the first failing run and
+    // say nothing: the loop had no per-run guard and the mutation had no
+    // onError, so a sweep over the full list would delete a few hundred runs,
+    // throw somewhere in the middle, and leave the rest untouched with no
+    // message anywhere. Every run now fails on its own, and the outcome is
+    // reported. The document ids also come from the summary already in memory
+    // instead of a per-run GET, which halves the request count for a sweep.
     mutationFn: async (runIds: string[]) => {
-      const results = []
+      const summaryByRunId = new Map(runs.map((run) => [run.run_id, run]))
+      const results: { runId: string; deleted: string[]; error?: string }[] = []
       for (const runId of runIds) {
-        const documents = await getSplitDocuments(runId)
-        const documentIds = documents.documents.map((document) => document.document_id)
+        const documentIds = (summaryByRunId.get(runId)?.documents ?? []).map(
+          (document) => document.document_id
+        )
         if (documentIds.length === 0) {
           results.push({ runId, deleted: [] })
           continue
         }
-        const result = await deleteSplitDocuments(runId, documentIds)
-        results.push({ runId, deleted: result.deleted })
+        try {
+          const result = await deleteSplitDocuments(runId, documentIds)
+          results.push({ runId, deleted: result.deleted })
+        } catch (err) {
+          results.push({
+            runId,
+            deleted: [],
+            error: err instanceof Error && err.message ? err.message : String(err),
+          })
+        }
       }
       return results
     },
-    onSuccess: (_results, runIds) => {
+    onSuccess: (results, runIds) => {
       for (const runId of runIds) {
         queryClient.invalidateQueries({ queryKey: ['processed-documents', runId] })
         queryClient.invalidateQueries({ queryKey: ['processed-document-search', runId] })
@@ -281,6 +298,24 @@ export function Assets() {
       setSelectedRunDownloadIds(new Set())
       setSelectedDownloadIds(new Set())
       setSelectedDocumentId(null)
+
+      const failed = results.filter((result) => result.error)
+      if (failed.length > 0) {
+        alert(
+          t('assets.deleteRunOutputsPartial', {
+            failed: failed.length,
+            total: results.length,
+            reason: failed[0].error ?? '',
+          })
+        )
+      }
+    },
+    onError: (err) => {
+      alert(
+        t('assets.deleteRunOutputsFailed', {
+          reason: err instanceof Error && err.message ? err.message : String(err),
+        })
+      )
     },
   })
 
@@ -367,7 +402,10 @@ export function Assets() {
                 onClick={selectAllRunDownloads}
                 disabled={runs.length === 0}
               >
-                <CheckSquare className="mr-2 h-4 w-4" />
+                {/* Text only. Any checkbox glyph here is the same one the rows
+                    use to mean "this is selected", so the button read as
+                    though everything already was. Selection state belongs to
+                    the row boxes, which light up only when actually checked. */}
                 {t('common.selectAll')}
               </Button>
               <Button
@@ -377,7 +415,6 @@ export function Assets() {
                 onClick={clearRunDownloads}
                 disabled={selectedRunDownloadCount === 0}
               >
-                <Square className="mr-2 h-4 w-4" />
                 {t('common.cancel')}
               </Button>
             </div>
@@ -461,7 +498,6 @@ export function Assets() {
                 onClick={() => setSelectedDownloadIds(new Set(splitDocuments.map((document) => document.document_id)))}
                 disabled={splitDocuments.length === 0}
               >
-                <CheckSquare className="mr-2 h-4 w-4" />
                 {t('common.selectAll')}
               </Button>
               <Button
@@ -471,7 +507,6 @@ export function Assets() {
                 onClick={() => setSelectedDownloadIds(new Set())}
                 disabled={selectedDownloadCount === 0}
               >
-                <Square className="mr-2 h-4 w-4" />
                 {t('common.clearSelection')}
               </Button>
             </div>
@@ -520,7 +555,9 @@ export function Assets() {
                         <div className="flex items-start gap-3">
                           <button
                             type="button"
-                            className="mt-0.5 rounded text-muted-foreground hover:text-foreground"
+                            className={`mt-0.5 rounded ${
+                              checked ? 'text-primary' : 'text-muted-foreground hover:text-foreground'
+                            }`}
                             onClick={() => toggleDownloadSelection(meta.document_id)}
                             aria-label={checked ? t('common.clearSelection') : t('common.selectAll')}
                           >
@@ -744,7 +781,18 @@ function RunButton({
     >
       <button
         type="button"
-        className={`mt-0.5 rounded ${selected ? 'text-primary-foreground' : 'text-muted-foreground hover:text-foreground'}`}
+        // Lit when the box is checked, dim otherwise. This used to key off
+        // `selected` (whether the row is the one being previewed), so a checked
+        // box stayed grey unless you happened to also be viewing that run. On a
+        // highlighted row the tick still has to win against the filled
+        // background, so contrast takes priority there.
+        className={`mt-0.5 rounded ${
+          selected
+            ? 'text-primary-foreground'
+            : downloadSelected
+              ? 'text-primary'
+              : 'text-muted-foreground hover:text-foreground'
+        }`}
         onClick={(event) => {
           event.stopPropagation()
           onToggleDownload()

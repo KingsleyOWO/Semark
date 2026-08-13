@@ -48,6 +48,48 @@ export async function listDocs(limit = 100, offset = 0): Promise<DocListResponse
   return fetchJson(`${API_BASE}/docs?limit=${limit}&offset=${offset}`)
 }
 
+// The server caps `limit` at 500 on both /docs and /runs (Query(le=500)), so a
+// caller that wants "everything" has to page. Passing the reported total as the
+// limit — which is what "select all" used to do — returns 422 the moment a
+// corpus grows past 500 documents.
+const LIST_PAGE_SIZE = 500
+const LIST_MAX_PAGES = 200
+
+/**
+ * Page through /docs until every document is loaded.
+ *
+ * Same hardening as `getAllOutputsSummary`: the raw returned-row count drives
+ * the next offset, ids are de-duplicated in case pages overlap, an empty page
+ * ends the loop, and a page cap guarantees termination with a console warning
+ * rather than an infinite spin if the server keeps reporting more remain.
+ */
+export async function listAllDocs(): Promise<DocListResponse> {
+  const seen = new Set<string>()
+  const docs: Doc[] = []
+  let fetchedCount = 0
+  let pageCount = 0
+  let page: DocListResponse
+  do {
+    page = await listDocs(LIST_PAGE_SIZE, fetchedCount)
+    pageCount++
+    fetchedCount += page.docs.length
+    for (const doc of page.docs) {
+      if (!seen.has(doc.doc_id)) {
+        seen.add(doc.doc_id)
+        docs.push(doc)
+      }
+    }
+  } while (page.docs.length > 0 && fetchedCount < page.total && pageCount < LIST_MAX_PAGES)
+
+  if (pageCount >= LIST_MAX_PAGES && page.docs.length > 0 && fetchedCount < page.total) {
+    console.warn(
+      `listAllDocs: hit the ${LIST_MAX_PAGES}-page cap after fetching ${fetchedCount} of ${page.total} reported documents; results may be incomplete.`
+    )
+  }
+
+  return { docs, total: Math.max(page.total, docs.length) }
+}
+
 export async function getDoc(docId: string): Promise<Doc> {
   return fetchJson(`${API_BASE}/docs/${docId}`)
 }
@@ -176,6 +218,39 @@ export async function listRuns(
   params.set('offset', String(offset))
   if (includeHidden) params.set('include_hidden', 'true')
   return fetchJson(`${API_BASE}/runs?${params}`)
+}
+
+/**
+ * Page through /runs until every run is loaded. See `listAllDocs`.
+ */
+export async function listAllRuns(
+  status?: RunStatus,
+  includeHidden = false
+): Promise<RunListResponse> {
+  const seen = new Set<string>()
+  const runs: RunResponse[] = []
+  let fetchedCount = 0
+  let pageCount = 0
+  let page: RunListResponse
+  do {
+    page = await listRuns(status, LIST_PAGE_SIZE, fetchedCount, includeHidden)
+    pageCount++
+    fetchedCount += page.runs.length
+    for (const run of page.runs) {
+      if (!seen.has(run.run_id)) {
+        seen.add(run.run_id)
+        runs.push(run)
+      }
+    }
+  } while (page.runs.length > 0 && fetchedCount < page.total && pageCount < LIST_MAX_PAGES)
+
+  if (pageCount >= LIST_MAX_PAGES && page.runs.length > 0 && fetchedCount < page.total) {
+    console.warn(
+      `listAllRuns: hit the ${LIST_MAX_PAGES}-page cap after fetching ${fetchedCount} of ${page.total} reported runs; results may be incomplete.`
+    )
+  }
+
+  return { runs, total: Math.max(page.total, runs.length) }
 }
 
 export async function getRun(runId: string): Promise<RunDetailResponse> {

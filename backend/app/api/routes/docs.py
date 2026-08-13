@@ -80,6 +80,27 @@ async def get_doc(
     )
 
 
+async def _delete_all_runs_for_doc(run_repo: RunRepository, doc_id: str) -> int:
+    """
+    Delete every run belonging to a document, not just the newest page of them.
+
+    ``RunRepository.list_by_doc`` defaults to ``limit=50`` — right for the
+    listing screens it was written for, silently wrong for the two delete paths
+    that documented themselves as removing "all its runs". A document
+    re-processed more than 50 times kept the surplus rows after its own row was
+    gone. Drain in batches so the count no longer matters.
+    """
+
+    deleted = 0
+    while True:
+        runs = await run_repo.list_by_doc(doc_id, limit=500)
+        if not runs:
+            return deleted
+        for run in runs:
+            await run_repo.delete(run.run_id)
+            deleted += 1
+
+
 @router.delete("/{doc_id}")
 async def delete_doc(
     doc_id: str,
@@ -98,9 +119,7 @@ async def delete_doc(
         raise HTTPException(status_code=404, detail=f"Document not found: {doc_id}")
 
     # Delete all runs (this also deletes run_stages)
-    runs = await run_repo.list_by_doc(doc_id)
-    for run in runs:
-        await run_repo.delete(run.run_id)
+    await _delete_all_runs_for_doc(run_repo, doc_id)
 
     # Delete enrich entries (foreign key constraint)
     await enrich_repo.invalidate_by_doc(doc_id)
@@ -183,9 +202,7 @@ async def batch_delete_docs(
                 continue
 
             # Delete all runs (this also deletes run_stages)
-            runs = await run_repo.list_by_doc(doc_id)
-            for run in runs:
-                await run_repo.delete(run.run_id)
+            await _delete_all_runs_for_doc(run_repo, doc_id)
 
             # Delete enrich entries (foreign key constraint)
             await enrich_repo.invalidate_by_doc(doc_id)

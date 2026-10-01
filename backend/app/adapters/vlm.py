@@ -379,10 +379,13 @@ REFERENCE TEXT FROM DOCUMENT:
 {context}""",
     },
     "figure_caption": {
-        "version": "v6",
+        # v7: unreadable text is marked [?] instead of guessed, neighbouring text
+        # is labelled as not-the-image, chart values keep their labels
+        # (Lumio replay 2026-10-01: context leaks 3 -> 1 of 26 figures).
+        "version": "v7",
         "system": """You are a document analyst. Analyze images including diagrams, charts, and organizational structures.
 Your task is to:
-1. Accurately OCR all text in the image
+1. Transcribe the text that is actually visible in the image — never guess unreadable text
 2. Understand the visual structure and relationships
 3. Generate a RAG-friendly description using PATH NOTATION for hierarchies
 
@@ -392,8 +395,8 @@ IMPORTANT: You must respond ONLY with valid JSON.""",
 {{
   "semantic_caption": "1-3 sentence description of what this image shows",
   "image_type": "org_chart|flowchart|diagram|chart|table|photo|screenshot|other",
-  "structured_content": "For org charts/flowcharts: use PATH NOTATION (Parent > Child > Grandchild). For simple images: leave empty.",
-  "all_text": ["list of ALL text visible in the image, read carefully"],
+  "structured_content": "For org charts/flowcharts: use PATH NOTATION (Parent > Child > Grandchild). For charts: one line per labelled value, 「label：value unit」. For other images: leave empty.",
+  "all_text": ["every text string visible in the image, copied exactly; write [?] for each character you cannot read with confidence"],
   "facts": ["key fact 1", "key fact 2", "..."],
   "keywords": ["keyword1", "keyword2", "..."],
   "needs_review": false
@@ -416,13 +419,15 @@ Example:
 ```
 
 Guidelines:
-- Read ALL text accurately, especially numbers and dates (e.g., "114.06.20" not "11.066.20")
+- Read text carefully, especially numbers and dates (e.g., "114.06.20" not "11.066.20")
+- Text that is too small or blurry to read is a gap, not something to fill in: keep the readable characters, write [?] for the rest, or say in facts that the region's text is unreadable. Never invent names, numbers, metrics or recommendations
+- When a chart labels values, keep each value together with its label (year, category or series) in facts
 - ALWAYS use path notation for hierarchical structures
 - Keep all_text in the original on-screen language; write semantic_caption and facts in the Output language stated above
 - Screenshots may catch incidental personal content unrelated to the document's instructions (an email inbox's subject lines and sender names, chat messages, personal appointments). Do NOT transcribe those items into all_text, facts, or structured_content — describe the region generically instead (e.g. 「收件匣郵件清單」). Still transcribe UI labels, buttons, menu items, and annotation callouts that the instructions refer to.
 - Set needs_review to true if unclear
 
-Context from document:
+Surrounding document text (NOT part of the image). Use it only to understand terminology; never copy its names, organisations, audiences or plans into all_text or facts unless the same words are visible in the image:
 {context}""",
     },
     "table_summary": {
@@ -701,8 +706,9 @@ RULES:
         # Bump when the aliased figure_caption prompt changes — the enrich cache is
         # keyed on THIS version (enrich.py get_prompt_version("figure_description")),
         # so a caption-prompt edit only invalidates cache if this moves.
-        # v4 = zh-TW language fix (caption v5); v5 = no-personal-content rule (caption v6).
-        "version": "v5",
+        # v4 = zh-TW language fix (caption v5); v5 = no-personal-content rule (caption v6);
+        # v6 = unreadable-text marker and context isolation (caption v7).
+        "version": "v6",
         "alias": "figure_caption",
     },
 }

@@ -19,7 +19,9 @@ Output validation:
 
 import base64
 import hashlib
+import io
 import json
+import math
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -40,6 +42,11 @@ from app.pipeline.semantic.normalizer import fields_to_dicts, normalize_fields
 # extracts crops that small (live: 32x31, 34x31, 37x31), so we screen them out
 # before they reach the model; nothing describable survives at that size anyway.
 VLM_MIN_IMAGE_SIDE = 32
+
+# Enlarging past this adds pixels without adding detail; 6x already takes a
+# 190x142 photo's sign from a fraction of a token to legible (Lumio replay).
+FIGURE_MAX_UPSCALE = 6.0
+FIGURE_KINDS = frozenset({"figure_caption", "figure_description"})
 
 # ===================== Pydantic Schema Models =====================
 
@@ -764,6 +771,7 @@ class VLMAdapter:
             "model": config.model,
             "decode_params": config.decode_params.model_dump(),
             "request_timeout_seconds": config.request_timeout_seconds,
+            "figure_target_pixels": config.figure_target_pixels,
         }
         canonical = json.dumps(config_dict, sort_keys=True)
         return hashlib.sha256(canonical.encode()).hexdigest()[:16]
@@ -1159,7 +1167,12 @@ class VLMAdapter:
                         error=f"Skipped: {undersized}",
                         duration_seconds=time.time() - start_time,
                     )
-                image_url = self._build_image_url(image_path, doc_id, run_id)
+                enlarged = self._enlarged_figure_png(image_path) if kind in FIGURE_KINDS else None
+                if enlarged is not None and (self.config.api_mode == VLMApiMode.OLLAMA
+                                             or self.config.image_mode != VLMImageMode.STATIC_URL):
+                    image_url = "data:image/png;base64," + base64.b64encode(enlarged).decode("ascii")
+                else:
+                    image_url = self._build_image_url(image_path, doc_id, run_id)
                 content.append({
                     "type": "image_url",
                     "image_url": {"url": image_url, "detail": "high"},
@@ -1348,6 +1361,29 @@ class VLMAdapter:
         else:
             # Data URI mode
             return self._encode_image_as_data_uri(image_path)
+
+    def _enlarged_figure_png(self, image_path: Path) -> bytes | None:
+        """PNG of the figure enlarged toward figure_target_pixels, or None to send it as-is.
+
+        Alpha is kept so the model sees the same picture, only larger.
+        """
+        target = self.config.figure_target_pixels
+        if target <= 0:
+            return None
+        try:
+            with Image.open(image_path) as image:
+                width, height = image.size
+                factor = min(FIGURE_MAX_UPSCALE, math.sqrt(target / (width * height)))
+                if factor <= 1.0:
+                    return None
+                if image.mode not in ("RGB", "RGBA", "L", "LA"):
+                    image = image.convert("RGBA")
+                enlarged = image.resize((round(width * factor), round(height * factor)), Image.Resampling.LANCZOS)
+        except (OSError, ValueError, ZeroDivisionError):
+            return None
+        buffer = io.BytesIO()
+        enlarged.save(buffer, format="PNG")
+        return buffer.getvalue()
 
     def _encode_image_as_data_uri(self, image_path: Path) -> str:
         """Encode image as data URI."""

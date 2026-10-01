@@ -141,6 +141,10 @@ class VLMConfig(BaseModel):
     # Vision options
     crop_padding: int = 10  # pixels
     include_page_thumbnail: bool = False
+    # qwen3-vl spends one visual token per 32x32 px and never enlarges an image,
+    # so a small figure's text is a fraction of a token tall and gets guessed.
+    # Figures under this area are enlarged (up to 6x) before sending; 0 = off.
+    figure_target_pixels: int = 3_000_000
     form_mode: Literal["page", "block"] = "page"
 
     # JSON schema strict mode (Ollama/vLLM structured outputs)

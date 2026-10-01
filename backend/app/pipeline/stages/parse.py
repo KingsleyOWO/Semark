@@ -26,7 +26,7 @@ from app.supported_files import (
     WORD_NATIVE_EXTENSIONS,
 )
 
-WORD_PARSER_VERSION = "native_docx=python-docx;merged_cells=v2;image_types=v2;pdf_fallback=v1;content_controls=v1;table_images=v1;word_provenance=v1;caption_context=v2;table_headers=display_context_v2"
+WORD_PARSER_VERSION = "native_docx=python-docx;merged_cells=v2;image_types=v2;pdf_fallback=v1;content_controls=v1;table_images=v1;word_provenance=v1;caption_context=v2;table_headers=display_context_v2;auto_numbering=v1;text_boxes=v1"
 PARSE_REPORT_FILENAME = "parse_report.json"
 OFFICE_CONVERSION_TIMEOUT_SECONDS = 300
 OFFICE_CLEANUP_TIMEOUT_SECONDS = 5

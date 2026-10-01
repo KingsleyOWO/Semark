@@ -27,7 +27,7 @@ class FakeOrchestrator:
 
 @pytest.mark.asyncio
 async def test_task_queue_uses_fifo_workers_and_keeps_backlog_pending():
-    queue = TaskQueue(db=object(), max_parse_concurrent=1)  # type: ignore[arg-type]
+    queue = TaskQueue(db=object(), max_parse_concurrent=1, persist_submissions=False)  # type: ignore[arg-type]
     fake = FakeOrchestrator()
     queue.orchestrator = fake  # type: ignore[assignment]
 
@@ -53,7 +53,7 @@ async def test_task_queue_uses_fifo_workers_and_keeps_backlog_pending():
 
 @pytest.mark.asyncio
 async def test_task_queue_cancel_pending_task_skips_execution():
-    queue = TaskQueue(db=object(), max_parse_concurrent=1)  # type: ignore[arg-type]
+    queue = TaskQueue(db=object(), max_parse_concurrent=1, persist_submissions=False)  # type: ignore[arg-type]
     fake = FakeOrchestrator()
     queue.orchestrator = fake  # type: ignore[assignment]
 

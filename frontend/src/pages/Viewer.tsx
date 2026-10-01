@@ -17,6 +17,7 @@ import {
   getAssetsIndex,
   getEnrichments,
 } from '@/lib/api'
+import { RunDeliveryBadge } from '@/components/DeliveryBadge'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
@@ -273,6 +274,7 @@ export function Viewer() {
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
+          {runId && <RunDeliveryBadge runId={runId} enabled={run?.status === 'succeeded'} />}
           <span>{t('viewer.pageCount', { count: pages.length })}</span>
           <span>·</span>
           <span>{t('viewer.blockCount', { count: blocks.length })}</span>

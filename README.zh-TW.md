@@ -306,6 +306,8 @@ Semark 把「截圖為主的文件」（軟體操作手冊、內部教學、新�
 - HTML/HTM
 - PNG/JPG/JPEG
 
+DOCX 優先使用原生結構解析；解析失敗時，會自動透過 LibreOffice 轉成 PDF，再執行既有的 PDF 解析流程。原始 Word 會保留，轉出的 PDF 會用於頁面預覽與文字補充。若轉檔回報圖片或版面異常，品質報告會標示 `needs_review`，並在 `parse_report.json` 記錄備援原因與警告。此備援需要 LibreOffice（完整 Docker 映像已包含）。
+
 產出內容包含主文文件，以及在偵測到獨立檢索單元時自動產生的子文件。例如一份長 PDF 可以輸出 `main.md` 作為主文，並另外產生表單、表格、流程圖、圖示、附件或其他結構化區塊的語意 Markdown 檔。
 
 ## 從 GitHub 快速啟動
@@ -652,3 +654,7 @@ scripts/smoke_clone.sh --repo https://github.com/OWNER/REPO.git --api-only-docke
 - `backend/.env.example` 是可攜的設定模板，應保留在 repository。
 - 請確認 `THIRD_PARTY_LICENSES.md` 中 PyMuPDF、MinerU 與 VLM model/provider 的授權義務。
 - 只使用 synthetic 或 public sample documents。
+
+### 來源審查與最終交付驗證
+
+新工作預設啟用有界來源審查。每個來源頁面都列入清單，包括解析器未產生區塊的頁面；風險規則只決定優先順序。審查核對實際文件與 chunks，修復後重新產出並驗收，未核對部分不能算作通過。既有完成產物維持原狀；off／shadow／apply 模式、共享預算、覆蓋紀錄與限制見 [操作說明](backend/docs/agentic-processing.md)。

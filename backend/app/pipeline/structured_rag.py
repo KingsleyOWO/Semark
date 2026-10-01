@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from app.models.document_ir import BlockType, DocumentIR, coerce_payload_text
+from app.pipeline.content_coverage import TextCoverage
 from app.pipeline.corpus_rules import get_rules as get_corpus_rules
 from app.pipeline.delivery import atomic_write_json, atomic_write_jsonl, atomic_write_text
 from app.pipeline.semantic.language import (
@@ -120,6 +121,7 @@ class _TableHTMLParser(HTMLParser):
         elif tag in {"td", "th"} and self._current_row is not None:
             attr_map = {key.lower(): value for key, value in attrs}
             self._current_cell = {
+                "header": tag == "th",
                 "rowspan": _safe_int(attr_map.get("rowspan"), 1),
                 "colspan": _safe_int(attr_map.get("colspan"), 1),
             }
@@ -276,6 +278,9 @@ def build_form_documents_rag(
         plan.evidence["source_page_indices"] = _available_page_indices(document_ir)
 
     supporting_sections = [] if single_form_document else _collect_supporting_page_sections(document_ir, records, language)
+    if supporting_sections and len(supporting_sections) > max(2, len(_covered_form_pages(records))):
+        plan.document_type = "mixed_document"
+        plan.rag_strategy = "forms_with_preserved_source_blocks"
     rag_markdown = render_form_documents_markdown(plan, records, semantic_output_language=language)
     supporting_markdown = _render_supporting_page_sections(supporting_sections, language)
     if supporting_markdown:
@@ -1170,24 +1175,24 @@ def _collect_supporting_page_sections(
     records: list[dict[str, Any]],
     semantic_output_language: str,
 ) -> list[dict[str, Any]]:
-    covered_pages = _covered_form_pages(records)
+    from app.pipeline.stages.normalize import is_non_content
+
+    record_chunks = build_form_chunks(document_ir, records)
+    coverage = TextCoverage(str(chunk.get("content") or "") for chunk in record_chunks)
     sections: list[dict[str, Any]] = []
-    for page in document_ir.pages:
-        page_idx = int(page.page_idx)
-        if page_idx in covered_pages:
-            continue
+    for page_idx in _available_page_indices(document_ir):
         block_ids: list[str] = []
         parts: list[str] = []
         for block in document_ir.get_blocks_by_page(page_idx):
-            if block.type not in {BlockType.TEXT, BlockType.TABLE}:
+            if is_non_content(block):
                 continue
             text = _plain_text(block.get_text())
-            if not text:
+            if not text or coverage.covers(text):
                 continue
             block_ids.append(block.block_id)
             parts.append(text)
-        content = _compact_text_no_ellipsis("\n".join(parts), 5000)
-        if len(content) < 120:
+        content = "\n".join(parts).strip()
+        if not content:
             continue
         label = semantic_page_label(page_idx, semantic_output_language)
         title = "Supporting Information" if semantic_output_language == "en" else "補充說明"
@@ -1468,7 +1473,6 @@ def _form_text_signal_score(rows: list[list[str]]) -> int:
 def is_form_like_document(document_ir: DocumentIR, rows: list[list[str]] | None = None) -> bool:
     """Return true when source and parser evidence point to a fillable form."""
 
-    ext = document_ir.source.ext.lower()
     source_text = f"{Path(document_ir.source.path).stem} {Path(document_ir.source.path).name}"
     row_text = " ".join(
         " ".join(str(cell or "") for cell in row)
@@ -1486,7 +1490,7 @@ def is_form_like_document(document_ir: DocumentIR, rows: list[list[str]] | None 
             re.IGNORECASE,
         )
     )
-    field_score = len(re.findall(r"申請人|申請單位|申請日期|姓名|員工編號|事由|起訖|起始地點|到達地點|金額|合計|單位主管|簽名|簽章|領款人|核定", text))
+    field_score = len(set(re.findall(r"申請人|申請單位|申請日期|姓名|員工編號|事由|起訖|起始地點|到達地點|金額|合計|單位主管|簽名|簽章|領款人|核定", text)))
     english_field_score = len(_english_form_field_hits(text))
     colon_label_score = len(_colon_label_hits(text))
     checkbox_score = text.count("□") + text.count("☐") + text.count("☑")
@@ -1496,9 +1500,9 @@ def is_form_like_document(document_ir: DocumentIR, rows: list[list[str]] | None 
         return True
     if english_form_score >= 1 and (english_field_score >= 4 or colon_label_score >= 5 or checkbox_score >= 2):
         return True
-    if ext in {"xls", "xlsx", "ods", "doc", "docx"} and field_score >= 5:
+    if field_score >= 5 and re.search(r"簽名|簽章|領款人", text) and (colon_label_score >= 3 or checkbox_score >= 1):
         return True
-    if ext in {"pdf", "png", "jpg", "jpeg"} and english_form_score >= 1 and english_field_score >= 3:
+    if english_form_score >= 1 and english_field_score >= 3:
         return True
     if checkbox_score >= 2 and (field_score >= 3 or english_field_score >= 3):
         return True
@@ -1667,6 +1671,10 @@ def _should_merge_forms_as_single_source_document(
     form_like_source = is_form_like_document(document_ir)
     if _form_outputs_have_conflicting_titles(document_ir, form_outputs):
         return False
+    if not document_ir.has_physical_pages():
+        # Native Word page zero is not a physical one-page form.
+        body_size = sum(len(block.get_text()) for block in document_ir.blocks)
+        return form_like_source and body_size <= 6000 and len(form_outputs) == 1
     if len(source_pages) <= 1 and (source_has_form_keyword or form_like_source):
         return True
     if (
@@ -1790,7 +1798,7 @@ def _collapse_form_records_to_single_source_document(
 
 def _source_name_has_form_keyword(source_path: str) -> bool:
     name = Path(source_path).stem
-    return bool(re.search(r"申請單|請領單|報支單|出差單|核銷單|請款單|申報單|異動單|增加單|移轉單|報廢單|申請表|登記表|檢核表|報告單|紀錄單|意見表|審查表|評分表|說明書|授權書|約定書|契約書|同意書|委託書|保證規約|規約|\b(application|authorization|authorisation|consent|claim|request|reimbursement|form)\b", name, re.IGNORECASE))
+    return bool(re.search(r"申請單|請領單|報支單|出差單|核銷單|請款單|申報單|異動單|增加單|移轉單|報廢單|申請表|登記表|檢核表|申訴書|報告單|紀錄單|意見表|審查表|評分表|說明書|授權書|約定書|契約書|同意書|委託書|保證規約|規約|\b(application|authorization|authorisation|consent|claim|request|reimbursement|form)\b", name, re.IGNORECASE))
 
 
 def _form_title_from_source_path(source_path: str) -> str:

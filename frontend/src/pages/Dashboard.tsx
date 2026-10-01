@@ -24,6 +24,7 @@ import {
   getRunsStats,
 } from '@/lib/api'
 import type { BatchUploadProgress } from '@/lib/api'
+import { RunDeliveryBadge } from '@/components/DeliveryBadge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -169,13 +170,16 @@ function RunReviewBadge({ runId, status }: { runId: string; status: RunStatus })
   if (status !== 'succeeded' || !assets) return null
 
   const reviewCount = assets.filter((a) => a.needs_review).length
-  if (reviewCount === 0) return null
-
   return (
-    <Badge variant="warning" className="text-xs">
-      <AlertTriangle className="h-3 w-3 mr-1" />
-      {reviewCount}
-    </Badge>
+    <div className="flex flex-wrap gap-1">
+      <RunDeliveryBadge runId={runId} />
+      {reviewCount > 0 && (
+        <Badge variant="warning" className="text-xs">
+          <AlertTriangle className="h-3 w-3 mr-1" />
+          {reviewCount}
+        </Badge>
+      )}
+    </div>
   )
 }
 

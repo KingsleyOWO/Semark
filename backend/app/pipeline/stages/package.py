@@ -11,6 +11,7 @@ Output files:
 """
 
 import copy
+import hashlib
 import json
 import re
 import shutil
@@ -20,7 +21,13 @@ from typing import Any
 
 from app.adapters.vlm import VLMAdapter
 from app.config import PipelineConfig
-from app.models.document_ir import Block, BlockType, DocumentIR, coerce_payload_text
+from app.models.document_ir import (
+    Block,
+    BlockType,
+    DocumentIR,
+    coerce_payload_text,
+    image_content_caption,
+)
 from app.models.org_chart import (
     EdgeType,
     OrgCategory,
@@ -50,6 +57,7 @@ from app.pipeline.quality_gate import (
     _scrub_vlm_audit_output_fields as scrub_quality_gate_vlm_audit_output_fields,
 )
 from app.pipeline.quality_gate import (
+    apply_parse_report,
     run_quality_gate,
     write_quality_gate,
 )
@@ -484,8 +492,23 @@ class PackageStage:
                 document_ir,
             )
 
-            # Load enrichments from enrich stage (if exists)
-            enrichments = self._load_enrichments(outputs_dir)
+            # Keep original source evidence separate from the accepted delivery view.
+            from app.pipeline.agentic_content import delivery_view, replacement_text
+
+            source_ir = document_ir
+            replaced = {b.block_id for b in source_ir.blocks if replacement_text(b)}
+            replaced_pages = {b.page_idx for b in source_ir.blocks if b.block_id in replaced}
+            document_ir = delivery_view(source_ir) if replaced else source_ir
+            enrichments = {
+                key: value for key, value in self._load_enrichments(outputs_dir).items()
+                if key not in replaced and not (
+                    value.get("kind") in {"form_asset", "form_guide"}
+                    and value.get("input", {}).get("page_idx") in replaced_pages
+                )
+            }
+
+            from app.pipeline.agentic_content import filter_recovery_enrichments
+            enrichments = filter_recovery_enrichments(source_ir, enrichments)
 
             # 1. Export assets and build index (with enrichments integration)
             assets, asset_map = await self._export_assets(
@@ -498,7 +521,7 @@ class PackageStage:
 
             # 2. Generate source markdown (high-fidelity original document)
             dataset_md, dataset_source_map = self._render_dataset_md(
-                document_ir=document_ir,
+                document_ir=source_ir,
             )
 
             # 3. Generate retrieval markdown used by the internal chunker.
@@ -537,19 +560,25 @@ class PackageStage:
                 )
 
             if structured_output.records:
-                if structured_output.plan.document_type == "form_collection":
-                    form_page_indices = self._collect_structured_form_page_indices(structured_output.records)
+                if structured_output.plan.document_type in {"form_collection", "mixed_document"}:
                     rag_md, rag_source_map = self._render_rag_md(
                         document_ir=document_ir,
                         asset_map=asset_map,
                         enrichments=enrichments,
                         suppress_form_enrichment=True,
-                        excluded_page_indices=form_page_indices,
+                        # A form may share its page with authored prose.
+                        excluded_page_indices=set(),
                         semantic_output_language=semantic_output_language,
                     )
                 else:
                     rag_md = structured_output.rag_markdown
 
+            verified_sections = [
+                f"<!-- source-block:{block.block_id} -->\n{block.payload['verified_semantics']}"
+                for block in document_ir.blocks if block.payload.get("verified_semantics")
+            ]
+            if verified_sections:
+                rag_md += "\n\n" + "\n\n".join(verified_sections)
             source_md = rag_md
 
             # 6. Write all outputs. Asset tokens are internal anchors for the
@@ -694,6 +723,18 @@ class PackageStage:
                 else:
                     semantic_repair_stats["skipped_reason"] = "quality_gate_passed_or_vlm_disabled"
 
+            parse_report = {}
+            if parse_cache_path:
+                report_path = parse_cache_path / "parse_report.json"
+                if report_path.is_file():
+                    parse_report = json.loads(report_path.read_text(encoding="utf-8"))
+                    atomic_write_json(outputs_dir / "parse_report.json", parse_report, ensure_ascii=False, indent=2)
+                    apply_parse_report(quality_gate, parse_report, semantic_output_language)
+
+            from app.pipeline.final_delivery import preserve_document_content
+
+            retained_count = preserve_document_content(document_ir, run_path)
+            quality_gate.stats["preserved_source_blocks"] = retained_count
             write_quality_gate(quality_gate, outputs_dir)
             self._write_llm_vlm_outputs(
                 outputs_dir=outputs_dir,
@@ -709,6 +750,8 @@ class PackageStage:
                 config_hash=config_hash,
                 config=self.config,
             )
+            if parse_report:
+                manifest.engines["source_processing"] = parse_report
             manifest_path = run_path / "manifest.json"
             with open(manifest_path, "w", encoding="utf-8") as f:
                 json.dump(manifest.to_dict(), f, ensure_ascii=False, indent=2)
@@ -3064,7 +3107,6 @@ class PackageStage:
         skip_next_blank = False
         source_title_key = re.sub(r"\s+", "", self._clean_export_title(source_title)).lower()
         last_heading_key = ""
-        seen_compact_lines: set[str] = set()
         for line in body.splitlines():
             stripped = line.strip()
             if re.fullmatch(r"\[\[asset:[^\]]+\]\]", stripped):
@@ -3116,15 +3158,10 @@ class PackageStage:
                 line = self._clean_english_ocr_cjk_noise(line)
             if not line.strip():
                 continue
-            # Screenshot pages repeat the same OCR lines (navbar re-read per
-            # page, field hints transcribed by both parser and VLM); keep the
-            # first occurrence only. Headings, tables, and short answer-like
-            # lines are exempt.
-            compact_line = re.sub(r"\s+", "", line)
-            if len(compact_line) >= 6 and not line.lstrip().startswith(("#", "|", "-", "*")):
-                if compact_line in seen_compact_lines:
-                    continue
-                seen_compact_lines.add(compact_line)
+            # This assembled text has no source-instance identity. Identical
+            # sentences or URLs can belong to different cases or source rows;
+            # text equality alone cannot justify deleting either occurrence.
+            # Parser/VLM duplicates are handled while their ownership is known.
             cleaned.append(line)
         return self._remove_empty_display_sections("\n".join(cleaned)).strip()
 
@@ -3288,6 +3325,10 @@ class PackageStage:
 
     @staticmethod
     def _is_low_value_visual_ocr_line(line: str) -> bool:
+        # Structured field/value records can be very short (e.g. a checked
+        # schedule cell). Their Markdown bullet is not an OCR artefact.
+        if re.match(r"^\s*[-*+]\s+[^:：\n]+[:：]\s*\S", line or ""):
+            return False
         compact = re.sub(r"\s+", "", line or "")
         if not compact:
             return False
@@ -4065,25 +4106,28 @@ class PackageStage:
         """Backfill flowchart text from same-page OCR when VLM output is partial."""
 
         result = dict(output or {})
-        page_lines = self._same_page_visual_text_lines(document_ir, image_block.page_idx)
+        # Native Word page_idx is a logical container, often zero for the whole
+        # document. Its prose is never evidence of text inside an embedded image.
+        if not document_ir.has_physical_pages():
+            return result
+        box = image_block.bbox_norm
+        if len(box) != 4 or box[2] <= box[0] or box[3] <= box[1]:
+            return result
+        page_lines = self._same_page_visual_text_lines(document_ir, image_block.page_idx, within=box)
         if len(page_lines) < 4:
             return result
 
         structured_lines = split_vlm_lines(result.get("structured_content", ""))
         existing_all_text = split_vlm_lines(result.get("all_text", []))
-        caption = render_vlm_text(result.get("semantic_caption", ""))
         image_type = str(result.get("image_type") or "").lower()
-        if image_type in ("screenshot", "photo"):
-            # A screenshot stays a screenshot: its " > " structured lines are UI
-            # menus/folder trees, not a workflow (same policy as the renderer).
-            # Reclassifying used to push the flow template — built around the
-            # hallucination-prone caption — onto every delivered surface.
+        if image_type not in ("", "other", "figure", "flowchart"):
+            # A classified chart/table/org chart is not a process. Neither path
+            # punctuation nor a generated caption may override that type.
             return result
         looks_like_flowchart = (
             image_type == "flowchart"
-            or any(" > " in line for line in structured_lines)
-            or "flowchart" in caption.lower()
-            or any("流程圖" in line or "作業流程" in line for line in page_lines[:5])
+            or any(re.search(r"流程圖|作業流程|\bflowchart\b", line, re.IGNORECASE)
+                   for line in page_lines[:5])
         )
         if not looks_like_flowchart:
             return result
@@ -4100,11 +4144,18 @@ class PackageStage:
         return result
 
     @classmethod
-    def _same_page_visual_text_lines(cls, document_ir: DocumentIR, page_idx: int | None) -> list[str]:
+    def _same_page_visual_text_lines(cls, document_ir: DocumentIR, page_idx: int | None,
+                                     *, within: list[int] | None = None) -> list[str]:
         lines: list[str] = []
         for block in sorted(document_ir.blocks, key=lambda item: (item.page_idx, item.reading_order)):
             if block.page_idx != page_idx or block.type != BlockType.TEXT:
                 continue
+            if within is not None:
+                box = block.bbox_norm
+                if (len(box) != 4 or box[2] <= box[0] or box[3] <= box[1]
+                        or box[0] < within[0] or box[1] < within[1]
+                        or box[2] > within[2] or box[3] > within[3]):
+                    continue
             text = cls._clean_export_title(str(block.payload.get("text") or ""))
             if not text or cls._is_noisy_visual_page_text(text):
                 continue
@@ -4138,15 +4189,7 @@ class PackageStage:
                 continue
             output = coerce_visual_vlm_output(dict(enrichment.get("output") or {}))
             image_type = str(output.get("image_type") or "").lower()
-            structured_lines = split_vlm_lines(output.get("structured_content", ""))
-            caption = render_vlm_text(output.get("semantic_caption") or "")
-            is_flowchart = (
-                image_type == "flowchart"
-                or any(" > " in line for line in structured_lines)
-                or "flowchart" in caption.lower()
-                or "流程圖" in caption
-            )
-            if is_flowchart:
+            if image_type == "flowchart":
                 labels.extend(cls._visual_reference_labels_from_output(output))
         return cls._dedupe_visual_lines(labels)
 
@@ -4274,7 +4317,7 @@ class PackageStage:
         """
 
         language = "en" if semantic_output_language == "en" else "zh-TW"
-        caption = cls._clean_export_title(caption_text(block.payload.get("caption", "")))
+        caption = cls._clean_export_title(image_content_caption(block.payload))
         if not caption and asset is not None:
             caption = cls._clean_export_title(asset.title) if not asset.title.startswith("Figure ") else ""
         if caption:
@@ -4326,6 +4369,8 @@ class PackageStage:
     def _nearest_visual_label(cls, document_ir: DocumentIR, block: Block) -> str:
         """The same-page 「圖N …」 label physically closest to ``block``."""
 
+        if not document_ir.has_physical_pages():
+            return ""
         bbox = block.bbox_norm or []
         if len(bbox) < 4:
             return ""
@@ -4429,16 +4474,9 @@ class PackageStage:
         keywords = self._strip_watermark_lines(split_vlm_lines(output.get("keywords", [])))
         image_type = str(output.get("image_type", "")).lower()
 
-        # PATH-notation lines in a SCREENSHOT/PHOTO are UI menus or folder trees the
-        # VLM happened to transcribe — not a workflow. Flow-templating them fabricates
-        # 語意摘要/詳細流程路徑 sections and amplifies incidental content (observed: an
-        # Outlook folder tree rendered as a fake "flow" repeating the account address
-        # dozens of times). Only genuine chart types get the flow template; screenshots
-        # and photos render as plain searchable lines below.
-        is_flow = image_type in ("flowchart", "org_chart") or (
-            image_type not in ("screenshot", "photo")
-            and any(" > " in line for line in structured_lines)
-        )
+        # " > " also encodes table columns, spatial categories and UI paths.
+        # Only an explicitly classified process may acquire flow/start/end prose.
+        is_flow = image_type == "flowchart"
         if not is_flow:
             parts = []
             if facts:
@@ -4715,10 +4753,7 @@ class PackageStage:
         title = self._clean_export_title(asset.title.strip() if asset.title else asset.asset_id)
         visual_output = coerce_visual_vlm_output(
             {
-                # Trust the VLM classification when the asset carries one; the
-                # " > " heuristic is only a fallback for legacy asset entries.
-                "image_type": asset.image_type
-                or ("flowchart" if " > " in (asset.structured_content or "") else "figure"),
+                "image_type": asset.image_type or "figure",
                 "structured_content": asset.structured_content,
                 "semantic_caption": asset.semantic_caption or "",
                 "facts": asset.facts,
@@ -4910,7 +4945,6 @@ class PackageStage:
         tables_dir = assets_dir / "tables"
         tables_dir.mkdir(parents=True, exist_ok=True)
 
-        figure_idx = 0
         table_idx = 0
         form_idx = 0
         source_plan = plan_document(document_ir)
@@ -4958,12 +4992,15 @@ class PackageStage:
                 if img_path and parse_cache_path:
                     src_path = self._find_image(img_path, parse_cache_path)
                     if src_path and src_path.exists():
-                        asset_id = f"fig{figure_idx:04d}"
+                        # Source identity survives removal/replacement of earlier figures.
+                        asset_id = "fig-" + hashlib.sha256(block.block_id.encode()).hexdigest()[:16]
                         dst_path = figures_dir / f"{asset_id}{src_path.suffix}"
                         shutil.copy2(src_path, dst_path)
 
-                        caption = caption_text(block.payload.get("caption", ""))
-                        title = caption[:100] if caption else f"Figure {figure_idx + 1}"
+                        caption = image_content_caption(block.payload)
+                        # An export counter is not a source figure number. Recovery
+                        # may replace an earlier image; keep later captions stable.
+                        title = caption[:100] if caption else "Figure semantics"
 
                         # Integrate VLM enrichment for figures. Coerce first so malformed
                         # JSON-like captions do not leak into split documents.
@@ -5022,12 +5059,12 @@ class PackageStage:
                         )
                         assets.append(asset)
                         asset_map[block.block_id] = asset
-                        figure_idx += 1
 
             elif block.type == BlockType.TABLE:
                 # Export table assets, or form assets when VLM classified a native
                 # spreadsheet/layout table as a fillable form.
-                table_body = block.payload.get("table_body", "")
+                from app.pipeline.table_structure import canonical_table_html
+                table_body = canonical_table_html(block)
                 caption = caption_text(block.payload.get("table_caption"))
 
                 if table_body:
@@ -5311,7 +5348,8 @@ class PackageStage:
                 lines.append(text)
 
         elif block.type == BlockType.TABLE:
-            table_body = block.payload.get("table_body", "")
+            from app.pipeline.table_structure import canonical_table_html
+            table_body = canonical_table_html(block)
             caption = caption_text(block.payload.get("table_caption"))
 
             if caption:
@@ -5324,7 +5362,7 @@ class PackageStage:
 
         elif block.type == BlockType.IMAGE:
             img_path = block.payload.get("img_path", "")
-            caption = caption_text(block.payload.get("caption", ""))
+            caption = image_content_caption(block.payload)
 
             if img_path:
                 alt_text = caption or "Image"
@@ -5436,7 +5474,7 @@ class PackageStage:
         visual_structured_pages = {
             block.page_idx
             for block in document_ir.blocks
-            if block.type == BlockType.IMAGE
+            if document_ir.has_physical_pages() and block.type == BlockType.IMAGE
             and render_vlm_text(
                 enrichments.get(block.block_id, {}).get("output", {}).get("structured_content", "")
             )
@@ -5841,7 +5879,8 @@ class PackageStage:
                 lines.append(text)
 
         elif block.type == BlockType.TABLE:
-            table_body = block.payload.get("table_body", "")
+            from app.pipeline.table_structure import canonical_table_html
+            table_body = canonical_table_html(block)
             caption = caption_text(block.payload.get("table_caption"))
 
             # Convert HTML table to semantic retrieval text; avoid raw HTML or legacy TABLE/ROW format.
@@ -5885,7 +5924,7 @@ class PackageStage:
             # ``lines`` blows up the caller's "\n".join with a TypeError, taking
             # the whole package stage down for any figure that has a caption but
             # no exported asset.
-            caption = caption_text(block.payload.get("caption", ""))
+            caption = image_content_caption(block.payload)
 
             if asset and self._is_decorative_figure_asset(asset):
                 return []

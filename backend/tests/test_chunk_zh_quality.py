@@ -243,19 +243,19 @@ _TABLE_HTML = (
 )
 
 
-def test_table_html_becomes_markdown_pipe_table(tmp_path):
+def test_table_html_becomes_source_grid_semantic_rows(tmp_path):
     chunks = _run_chunks(tmp_path, [_table_block("t0", _TABLE_HTML)])
 
     assert len(chunks) == 1
     content = chunks[0].content
-    assert "| 假別 | 日數 |" in content
-    assert "| --- | --- |" in content
-    assert "| 事假 | 14日 |" in content
+    assert "欄位：假別、日數" in content
+    assert "- 假別：事假" in content
+    assert "- 日數：14日" in content
     assert "<table" not in content
     assert chunks[0].metadata.get("table_html") == [_TABLE_HTML]
 
 
-def test_table_rowspan_colspan_repeat_values(tmp_path):
+def test_table_rowspan_colspan_preserve_source_anchors(tmp_path):
     html = (
         '<table><tr><th>假別</th><th colspan="2">說明</th></tr>'
         '<tr><td rowspan="2">事假</td><td>甲</td><td>乙</td></tr>'
@@ -265,9 +265,11 @@ def test_table_rowspan_colspan_repeat_values(tmp_path):
     chunks = _run_chunks(tmp_path, [_table_block("t0", html)])
 
     content = chunks[0].content
-    assert "| 假別 | 說明 | 說明 |" in content
-    assert "| 事假 | 甲 | 乙 |" in content
-    assert "| 事假 | 丙 | 丁 |" in content
+    assert "第 1 列：第 1 欄：假別；第 2–3 欄：說明" in content
+    assert "第 2 列：第 1 欄（跨 2 列）：事假；第 2 欄：甲；第 3 欄：乙" in content
+    assert "第 3 列：第 2 欄：丙；第 3 欄：丁" in content
+    assert content.count("事假") == 1
+    assert chunks[0].metadata.get("table_html") == [html]
 
 
 def test_non_table_markup_tags_stripped(tmp_path):

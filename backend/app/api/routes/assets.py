@@ -44,12 +44,13 @@ async def get_asset(
         raise HTTPException(status_code=400, detail="Run does not belong to this document")
 
     # Build asset path
-    asset_path = settings.get_run_path(doc_id, run_id) / "assets" / path
+    published = settings.get_published_run_path(doc_id, run_id)
+    asset_path = published / "assets" / path
 
     # Security: ensure path is within assets directory
     try:
         asset_path = asset_path.resolve()
-        base_path = (settings.get_run_path(doc_id, run_id) / "assets").resolve()
+        base_path = (published / "assets").resolve()
         if not str(asset_path).startswith(str(base_path)):
             raise HTTPException(status_code=400, detail="Invalid path")
     except (ValueError, OSError):

@@ -36,7 +36,7 @@ def test_bracket_section_labels_are_not_export_titles():
     assert PackageStage._is_unreliable_export_title("【勞工保險投保薪資調整申報表】") is False
 
 
-def test_split_main_body_drops_repeated_screenshot_lines():
+def test_split_main_body_preserves_repeated_lines_without_source_identity():
     source_md = (
         "# 操作說明\n"
         "\n"
@@ -55,9 +55,10 @@ def test_split_main_body_drops_repeated_screenshot_lines():
 
     body = PackageStage()._clean_split_main_body(source_md, "操作說明", [])
 
-    assert body.count("12171002103") == 1
-    assert body.count("財政部國庫署") == 1
-    # Short answer-like lines stay untouched.
+    # Identical text can belong to distinct screenshots or instructions. The
+    # final string renderer cannot prove source identity and must not delete it.
+    assert body.count("12171002103") == 2
+    assert body.count("財政部國庫署") == 2
     assert body.count("是") == 2
 
 
@@ -126,7 +127,7 @@ def test_semantic_template_still_required_without_repair():
 
 def test_split_main_body_strips_trailing_orphan_open_quote():
     # Screenshot OCR crops can leave a dangling opening quote at line end
-    # (「請輸入「國庫署」 「」); stripped, the line dedupes with the intact one.
+    # (「請輸入「國庫署」 「」). Clean the quote without deleting either source line.
     source_md = (
         "# 操作說明\n"
         "\n"
@@ -137,5 +138,5 @@ def test_split_main_body_strips_trailing_orphan_open_quote():
 
     body = PackageStage()._clean_split_main_body(source_md, "操作說明", [])
 
-    assert body.count("國庫署") == 1
+    assert body.count("國庫署") == 2
     assert "」 「" not in body

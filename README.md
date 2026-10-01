@@ -306,6 +306,8 @@ Supported inputs:
 - HTML/HTM
 - PNG/JPG/JPEG
 
+DOCX files use native structure parsing first. If that fails, the pipeline automatically converts the file to PDF with LibreOffice and runs the existing PDF parser. The original Word file is preserved, and the converted PDF supplies page previews and text supplementation. Conversion warnings mark the quality report as `needs_review`; `parse_report.json` records the fallback reason and diagnostics. This fallback requires LibreOffice, which is included in the full Docker image.
+
 Generated outputs include the main document plus automatically extracted child documents when the source contains independent retrieval units. For example, a long PDF can produce `main.md` for the body text and separate semantic Markdown files for individual forms, tables, flowcharts, figures, attachments, or other structured sections.
 
 ## Quickstart From GitHub
@@ -655,3 +657,7 @@ The script installs full backend dependencies including MinerU, runs backend tes
 - Commit `backend/.env.example` as the portable configuration template.
 - Review `THIRD_PARTY_LICENSES.md` for PyMuPDF, MinerU, and VLM model/provider obligations.
 - Use synthetic/public sample documents only.
+
+### Source review and final delivery validation
+
+New runs enable bounded source review by default. Every source page is planned, including pages missing from parsed IR; risk rules only prioritize the queue. Actual documents and chunks are checked against source images, repairs are rechecked after rebuilding, and unreviewed regions cannot pass. Existing completed runs remain unchanged. See the [operational guide](backend/docs/agentic-processing.md) for off/shadow/apply modes, shared budgets, coverage records, and limitations.

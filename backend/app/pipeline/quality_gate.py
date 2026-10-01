@@ -239,6 +239,37 @@ async def run_quality_gate(
     )
 
 
+def apply_parse_report(
+    result: QualityGateResult,
+    report: dict[str, Any],
+    semantic_output_language: str,
+) -> None:
+    """Keep conversion diagnostics after semantic repair, which cannot repair source bytes."""
+    result.stats["parse"] = report
+    warnings = report.get("conversion_warnings") or []
+    if not warnings:
+        return
+    message = (
+        "Word-to-PDF conversion reported warnings. Check that images and layout are complete."
+        if resolve_semantic_output_language(semantic_output_language) == "en"
+        else "Word 轉 PDF 時回報異常，請確認圖片與版面是否完整。"
+    )
+    result.issues.append(QualityGateIssue(
+        code="source_conversion_warning",
+        severity="high",
+        message=message,
+        evidence={"warnings": warnings},
+    ))
+    result.status = _status_from_issues(result.issues)
+    result.score = min(result.score, _score_from_issues(result.issues))
+    result.stats.update(
+        auto_rag_ready=False,
+        issue_count=len(result.issues),
+        issues_by_severity=_count_by(issue.severity for issue in result.issues),
+        issues_by_code=_count_by(issue.code for issue in result.issues),
+    )
+
+
 def write_quality_gate(result: QualityGateResult, outputs_dir: Path) -> Path:
     path = outputs_dir / "quality_gate.json"
     atomic_write_json(path, result.to_dict(), ensure_ascii=False, indent=2)

@@ -5,7 +5,7 @@ Provides background task management with support for:
 - Submitting pipeline runs
 - Cancellation
 - Status tracking
-- Resume from checkpoint (future)
+- Durable submission receipts and stage checkpoint recovery
 """
 
 import asyncio
@@ -19,7 +19,9 @@ from app.core.orchestrator import (
     PipelineOrchestrator,
     PipelineResult,
 )
+from app.core.submissions import save_submission
 from app.db.database import Database
+from app.db.repositories import RunRepository
 from app.models.entities import RunStatus, StageName
 
 
@@ -58,8 +60,11 @@ class TaskQueue:
         max_parse_concurrent: int = DEFAULT_MAX_CONCURRENT_PIPELINES,
         max_enrich_gpu_concurrent: int = 1,
         max_enrich_http_concurrent: int = 4,
+        persist_submissions: bool = True,
     ):
         self.db = db
+        self.persist_submissions = persist_submissions
+        self._submission_paths = {}
         # Single source of truth for whole-pipeline concurrency:
         # max_parse_concurrent both sizes the worker pool below
         # (pool_config["parse"] -> number of _worker_loop tasks) and is
@@ -122,6 +127,11 @@ class TaskQueue:
         if existing and existing.status in (TaskStatus.PENDING, TaskStatus.RUNNING):
             return existing
 
+        if self.persist_submissions:
+            run = await RunRepository(self.db).get(run_id)
+            if run is None:
+                raise ValueError(f"Run not found: {run_id}")
+            self._submission_paths[run_id] = save_submission(run)
         info = TaskInfo(
             run_id=run_id,
             status=TaskStatus.PENDING,
@@ -184,7 +194,12 @@ class TaskQueue:
 
             info.result = result
             info.finished_at = datetime.now()
-            info.status = TaskStatus.COMPLETED if result.success else TaskStatus.FAILED
+            info.status = (TaskStatus.COMPLETED if result.success else
+                           TaskStatus.CANCELED if result.final_status == RunStatus.CANCELED else TaskStatus.FAILED)
+            if not self._shutdown:
+                path = self._submission_paths.pop(run_id, None)
+                if path:
+                    path.unlink(missing_ok=True)
 
             on_complete = self._callbacks.get(run_id)
             if on_complete:
@@ -214,6 +229,9 @@ class TaskQueue:
 
         info.status = TaskStatus.CANCELED
         info.finished_at = datetime.now()
+        path = self._submission_paths.pop(run_id, None)
+        if path:
+            path.unlink(missing_ok=True)
 
         task = self._running_tasks.get(run_id)
         if task and not task.done():

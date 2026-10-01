@@ -7,13 +7,14 @@ Output: chunks.jsonl with semantic chunks preserving block references.
 import json
 import math
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 
 from app.config import PipelineConfig
 from app.models.document_ir import Block, BlockType, DocumentIR, coerce_payload_text
+from app.pipeline.content_coverage import TextCoverage
 from app.pipeline.delivery import atomic_write_jsonl
 from app.pipeline.privacy import scrub_transcribed_privacy, set_privacy_scrub_enabled
 from app.pipeline.stages.normalize import is_non_content
@@ -179,7 +180,21 @@ class ChunkStage:
             outputs_dir = run_path / "outputs"
             outputs_dir.mkdir(parents=True, exist_ok=True)
             if self._structured_chunks_should_replace(outputs_dir):
-                chunks = self._load_structured_chunks(outputs_dir)
+                structured = self._load_structured_chunks(outputs_dir)
+                coverage = TextCoverage(chunk.content for chunk in structured)
+                remaining = [
+                    block for block in document_ir.blocks
+                    if not coverage.covers(self._block_to_text(block))
+                    or not coverage.covers(str(block.payload.get("verified_semantics") or ""))
+                ]
+                residual = self._chunk_blocks(
+                    document_ir.model_copy(update={"blocks": remaining}), "rag",
+                    self.package_config.chunk_max_tokens, self.package_config.chunk_overlap_tokens,
+                )
+                for chunk in residual:
+                    chunk.chunk_id = f"preserved_{chunk.chunk_id}"
+                    chunk.metadata["coverage_route"] = "uncovered_source_blocks"
+                chunks = structured + residual
 
             chunks_path = outputs_dir / "chunks.jsonl"
             # Parser OCR of screenshots can carry personal content (domain
@@ -189,6 +204,7 @@ class ChunkStage:
             for chunk in chunks:
                 chunk.content = scrub_transcribed_privacy(chunk.content)
                 _scrub_chunk_metadata(chunk.metadata)
+            chunks = self._bound_chunks(chunks)
             atomic_write_jsonl(chunks_path, (chunk.to_dict() for chunk in chunks))
 
             stats = {
@@ -211,6 +227,43 @@ class ChunkStage:
                 success=False,
                 error=str(e),
             )
+
+    def _bound_chunks(self, chunks: list[Chunk]) -> list[Chunk]:
+        """Split oversized delivered text without truncating any source content."""
+        limit = self.package_config.chunk_max_tokens
+        bounded = []
+        for chunk in chunks:
+            if estimate_tokens(chunk.content) <= limit:
+                bounded.append(chunk)
+                continue
+            parts = []
+            start = 0
+            while start < len(chunk.content):
+                low, high = start + 1, len(chunk.content)
+                while low < high:
+                    middle = (low + high + 1) // 2
+                    if estimate_tokens(chunk.content[start:middle]) <= limit:
+                        low = middle
+                    else:
+                        high = middle - 1
+                end = low
+                if end < len(chunk.content):
+                    boundaries = list(re.finditer(r"[。！？\n;]|\s+", chunk.content[start:end]))
+                    if boundaries and boundaries[-1].end() > (end - start) // 2:
+                        end = start + boundaries[-1].end()
+                parts.append(chunk.content[start:end])
+                if end == len(chunk.content):
+                    break
+                # Retain text across boundaries for phrase/numeric continuity.
+                overlap = min(32, max(0, (end - start) // 4))
+                start = max(start + 1, end - overlap)
+            for index, content in enumerate(parts):
+                bounded.append(replace(
+                    chunk, chunk_id=f"{chunk.chunk_id}_part{index + 1}", content=content,
+                    metadata={**chunk.metadata, "parent_chunk_id": chunk.chunk_id,
+                              "part_index": index + 1, "part_count": len(parts)},
+                ))
+        return bounded
 
     def _load_asset_retrieval_text(self, outputs_dir: Path) -> dict[str, str]:
         """Map block_id -> figure retrieval text from assets_index.jsonl.
@@ -578,11 +631,13 @@ class ChunkStage:
             "heading_path": heading_path,
         }
 
-        # Preserve original table HTML (content renders it as markdown)
+        # Superseded tables remain in the source IR, not in retrieval metadata.
+        from app.pipeline.agentic_content import replacement_text
+
         table_html = [
             str(b.payload.get("table_body", ""))
             for b in blocks
-            if b.type == BlockType.TABLE and b.payload.get("table_body")
+            if b.type == BlockType.TABLE and b.payload.get("table_body") and not replacement_text(b)
         ]
         if table_html:
             metadata["table_html"] = table_html
@@ -608,11 +663,22 @@ class ChunkStage:
 
     def _blocks_to_text(self, blocks: list[Block]) -> str:
         """Convert blocks to text."""
-        parts = [self._block_to_text(b) for b in blocks]
+        from app.pipeline.agentic_content import replacement_text
+
+        parts = [
+            "\n\n".join(part for part in (
+                self._block_to_text(b), "" if replacement_text(b) else str(b.payload.get("verified_semantics") or "")
+            ) if part)
+            for b in blocks
+        ]
         return "\n\n".join(p for p in parts if p)
 
     def _block_to_text(self, block: Block) -> str:
         """Convert a single block to text."""
+        from app.pipeline.agentic_content import replacement_text
+
+        if text := replacement_text(block):
+            return text
         if block.type == BlockType.TEXT:
             text = block.payload.get("text", "")
             level = block.payload.get("text_level", 0)
@@ -623,7 +689,8 @@ class ChunkStage:
 
         elif block.type == BlockType.TABLE:
             caption = coerce_payload_text(block.payload.get("table_caption"))
-            body = _table_body_to_markdown(block.payload.get("table_body", ""))
+            from app.pipeline.table_structure import canonical_table_html
+            body = _table_body_to_markdown(canonical_table_html(block))
             footnote = block.payload.get("table_footnote")
             if isinstance(footnote, str):
                 footnote = [footnote]
@@ -634,7 +701,8 @@ class ChunkStage:
         elif block.type == BlockType.IMAGE:
             if block.block_id in self._decorative_blocks:
                 return ""
-            caption = coerce_payload_text(block.payload.get("caption"))
+            from app.models.document_ir import image_content_caption
+            caption = image_content_caption(block.payload)
             # Prefer the VLM figure retrieval text so the figure's information is
             # searchable in the chunk body, rather than a model-unreadable
             # ``[Image: caption]`` placeholder. Falls back to the placeholder when
@@ -730,6 +798,11 @@ def _table_body_to_markdown(body: str) -> str:
     """
     if "<" not in body:
         return body
+
+    if 'data-source-grid="1"' in body:
+        # A pipe table promotes row 1 to a header. Preserve explicit row roles instead.
+        from app.pipeline.package_utils import semantic_table_to_text
+        return semantic_table_to_text(body)
 
     parser = _HTMLTableParser()
     try:

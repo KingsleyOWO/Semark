@@ -290,7 +290,7 @@ class _BlockingOrchestrator:
 
 @pytest.mark.asyncio
 async def test_task_queue_stop_cancels_workers_and_awaits_running_tasks():
-    queue = TaskQueue(db=object(), max_parse_concurrent=1)
+    queue = TaskQueue(db=object(), max_parse_concurrent=1, persist_submissions=False)
     fake = _BlockingOrchestrator()
     queue.orchestrator = fake
 

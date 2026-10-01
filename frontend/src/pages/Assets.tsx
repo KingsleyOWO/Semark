@@ -14,6 +14,7 @@ import {
   triggerBrowserDownload,
   type OutputRunSummary,
 } from '@/lib/api'
+import { DeliveryBadge } from '@/components/DeliveryBadge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -691,6 +692,7 @@ function QualityGateSummary({ report }: { report: QualityGateReport }) {
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2">
           <Badge variant={badgeVariant}>{statusLabel}</Badge>
+          <DeliveryBadge report={report} />
           <span className="text-muted-foreground">{t('assets.qualityScore', { score: Math.round((report.score ?? 0) * 100) })}</span>
         </div>
         <span className="text-muted-foreground">{t('assets.auditSummary', { issues: issues.length, audits: report.vlm_audits?.length ?? 0 })}</span>

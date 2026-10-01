@@ -4,6 +4,7 @@ Enrich stage - VLM enrichment for forms, figures, tables, and visual pages.
 Gating logic determines which blocks/pages need VLM enrichment.
 """
 
+import hashlib
 import json
 import re
 from collections.abc import Awaitable, Callable
@@ -329,6 +330,26 @@ class OrgChartDebugBundle:
         )
 
 
+def enrichment_input_hash(document_ir: DocumentIR, run_path: Path, parse_cache_path: Path | None) -> str:
+    """Actual IR/image fingerprint, independent of run-specific output paths."""
+    data = document_ir.to_dict()
+    data.pop("run_id", None)
+    for page in data.get("pages", []):
+        page.pop("page_image_path", None)
+    for block in data.get("blocks", []):
+        block.pop("enrichment_ref", None)
+    digest = hashlib.sha256(json.dumps(data, sort_keys=True, ensure_ascii=False).encode())
+    for label, root in (("parse", parse_cache_path), ("pages", run_path / "assets/pages")):
+        if root and root.is_dir():
+            for path in sorted(root.rglob("*")):
+                if path.is_file() and path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".json"}:
+                    digest.update(f"{label}:{path.relative_to(root)}".encode())
+                    with path.open("rb") as stream:
+                        for piece in iter(lambda: stream.read(1024 * 1024), b""):
+                            digest.update(piece)
+    return digest.hexdigest()[:24]
+
+
 class EnrichStage:
     """
     Enrich stage - VLM enrichment for visual blocks.
@@ -426,7 +447,8 @@ class EnrichStage:
             parse_config_hash = compute_config_hash(
                 self.config.mineru, version=mineru_version
             )
-            effective_vlm_config_hash = f"{vlm_config_hash}:{parse_config_hash}"
+            input_hash = enrichment_input_hash(document_ir, run_path, parse_cache_path)
+            effective_vlm_config_hash = f"{vlm_config_hash}:{parse_config_hash}:{input_hash}"
 
             # Apply gating logic to find blocks that need enrichment
             blocks_to_enrich, gating_stats = self._apply_gating(document_ir)
@@ -607,6 +629,7 @@ class EnrichStage:
                 table_body_for_vlm = None  # May be truncated
                 if kind == "table_reconstruct" and block.type == BlockType.TABLE:
                     table_body = block.payload.get("table_body", "")
+                    table_body_for_vlm = table_body
                 elif kind == "table_summary" and block.type == BlockType.TABLE:
                     table_body = block.payload.get("table_body", "")
                     # Use truncated body if available (from gating)
@@ -677,7 +700,7 @@ class EnrichStage:
                     # shared DocumentIR, so package and chunk both render the
                     # repaired grid without either needing to know this ran.
                     if kind == "table_reconstruct":
-                        repaired = self._apply_table_reconstruction(block, result.output)
+                        repaired = not result.needs_review and self._apply_table_reconstruction(block, result.output)
                         quality_dict["table_body_replaced"] = repaired
                         stats["tables_repaired"] = stats.get("tables_repaired", 0) + int(repaired)
 
@@ -1400,7 +1423,7 @@ class EnrichStage:
         table is bad but honest; a half-transcribed replacement would be worse,
         because nothing downstream can tell it is incomplete.
         """
-        if not isinstance(output, dict) or not output.get("parse_was_wrong"):
+        if not isinstance(output, dict) or not output.get("parse_was_wrong") or output.get("needs_review"):
             return False
 
         header = [str(c) for c in (output.get("header") or [])]
@@ -1416,6 +1439,11 @@ class EnrichStage:
                 return False
             rows.append([str(c) for c in row])
 
+        meaningful_headers = [re.sub(r"\s+", "", value) for value in header if value.strip()]
+        if len(meaningful_headers) >= 3 and len(set(meaningful_headers)) < len(meaningful_headers) / 2:
+            output["needs_review"] = True
+            output["reconstruction_rejected"] = "repeated_layout_labels_as_headers"
+            return False
         original = block.payload.get("table_body", "") or ""
 
         def squeeze(text: str) -> str:
@@ -1488,11 +1516,13 @@ class EnrichStage:
             # ``len()`` on MinerU's raw caption list counts parts, not
             # characters, so the "too short" test below was reading 1 or 2 for
             # every captioned figure and always firing.
+            from app.models.document_ir import image_caption_is_context
             caption = coerce_payload_text(block.payload.get("caption"))
 
             if self.enrich_config.vlm_enrich_figures:
                 # Enrich if caption is missing or too short
-                if not caption or len(caption) < 20:
+                if (not caption or len(caption) < 20
+                        or image_caption_is_context(block.payload)):
                     return "figure_description"
 
         elif block.type == BlockType.TABLE:
@@ -1513,6 +1543,10 @@ class EnrichStage:
                 and block.payload.get("img_path")
                 and table_may_have_collapsed_rows(table_body)
             ):
+                # Full source review already owns evidence-based table recovery.
+                # Preserve the parser grid until it verifies and adopts a candidate.
+                if self.config.agentic.mode == "apply" and self.config.agentic.recovery_enabled:
+                    return None
                 return "table_reconstruct"
 
             if self.enrich_config.vlm_enrich_tables:
@@ -2030,8 +2064,12 @@ class EnrichStage:
         except StopIteration:
             return ""
 
-        # Get surrounding text blocks
+        # Get surrounding text blocks. Word cell labels describe placement, not
+        # text the model is allowed to pretend it saw inside the picture.
         context_parts = []
+        if block.payload.get("word_source", {}).get("parent_table_block_id"):
+            context_parts.append("Word table placement (not picture transcription): "
+                                 + coerce_payload_text(block.payload.get("caption_context") or block.payload.get("caption")))
         for i in range(max(0, idx - window), min(len(page_blocks), idx + window + 1)):
             if i == idx:
                 continue

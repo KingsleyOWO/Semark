@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 import os
+import signal
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -88,6 +89,7 @@ class MinerUAdapter:
         import time
         start_time = time.time()
 
+        proc = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 self.cli_path,
@@ -95,6 +97,7 @@ class MinerUAdapter:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env={**os.environ, **env},
+                start_new_session=True,
             )
 
             stdout, stderr = await proc.communicate()
@@ -118,6 +121,18 @@ class MinerUAdapter:
 
             return result
 
+        except asyncio.CancelledError:
+            # Recovery tools are time bounded; do not leave a parser/GPU process running.
+            if proc is not None and proc.returncode is None:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                try:
+                    await asyncio.wait_for(proc.communicate(), timeout=5)
+                except (TimeoutError, ProcessLookupError):
+                    pass
+            raise
         except FileNotFoundError:
             return MinerUResult(
                 success=False,

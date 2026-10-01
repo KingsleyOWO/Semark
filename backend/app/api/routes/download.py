@@ -36,6 +36,11 @@ class FileType(StrEnum):
     QUALITY = "quality"
     ASSETS_INDEX = "assets_index"
     ENRICHMENTS = "enrichments"
+    REVIEW_COVERAGE = "review_coverage"
+    RECOVERY_REPORT = "recovery_report"
+    RAG_CHUNKS = "rag_chunks"
+    DELIVERY = "delivery"
+    PROCESSING_REPORT = "processing_report"
 
 
 class OutputFormat(StrEnum):
@@ -103,6 +108,11 @@ SOURCE_FILES = {
     FileType.QUALITY: "quality.json",
     FileType.ASSETS_INDEX: "assets_index.jsonl",
     FileType.ENRICHMENTS: "enrichments.jsonl",
+    FileType.REVIEW_COVERAGE: "review_coverage.json",
+    FileType.RECOVERY_REPORT: "recovery_report.json",
+    FileType.RAG_CHUNKS: "rag_chunks.jsonl",
+    FileType.DELIVERY: "delivery.md",
+    FileType.PROCESSING_REPORT: "processing_report.json",
 }
 
 FALLBACK_SOURCE_FILES = {
@@ -180,7 +190,7 @@ def _build_download_zip(runs_with_docs: list, request: DownloadRequest) -> io.By
 
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         for run, source_name in runs_with_docs:
-            run_path = settings.get_run_path(run.doc_id, run.run_id)
+            run_path = settings.get_published_run_path(run.doc_id, run.run_id)
             outputs_path = run_path / "outputs"
 
             for file_type in request.file_types:
@@ -307,7 +317,7 @@ async def download_split_document(
 
     doc = await doc_repo.get(run.doc_id)
     source_name = _source_name_for(doc.source_path if doc else None, run.run_id)
-    outputs_path = settings.get_run_path(run.doc_id, run.run_id) / "outputs"
+    outputs_path = settings.get_published_run_path(run.doc_id, run.run_id) / "outputs"
 
     entry = _get_document_entry(outputs_path, document_id, source_name=source_name)
     if entry is None:
@@ -362,15 +372,21 @@ def _get_file_content(
     if not source_path.exists():
         return None
 
+    if file_type in {FileType.RAG_CHUNKS, FileType.DELIVERY, FileType.PROCESSING_REPORT}:
+        from app.pipeline.autonomous_delivery import checked_automatic_artifact
+        try:
+            source_path = checked_automatic_artifact(outputs_path.parent, source_file)
+        except ValueError:
+            return None
     content = source_path.read_bytes()
 
     # Get the type suffix (dataset, rag, quality, etc.)
     type_suffix = file_type.value
 
     # JSON files don't get format conversion
-    if file_type in (FileType.QUALITY, FileType.ASSETS_INDEX, FileType.ENRICHMENTS):
+    if source_path.suffix in {".json", ".jsonl"}:
         # Use source_name for JSON files too
-        suffix = "json" if file_type == FileType.QUALITY else "jsonl"
+        suffix = source_path.suffix.lstrip(".")
         return content, f"{source_name}_{type_suffix}.{suffix}"
 
     # Markdown files - use source_name as base

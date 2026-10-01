@@ -261,7 +261,7 @@ class PackageSerializationTest(unittest.TestCase):
 
         text = "\n".join(PackageStage()._render_block_rag(block, {}))
 
-        self.assertIn("內容類型：表格片段或續接資料", text)
+        self.assertIn("內容類型：來源表格（依原始列欄位置呈現）", text)
         self.assertNotIn("<table", text)
         self.assertNotIn("TABLE:", text)
         self.assertNotIn("COLUMNS:", text)
@@ -878,6 +878,7 @@ Text
             ),
             structured_content="收到民眾申訴 > 送承辦單位辦理",
             semantic_caption="This is a flowchart for complaint handling.",
+            image_type="flowchart",
         )
 
         text = PackageStage()._render_split_asset_document(
@@ -937,6 +938,10 @@ Text
             ],
         )
 
+        # OCR labels are physically inside the source figure, not merely on its page.
+        for source_block in document_ir.blocks:
+            source_block.bbox_norm = ([0, 0, 1000, 1000] if source_block.type == BlockType.IMAGE
+                                     else [20, 20, 500, 60])
         output = PackageStage()._augment_visual_output_from_page_text(
             {
                 "image_type": "other",
@@ -996,6 +1001,10 @@ Text
             ],
         )
 
+        # OCR labels are physically inside the source figure, not merely on its page.
+        for source_block in document_ir.blocks:
+            source_block.bbox_norm = ([0, 0, 1000, 1000] if source_block.type == BlockType.IMAGE
+                                     else [20, 20, 500, 60])
         output = PackageStage()._augment_visual_output_from_page_text(
             {
                 "image_type": "flowchart",

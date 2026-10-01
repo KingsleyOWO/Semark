@@ -301,11 +301,18 @@ def semantic_table_to_text(
         caption = " ".join(str(x) for x in caption if x)
     title = clean_latex_symbols(str(caption or "").strip()) or ("Table" if language == "en" else "表格")
 
-    if table_rows_are_low_confidence(rows):
+    source_grid = 'data-source-grid="1"' in html
+    if not source_grid and table_rows_are_low_confidence(rows):
         return low_confidence_table_to_text(rows, title, semantic_output_language=language)
 
-    header_idx = _detect_semantic_table_header_index(rows)
+    explicit = [i for i, source in enumerate(grid.source_row_index)
+                if grid.cells and grid.cells[source] and all(c.get("header") for c in grid.cells[source])]
+    # Recovery grids carry an explicit row role. Never promote data into headers.
+    header_idx = explicit[0] if explicit else (
+        None if 'data-source-grid="1"' in html else _detect_semantic_table_header_index(rows))
     if header_idx is None:
+        if source_grid:
+            return source_grid_to_text(html, title, language)
         return table_fragment_to_text(rows, title, semantic_output_language=language)
 
     merged = _merge_header_rows(grid, header_idx)
@@ -317,6 +324,18 @@ def semantic_table_to_text(
     context_rows = rows[:header_idx]
     data_rows = rows[data_start:]
     width = len(header)
+    if source_grid:
+        from app.pipeline.table_structure import TableCells
+
+        source_cells = TableCells(html).cells
+        first_data_row = (grid.source_row_index[data_start] + 1
+                          if data_start < len(grid.source_row_index) else len(grid.cells) + 1)
+        # A source cell spanning data columns/rows cannot be assigned to one
+        # named field without losing its extent. Use the canonical coordinates
+        # instead of guessing a header role or duplicating a merged value.
+        if any(c["row"] >= first_data_row and (c["colspan"] > 1 or c["rowspan"] > 1)
+               for c in source_cells):
+            return source_grid_to_text(html, title, language)
 
     lines: list[str] = [
         f"## {title}",
@@ -391,7 +410,8 @@ def semantic_table_to_text(
             lines.append(f"- {key}{separator}{value}")
 
     if record_idx == 0:
-        return table_fragment_to_text(rows, title, semantic_output_language=language)
+        return (source_grid_to_text(html, title, language) if source_grid else
+                table_fragment_to_text(rows, title, semantic_output_language=language))
 
     # Attribution belongs to the table as a whole, so it trails the records
     # rather than sitting between two of them.
@@ -399,6 +419,47 @@ def semantic_table_to_text(
         lines.append("")
         lines.extend(note_lines)
 
+    rendered = "\n".join(lines).strip()
+    if source_grid:
+        from app.pipeline.content_coverage import normalized_text
+
+        # Heuristics for legacy OCR tables must not silently discard known
+        # native cells (partial repeated headers, trailing cells or notes).
+        content = normalized_text(rendered)
+        if any(normalized_text(c["text"]) not in content for c in source_cells if c["text"].strip()):
+            return source_grid_to_text(html, title, language)
+    return rendered
+
+
+def source_grid_to_text(body: str, title: str, language: str) -> str:
+    """Emit physical cell anchors once; missing headers never erase column positions."""
+    from app.pipeline.table_structure import TableCells
+
+    rows: dict[int, list[str]] = {}
+    for cell in TableCells(body).cells:
+        text = _clean_table_cell(cell["text"])
+        if not text:
+            continue
+        start = cell["column"]
+        end = start + cell["colspan"] - 1
+        column = str(start) if end == start else f"{start}–{end}"
+        if language == "en":
+            label = f"Column {column}"
+            if cell["rowspan"] > 1:
+                label += f" (spans {cell['rowspan']} rows)"
+            value = f"{label}: {text}"
+        else:
+            label = f"第 {column} 欄"
+            if cell["rowspan"] > 1:
+                label += f"（跨 {cell['rowspan']} 列）"
+            value = f"{label}：{text}"
+        rows.setdefault(cell["row"], []).append(value)
+    kind = ("Content type: source table (original row/column positions)" if language == "en" else
+            "內容類型：來源表格（依原始列欄位置呈現）")
+    lines = [f"## {title}", "", f"{_table_label('table_name', language)}{title}", kind, ""]
+    for row, cells in rows.items():
+        label = f"Row {row}: " if language == "en" else f"第 {row} 列："
+        lines.append("- " + label + ("; " if language == "en" else "；").join(cells))
     return "\n".join(lines).strip()
 
 

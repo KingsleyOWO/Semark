@@ -395,6 +395,7 @@ class NormalizeStage:
         content_list_path: Path,
         source_info: SourceInfo,
         render_pages: bool = True,
+        run_path: Path | None = None,
         mineru_version: str | None = None,
     ) -> NormalizeStageResult:
         """
@@ -479,7 +480,7 @@ class NormalizeStage:
             ]
 
             # Render pages and get dimensions
-            run_path = settings.get_run_path(doc_id, run_id)
+            run_path = run_path or settings.get_run_path(doc_id, run_id)
             pages_dir = run_path / "assets" / "pages"
 
             if render_pages:
@@ -499,9 +500,14 @@ class NormalizeStage:
                     content_list_path=content_list_path,
                 )
 
-            # Build engine info
+            # Record the parser's actual capabilities, not the original suffix.
+            native_source = next((
+                str(item.get("metadata", {}).get("source"))
+                for item in content_list if isinstance(item, dict)
+                and str(item.get("metadata", {}).get("source", "")).startswith("native_")
+            ), "")
             engine = EngineInfo(
-                name="mineru",
+                name=native_source or "mineru",
                 backend=self.config.mineru.backend.value,
                 version=mineru_version,
                 method=self.config.mineru.method.value,
@@ -516,9 +522,18 @@ class NormalizeStage:
                 run_id=run_id,
                 source=source_info,
                 engine=engine,
+                page_kind="logical" if native_source else (
+                    "physical" if any(p.page_image_path for p in pages)
+                    or source_info.ext.lstrip(".").lower() in {"pdf", "png", "jpg", "jpeg"}
+                    or any(len(b.bbox_norm) == 4 and b.bbox_norm[2] > b.bbox_norm[0] for b in blocks)
+                    else "unknown"
+                ),
                 pages=pages,
                 blocks=blocks,
             )
+
+            from app.pipeline.table_structure import materialize_table_structures
+            materialize_table_structures(document_ir)
 
             # Compute stats
             stats = {
@@ -600,6 +615,17 @@ class NormalizeStage:
 
         # Build payload based on type
         payload = self._build_payload(item, block_type)
+        metadata = item.get("metadata", {})
+        if metadata.get("source") == "native_docx":
+            payload["word_source"] = dict(metadata)
+            parent = metadata.get("parent_content_index")
+            if type(parent) is int and 0 <= parent < index:
+                payload["word_source"]["parent_table_block_id"] = f"b{parent:06d}"
+
+        if block_type == BlockType.IMAGE and metadata.get("source") == "native_docx":
+            payload["caption_context"] = payload.pop("caption", "")
+            payload["caption"] = ""
+            payload["word_source"]["caption_is_context"] = True
 
         return Block(
             block_id=block_id,
@@ -1650,7 +1676,22 @@ class NormalizeStage:
             if covered:
                 return True
 
-        return False
+        # A PDF text region may combine several parser paragraphs. Account
+        # for their union at character positions, without lowering the old
+        # single-block threshold or letting a partial match swallow new facts.
+        covered_positions = bytearray(len(target_text_clean))
+        for block in blocks:
+            if block.page_idx != page_idx or is_non_content(block):
+                continue
+            stored, stripped, _annotations = _coverage_texts(block)
+            text = _normalize_for_coverage(stripped if block.type == BlockType.TABLE else stored)
+            if len(text) < 8:
+                continue
+            matcher = difflib.SequenceMatcher(None, target_text_clean, text, autojunk=False)
+            for match in matcher.get_matching_blocks():
+                if match.size >= 8:
+                    covered_positions[match.a:match.a + match.size] = b"1" * match.size
+        return bool(covered_positions) and all(covered_positions)
 
     def _block_covers_fragment(self, fragment: str, block_text: str) -> bool:
         """Whether ``block_text`` already carries everything in ``fragment``.
@@ -1768,6 +1809,9 @@ class NormalizeStage:
 
         # Fallback: MinerU/LibreOffice layout PDF for non-PDF sources.
         if content_list_path:
+            origin_pdf = content_list_path.parent / "original_origin.pdf"
+            if origin_pdf.exists():
+                return origin_pdf
             layout_pdf = content_list_path.parent / "original_layout.pdf"
             if layout_pdf.exists():
                 return layout_pdf
@@ -1973,12 +2017,12 @@ class NormalizeStage:
 
 
 def save_document_ir(document_ir: DocumentIR, run_path: Path) -> Path:
-    """Save DocumentIR to run output directory."""
+    """Persist the exact supplied snapshot without changing reviewed content."""
     ir_path = run_path / "document_ir.json"
     ir_path.parent.mkdir(parents=True, exist_ok=True)
 
-    with open(ir_path, "w", encoding="utf-8") as f:
-        json.dump(document_ir.to_dict(), f, ensure_ascii=False, indent=2)
+    from app.pipeline.delivery import atomic_write_json
+    atomic_write_json(ir_path, document_ir.to_dict(), ensure_ascii=False, indent=2)
 
     return ir_path
 

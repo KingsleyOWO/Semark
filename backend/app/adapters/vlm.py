@@ -444,7 +444,7 @@ Context from document:
 {context}""",
     },
     "table_reconstruct": {
-        "version": "v1",
+        "version": "v2-preserve-source",
         "system": """You are a careful table transcriber. You read a table from its image and report the grid you see.
 
 Unlike other tasks, the parser text supplied to you is NOT ground truth: it is a suspected-bad parse of this same table. The image is the only authority.
@@ -464,7 +464,7 @@ Respond with JSON in this shape:
 Rules:
 - Compare the image against the parser text below. Set parse_was_wrong to false and return empty header/rows if the parser text already matches the table you see — a wide merged cell is often legitimate.
 - Every row in "rows" must have the same number of cells as "header". Use "" for a blank cell.
-- A cell that the printed table spans across several columns repeats its text in each column it covers.
+- Do not repeat merged-cell text across columns. If any real merged cell or non-header opening row cannot be represented faithfully by this rectangular header/rows format, set needs_review to true and leave header/rows empty so the source-preserving Agent can handle it.
 - Transcribe only what is printed. Do not compute totals, translate, or tidy wording.
 - Preserve Traditional Chinese and any English exactly as printed, including units and footnote markers.
 - Text that wraps onto several printed lines inside one cell belongs to that one cell; join it without inventing a separator.

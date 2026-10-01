@@ -663,7 +663,7 @@ export async function getOrgChartDebugFileText(runId: string, fileName: string):
 
 // ========== Download API ==========
 
-export type DownloadFileType = 'source' | 'main_text' | 'documents' | 'quality' | 'assets_index' | 'enrichments'
+export type DownloadFileType = 'source' | 'main_text' | 'documents' | 'quality' | 'assets_index' | 'enrichments' | 'review_coverage' | 'recovery_report' | 'rag_chunks' | 'delivery' | 'processing_report'
 export type DownloadOutputFormat = 'md' | 'docx' | 'txt' | 'json'
 
 export interface DownloadRequest {

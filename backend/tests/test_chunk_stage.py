@@ -12,7 +12,7 @@ from app.models.document_ir import (
 from app.pipeline.stages.chunk import ChunkStage
 
 
-def test_structured_chunks_replace_raw_block_chunks(tmp_path):
+def test_structured_chunks_preserve_uncovered_source_blocks(tmp_path):
     run_path = tmp_path / "run"
     outputs = run_path / "outputs"
     outputs.mkdir(parents=True)
@@ -49,7 +49,7 @@ def test_structured_chunks_replace_raw_block_chunks(tmp_path):
                 block_id="raw0",
                 type=BlockType.TEXT,
                 page_idx=0,
-                payload={"text": "Raw MinerU fallback that must not enter final chunks."},
+                payload={"text": "Authored body outside the repaired form."},
             )
         ],
     )
@@ -59,8 +59,8 @@ def test_structured_chunks_replace_raw_block_chunks(tmp_path):
     assert result.success
     chunks_text = (outputs / "chunks.jsonl").read_text(encoding="utf-8")
     assert "LLM/VLM final semantic chunk" in chunks_text
-    assert "Raw MinerU fallback" not in chunks_text
-    assert len(chunks_text.splitlines()) == 1
+    assert "Authored body outside the repaired form." in chunks_text
+    assert len(chunks_text.splitlines()) == 2
 
 
 def test_image_block_chunk_carries_figure_retrieval_text_not_placeholder(tmp_path):

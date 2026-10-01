@@ -26,6 +26,15 @@ def coerce_payload_text(value: Any) -> str:
     return str(value) if value else ""
 
 
+def image_caption_is_context(payload: dict) -> bool:
+    word = payload.get("word_source", {})
+    return bool(word.get("caption_is_context") or word.get("source") == "native_docx")
+
+
+def image_content_caption(payload: dict) -> str:
+    return "" if image_caption_is_context(payload) else coerce_payload_text(payload.get("caption"))
+
+
 class BlockType(StrEnum):
     TEXT = "text"
     TABLE = "table"
@@ -138,7 +147,7 @@ class Block(BaseModel):
         elif self.type == BlockType.TABLE:
             return coerce_payload_text(self.payload.get("table_body"))
         elif self.type == BlockType.IMAGE:
-            return coerce_payload_text(self.payload.get("caption"))
+            return image_content_caption(self.payload)
         elif self.type == BlockType.EQUATION:
             return coerce_payload_text(self.payload.get("latex"))
         elif self.type == BlockType.CODE:
@@ -165,10 +174,22 @@ class DocumentIR(BaseModel):
 
     doc_id: str
     run_id: str
+    schema_version: int = 2
+    page_kind: str = "unknown"  # physical, logical, unknown (legacy IR)
     source: SourceInfo
     engine: EngineInfo
     pages: list[PageInfo] = Field(default_factory=list)
     blocks: list[Block] = Field(default_factory=list)
+
+    def has_physical_pages(self) -> bool:
+        if self.page_kind != "unknown":
+            return self.page_kind == "physical"
+        if self.source.ext.lstrip(".").lower() in {"doc", "docx", "xls", "xlsx", "ods"}:
+            return any(p.page_image_path for p in self.pages) or any(
+                len(b.bbox_norm) == 4 and b.bbox_norm[2] > b.bbox_norm[0]
+                and b.bbox_norm[3] > b.bbox_norm[1] for b in self.blocks
+            )
+        return self.source.ext.lstrip(".").lower() in {"pdf", "png", "jpg", "jpeg", "tif", "tiff"}
 
     def get_blocks_by_page(self, page_idx: int) -> list[Block]:
         """Get all blocks on a specific page."""

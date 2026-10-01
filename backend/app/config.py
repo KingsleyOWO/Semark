@@ -214,6 +214,22 @@ class PackageConfig(BaseModel):
     chunk_overlap_tokens: int = 50
 
 
+class AgenticConfig(BaseModel):
+    """Source review is on for new runs; repairs stay bounded and verified."""
+    mode: Literal["off", "shadow", "apply"] = "apply"
+    max_actions: int = Field(default=6, ge=0, le=30)
+    max_attempts_per_block: int = Field(default=2, ge=1, le=3)
+    max_model_calls: int = Field(default=120, ge=0, le=240)
+    max_seconds: float = Field(default=7200, gt=0, le=7200)
+    adaptive_budget: bool = True
+    max_output_tokens: int = Field(default=4096, ge=256, le=4096)
+    recovery_enabled: bool = True
+    max_recovery_actions: int = Field(default=6, ge=0, le=30)
+    max_recovery_attempts_per_issue: int = Field(default=3, ge=1, le=4)
+    recovery_reserve_calls: int = Field(default=12, ge=0, le=40)
+    recovery_reserve_seconds: float = Field(default=600.0, ge=0, le=1800)
+
+
 class PipelineConfig(BaseModel):
     """Complete pipeline configuration."""
 
@@ -223,6 +239,7 @@ class PipelineConfig(BaseModel):
     review_vlm: VLMConfig = Field(default_factory=VLMConfig)
     enrich: EnrichConfig = Field(default_factory=EnrichConfig)
     package: PackageConfig = Field(default_factory=PackageConfig)
+    agentic: AgenticConfig = Field(default_factory=AgenticConfig)
 
 
 class ProfileName(StrEnum):
@@ -272,6 +289,10 @@ PROFILES: dict[ProfileName, PipelineConfig] = {
 
 class Settings(BaseSettings):
     """Application settings from environment variables."""
+
+    # Operator-owned runtime; never a model-supplied executable.
+    ocr_python_path: str = Field(default="", validation_alias=semark_env("OCR_PYTHON_PATH"))
+    ocr_model_cache: str = Field(default="", validation_alias=semark_env("OCR_MODEL_CACHE"))
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -338,6 +359,16 @@ class Settings(BaseSettings):
 
     def get_run_path(self, doc_id: str, run_id: str) -> Path:
         return self.get_doc_path(doc_id) / "runs" / run_id
+
+    def get_published_run_path(self, doc_id: str, run_id: str) -> Path:
+        root = self.get_run_path(doc_id, run_id)
+        current = root / "current"
+        if current.is_symlink():
+            resolved = current.resolve()
+            if not resolved.is_relative_to((root / "revisions").resolve()):
+                raise ValueError("Published revision escapes run directory")
+            return resolved
+        return root
 
 
 # Global settings instance

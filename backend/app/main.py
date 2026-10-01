@@ -13,6 +13,7 @@ from app.api.routes import assets, docs, download, ingest, runs
 from app.api.routes import settings as settings_routes
 from app.config import settings
 from app.core.task_queue import TaskQueue, get_task_queue
+from app.core.submissions import has_submission
 from app.db.database import db
 from app.db.repositories import RunRepository, RunStageRepository
 from app.models.entities import RunStatus, StageStatus
@@ -33,6 +34,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Start queue workers now (rather than lazily on first request) so
     # there is always a live TaskQueue instance to stop() on shutdown.
     task_queue = await get_task_queue(db)
+    await _resume_submitted_runs(task_queue)
 
     yield
 
@@ -42,16 +44,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 async def _cancel_orphan_running_runs() -> int:
-    """Cancel DB runs left running after a backend restart.
+    """Cancel legacy running jobs without a durable submission receipt.
 
-    Pipeline tasks live in the in-process task queue. After a process restart,
-    any DB row still marked running cannot be resumed by that new queue, so it
-    must not remain visible as active work in the UI.
-    """
+    Submitted jobs retain their state for _resume_submitted_runs."""
 
     run_repo = RunRepository(db)
     stage_repo = RunStageRepository(db)
     running_runs = await run_repo.list_all(status=RunStatus.RUNNING, limit=1000)
+    running_runs = [run for run in running_runs if not has_submission(run)]
     for run in running_runs:
         stages = await stage_repo.list_by_run(run.run_id)
         for stage in stages:
@@ -67,30 +67,14 @@ async def _cancel_orphan_running_runs() -> int:
 
 
 async def _cancel_orphan_pending_runs() -> int:
-    """Cancel DB runs left pending after a backend restart.
+    """Cancel legacy pending jobs without durable execution intent.
 
-    Constraint: the task queue (app.core.task_queue) is a purely in-memory
-    asyncio.Queue, so a run_id that was submitted (POST /runs/{id}/execute)
-    but not yet dequeued when the process died has no worker left to ever
-    pick it up after restart -- left alone it sits in PENDING forever with
-    no indication anything is wrong (e.g. batch-create+submit 20 docs,
-    restart after 5 have started -> 15 permanent "pending" zombies).
-
-    Tradeoff: creating a run (POST /runs) does NOT itself submit it to the
-    queue -- execute() is a separate call -- and the DB has no column
-    recording "was queued" vs. "created but execution never requested"; the
-    only place that distinction lived was the in-memory TaskQueue, which is
-    exactly what a restart destroys. So this sweep cannot tell a truly
-    orphaned (queued) PENDING run apart from one a user simply hasn't
-    executed yet, and conservatively cancels both rather than leaving
-    potential zombies invisible. Cost is low either way: re-executing a run
-    is the same one action a user would take regardless of which case it
-    was.
-    """
+    New submissions have execution.json and are resumed separately."""
 
     run_repo = RunRepository(db)
     stage_repo = RunStageRepository(db)
     pending_runs = await run_repo.list_all(status=RunStatus.PENDING, limit=1000)
+    pending_runs = [run for run in pending_runs if not has_submission(run)]
     for run in pending_runs:
         stages = await stage_repo.list_by_run(run.run_id)
         for stage in stages:
@@ -106,18 +90,27 @@ async def _cancel_orphan_pending_runs() -> int:
 
 
 async def _cancel_orphan_runs() -> int:
-    """Boot-time reconciliation sweep for runs stranded by a backend restart.
-
-    Combines both blind spots created by the in-process, in-memory task
-    queue: runs a prior process was actively executing (RUNNING) and runs
-    it had merely accepted but not yet started (PENDING). Neither can be
-    resumed by a freshly-started queue, so both are surfaced as CANCELED
-    instead of appearing permanently "stuck" in the UI.
-    """
+    """Reconcile legacy stranded runs; preserve durably submitted work."""
 
     running = await _cancel_orphan_running_runs()
     pending = await _cancel_orphan_pending_runs()
     return running + pending
+
+
+async def _resume_submitted_runs(task_queue: TaskQueue) -> int:
+    """Resume only explicitly submitted jobs, including graceful-shutdown cancellations."""
+    run_repo = RunRepository(db)
+    resumed = 0
+    for receipt in sorted(settings.docs_path.glob("*/runs/*/execution.json")):
+        run = await run_repo.get(receipt.parent.name)
+        if run is None or not has_submission(run):
+            continue
+        if run.status in (RunStatus.SUCCEEDED, RunStatus.FAILED):
+            receipt.unlink(missing_ok=True)
+            continue
+        await task_queue.submit(run.run_id)
+        resumed += 1
+    return resumed
 
 
 async def _shutdown_task_queue_and_db(task_queue: TaskQueue) -> None:

@@ -72,6 +72,19 @@ def test_a_bare_folio_does_not_cover_unrelated_prose():
     assert not stage._is_covered_by_blocks([0, 0, 0, 0], SPILLOVER_FRAGMENT, blocks, page_idx=2)
 
 
+def test_multiple_parser_blocks_cover_one_merged_pdf_paragraph():
+    parts = [
+        "第一階段進行市場調查，了解顧客需求與競爭情勢。",
+        "第二階段建立產品定位，並且完成品牌識別設計。",
+        "第三階段執行通路測試，收集回饋並提出改善建議。",
+    ]
+    blocks = [_block(f"b{i}", text, page_idx=0) for i, text in enumerate(parts)]
+    stage = NormalizeStage()
+    assert stage._is_covered_by_blocks([0, 0, 0, 0], "".join(parts), blocks, 0)
+    missing = "".join(parts) + "此外另編列一百一十萬元，用於海外市場行銷和數位通路拓展。"
+    assert not stage._is_covered_by_blocks([0, 0, 0, 0], missing, blocks, 0)
+
+
 def test_genuinely_missing_text_is_still_supplemented():
     """Anti-over-correction: widening coverage must not suppress real gaps."""
     stage = NormalizeStage()

@@ -363,7 +363,7 @@ class RunStageRepository:
 
         if status == StageStatus.RUNNING:
             await self.db.connection.execute(
-                "UPDATE run_stages SET status = ?, started_at = ? WHERE run_id = ? AND stage = ?",
+                "UPDATE run_stages SET status = ?, started_at = ?, finished_at = NULL, error_json = NULL WHERE run_id = ? AND stage = ?",
                 (status.value, now, run_id, stage.value),
             )
         elif status in (StageStatus.SUCCEEDED, StageStatus.FAILED, StageStatus.CANCELED):
@@ -381,6 +381,17 @@ class RunStageRepository:
                 (status.value, run_id, stage.value),
             )
 
+        await self.db.connection.commit()
+
+    async def restore_completed(
+        self, run_id: str, stage: StageName, stats: dict[str, Any],
+    ) -> None:
+        """A checkpoint reuses earlier work; keep that work's original timestamps."""
+        await self.db.connection.execute(
+            """UPDATE run_stages SET status = ?, error_json = NULL, stats_json = ?
+               WHERE run_id = ? AND stage = ?""",
+            (StageStatus.SUCCEEDED.value, _to_json(stats), run_id, stage.value),
+        )
         await self.db.connection.commit()
 
     async def update_running_stats(

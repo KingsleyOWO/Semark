@@ -9,12 +9,22 @@ from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from weakref import WeakValueDictionary
 
 from app.config import PipelineConfig, settings
 from app.db.database import Database
 from app.db.repositories import DocRepository, RunRepository, RunStageRepository
 from app.models.document_ir import DocumentIR, SourceInfo
 from app.models.entities import Run, RunStatus, StageName, StageStatus
+from app.pipeline.delivery import atomic_write_json
+from app.pipeline.document_review import DocumentReview
+from app.pipeline.final_delivery import finalize_delivery
+from app.pipeline.revisions import (
+    begin_revision,
+    execution_fingerprint,
+    publish_revision,
+    save_checkpoint,
+)
 from app.pipeline.stages.chunk import ChunkStage
 from app.pipeline.stages.enrich import EnrichStage
 from app.pipeline.stages.normalize import NormalizeStage, save_document_ir
@@ -31,6 +41,7 @@ from app.pipeline.stages.parse import ParseStage
 DEFAULT_MAX_CONCURRENT_PIPELINES = 2
 
 _pipeline_semaphore: asyncio.Semaphore | None = None
+_run_locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
 
 
 def _get_pipeline_semaphore(limit: int) -> asyncio.Semaphore:
@@ -72,6 +83,8 @@ class PipelineContext:
     run_id: str
     config: PipelineConfig
     run_path: Path
+    root_path: Path | None = None
+    checkpoint: dict[str, Any] = field(default_factory=dict)
 
     # Stage outputs
     parse_cache_path: Path | None = None
@@ -125,6 +138,18 @@ class PipelineOrchestrator:
         on_stage_complete: Callable[[StageName, dict], Coroutine] | None = None,
         on_stage_start: Callable[[StageName], Coroutine] | None = None,
     ) -> PipelineResult:
+        # Queue workers and synchronous API requests must never write the same
+        # revision concurrently. Keep unrelated runs independent.
+        lock = _run_locks.setdefault(run_id, asyncio.Lock())
+        async with lock:
+            return await self._execute_locked(run_id, on_stage_complete, on_stage_start)
+
+    async def _execute_locked(
+        self,
+        run_id: str,
+        on_stage_complete: Callable[[StageName, dict], Coroutine] | None = None,
+        on_stage_start: Callable[[StageName], Coroutine] | None = None,
+    ) -> PipelineResult:
         """
         Execute the pipeline for a run.
 
@@ -162,15 +187,41 @@ class PipelineOrchestrator:
         config = PipelineConfig.model_validate(run.config)
 
         # Create context
-        run_path = settings.get_run_path(run.doc_id, run_id)
-        run_path.mkdir(parents=True, exist_ok=True)
+        root_path = settings.get_run_path(run.doc_id, run_id)
+        fingerprint = execution_fingerprint(run.config, doc.sha256)
+        run_path, checkpoint = begin_revision(
+            root_path, fingerprint, force=bool(getattr(run, "force_stages", None))
+        )
 
         ctx = PipelineContext(
             doc_id=run.doc_id,
             run_id=run_id,
             config=config,
             run_path=run_path,
+            root_path=root_path,
+            checkpoint=checkpoint,
         )
+        if checkpoint.get("completed"):
+            ctx.parse_cache_path = Path(checkpoint["parse_cache_path"]) if checkpoint.get("parse_cache_path") else None
+            ctx.content_list_path = Path(checkpoint["content_list_path"]) if checkpoint.get("content_list_path") else None
+            ir_path = run_path / "document_ir.json"
+            if ir_path.is_file():
+                import json
+                ctx.document_ir = DocumentIR.from_dict(json.loads(ir_path.read_text()))
+            ctx.stage_stats = checkpoint.get("stats", {})
+            if (not ctx.content_list_path or not ctx.content_list_path.is_file()
+                    or ("normalize" in checkpoint["completed"] and ctx.document_ir is None)):
+                # Never rebuild inside a published revision when an old parse
+                # cache has been removed. Start a new candidate instead.
+                if (root_path / "current").is_symlink() and (root_path / "current").resolve() == run_path:
+                    run_path, checkpoint = begin_revision(root_path, fingerprint, force=True)
+                    ctx.run_path = run_path
+                    ctx.checkpoint = checkpoint
+                checkpoint["completed"] = []
+                ctx.stage_stats = {}
+                ctx.document_ir = None
+                ctx.parse_cache_path = None
+                ctx.content_list_path = None
 
         # Cap whole-pipeline concurrency across BOTH the task-queue workers
         # and the direct (background=false) execution path -- see
@@ -219,6 +270,13 @@ class PipelineOrchestrator:
         ]
 
         for stage_name, stage_func in stages:
+            if stage_name.value in ctx.checkpoint.get("completed", []):
+                stats = dict(ctx.stage_stats.get(stage_name.value, {}))
+                stats["resumed_from_checkpoint"] = True
+                await self.stage_repo.restore_completed(run_id, stage_name, stats)
+                if on_stage_complete:
+                    await on_stage_complete(stage_name, stats)
+                continue
             # Check if stage should be forced
             force = (
                 run.force_stages is not None
@@ -240,6 +298,8 @@ class PipelineOrchestrator:
                 )
 
                 ctx.stage_stats[stage_name.value] = stats
+                if ctx.root_path:
+                    save_checkpoint(ctx.root_path, ctx.checkpoint, ctx, stage_name.value)
 
                 # Update stage status
                 await self.stage_repo.update_status(
@@ -268,7 +328,18 @@ class PipelineOrchestrator:
                     stats=ctx.stage_stats,
                 )
 
-        # All stages completed
+        # Publish only after the final checkpoint has been committed. A crash
+        # before this pointer switch can resume without mutating a published IR.
+        if ctx.root_path:
+            try:
+                publish_revision(ctx.root_path, ctx.run_path)
+            except Exception as exc:
+                await self.run_repo.update_status(run_id, RunStatus.FAILED)
+                return PipelineResult(
+                    success=False, run_id=run_id, doc_id=run.doc_id,
+                    final_status=RunStatus.FAILED, error=f"Publication failed: {exc}",
+                    failed_stage=StageName.CHUNK, stats=ctx.stage_stats,
+                )
         await self.run_repo.update_status(run_id, RunStatus.SUCCEEDED)
 
         return PipelineResult(
@@ -341,6 +412,7 @@ class PipelineOrchestrator:
             run_id=ctx.run_id,
             content_list_path=ctx.content_list_path,
             source_info=source_info,
+            run_path=ctx.run_path,
         )
 
         if not result.success:
@@ -351,6 +423,8 @@ class PipelineOrchestrator:
         # Save DocumentIR
         if ctx.document_ir:
             save_document_ir(ctx.document_ir, ctx.run_path)
+            atomic_write_json(ctx.run_path / "document_ir.baseline.json",
+                              ctx.document_ir.to_dict(), ensure_ascii=False, indent=2)
 
         return result.stats
 
@@ -388,7 +462,6 @@ class PipelineOrchestrator:
 
         if not result.success:
             raise RuntimeError(f"Enrich failed: {result.error}")
-
         return result.stats
 
     async def _run_package(
@@ -400,7 +473,13 @@ class PipelineOrchestrator:
         if not ctx.document_ir:
             raise RuntimeError("DocumentIR not available for package stage")
 
-        stage = PackageStage(config=ctx.config)
+        package_config = ctx.config.model_copy(deep=True)
+        if ctx.config.agentic.mode == "apply":
+            # One repair owner: avoid an unbudgeted nested rewrite after the
+            # agent's source verification. Deterministic packaging still runs.
+            package_config.package.enable_semantic_repair = False
+            package_config.enrich.enable_vlm = False
+        stage = PackageStage(config=package_config)
 
         result = await stage.run(
             doc_id=ctx.doc_id,
@@ -435,7 +514,28 @@ class PipelineOrchestrator:
 
         if not result.success:
             raise RuntimeError(f"Chunk failed: {result.error}")
+        async def rebuild(repaired):
+            ctx.document_ir = repaired
+            await self._run_package(ctx, use_cache=False)
+            rebuilt = await ChunkStage(config=ctx.config).run(
+                ctx.doc_id, ctx.run_id, repaired, ctx.run_path,
+            )
+            if not rebuilt.success:
+                raise RuntimeError(f"Repaired chunk delivery failed: {rebuilt.error}")
 
+        async def review_progress(progress):
+            await self.stage_repo.update_running_stats(
+                ctx.run_id, StageName.CHUNK, {"progress": progress},
+            )
+
+        ctx.document_ir, review = await DocumentReview(ctx.config).run(
+            ctx.document_ir, ctx.run_path, parse_cache_path=ctx.parse_cache_path,
+            rebuild=rebuild, progress=review_progress,
+        )
+        save_document_ir(ctx.document_ir, ctx.run_path)
+        result.stats["agentic"] = {"review": review["summary"], "usage": review["usage"],
+                                   "budget": review.get("budget", {}), "timing": review.get("timing", {})}
+        result.stats["delivery"] = finalize_delivery(ctx.document_ir, ctx.run_path, ctx.config)
         return result.stats
 
     async def cancel(self, run_id: str) -> bool:

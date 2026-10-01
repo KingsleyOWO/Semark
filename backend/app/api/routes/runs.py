@@ -603,7 +603,7 @@ async def _collect_outputs_summary(
         )
         items = [
             await _build_output_item(
-                doc_repo, run, settings.get_run_path(run.doc_id, run.run_id) / "outputs"
+                doc_repo, run, settings.get_published_run_path(run.doc_id, run.run_id) / "outputs"
             )
             for run in runs
         ]
@@ -624,7 +624,7 @@ async def _collect_outputs_summary(
             break
 
         for run in batch:
-            outputs_dir = settings.get_run_path(run.doc_id, run.run_id) / "outputs"
+            outputs_dir = settings.get_published_run_path(run.doc_id, run.run_id) / "outputs"
             document_summary = _load_split_document_summary(outputs_dir)
             if document_summary["documents_total"] == 0:
                 continue
@@ -938,7 +938,7 @@ async def get_document_ir(
     if not run:
         raise HTTPException(status_code=404, detail=f"Run not found: {run_id}")
 
-    ir_path = settings.get_run_path(run.doc_id, run_id) / "document_ir.json"
+    ir_path = settings.get_published_run_path(run.doc_id, run_id) / "document_ir.json"
     if not ir_path.exists():
         raise HTTPException(status_code=404, detail="Document IR not found")
 
@@ -949,7 +949,7 @@ async def get_document_ir(
 @router.get("/{run_id}/output")
 async def get_output(
     run_id: str,
-    view: str = Query(default="source", pattern="^(source|dataset|rag)$"),
+    view: str = Query(default="source", pattern="^(source|dataset|rag|delivery)$"),
     db: Database = Depends(get_db),
 ) -> FileResponse:
     """
@@ -965,15 +965,70 @@ async def get_output(
         "source": "source.md",
         # Backward compatibility for already-created runs.
         "dataset": "dataset.md",
-        "rag": "rag.md",
+        "rag": "rag_verified.md",
+        "delivery": "delivery.md",
     }
-    output_path = settings.get_run_path(run.doc_id, run_id) / "outputs" / filename_by_view[view]
+    revision = settings.get_published_run_path(run.doc_id, run_id)
+    if view in {"rag", "delivery"}:
+        from app.pipeline.autonomous_delivery import checked_automatic_artifact
+        try:
+            output_path = checked_automatic_artifact(revision, filename_by_view[view])
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+    else:
+        output_path = revision / "outputs" / filename_by_view[view]
     if not output_path.exists() and view == "source":
-        output_path = settings.get_run_path(run.doc_id, run_id) / "outputs" / "rag.md"
+        output_path = settings.get_published_run_path(run.doc_id, run_id) / "outputs" / "rag.md"
     if not output_path.exists():
         raise HTTPException(status_code=404, detail=f"Output not found: {view}")
 
     return FileResponse(output_path, media_type="text/markdown")
+
+
+@router.get("/{run_id}/rag-chunks")
+async def get_verified_chunks(run_id: str, db: Database = Depends(get_db)) -> FileResponse:
+    """Automatic ingestion endpoint: source-verified chunks only, including partial deliveries."""
+    return await _automatic_file(run_id, "rag_chunks.jsonl", "application/x-ndjson", db)
+
+
+@router.get("/{run_id}/processing-report")
+async def get_processing_report(run_id: str, db: Database = Depends(get_db)) -> FileResponse:
+    return await _automatic_file(run_id, "processing_report.json", "application/json", db)
+
+
+@router.get("/{run_id}/processing-evidence")
+async def get_processing_evidence(run_id: str, path: str, db: Database = Depends(get_db)) -> FileResponse:
+    """Serve only source images explicitly referenced by this published processing report."""
+    import json
+
+    from app.pipeline.autonomous_delivery import checked_automatic_artifact
+    run = await RunRepository(db).get(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail=f"Run not found: {run_id}")
+    revision = settings.get_published_run_path(run.doc_id, run_id)
+    try:
+        report_path = checked_automatic_artifact(revision, "processing_report.json")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    report = json.loads(report_path.read_text())
+    allowed = {item["path"] for gap in report.get("gaps", []) for item in gap.get("evidence", [])}
+    image = revision / path
+    if path not in allowed or not image.resolve().is_relative_to((revision / "agentic/evidence").resolve()) or image.suffix != ".png":
+        raise HTTPException(status_code=404, detail="Source evidence not found")
+    return FileResponse(image, media_type="image/png")
+
+
+async def _automatic_file(run_id, filename, media_type, db):
+    from app.pipeline.autonomous_delivery import checked_automatic_artifact
+    run = await RunRepository(db).get(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail=f"Run not found: {run_id}")
+    revision = settings.get_published_run_path(run.doc_id, run_id)
+    try:
+        path = checked_automatic_artifact(revision, filename)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return FileResponse(path, media_type=media_type, filename=filename)
 
 
 @router.get("/{run_id}/documents")
@@ -990,7 +1045,7 @@ async def list_split_documents(
     if not run:
         raise HTTPException(status_code=404, detail=f"Run not found: {run_id}")
 
-    outputs_dir = settings.get_run_path(run.doc_id, run_id) / "outputs"
+    outputs_dir = settings.get_published_run_path(run.doc_id, run_id) / "outputs"
     index_path = outputs_dir / "documents_index.json"
     if not index_path.exists():
         raise HTTPException(status_code=404, detail="Split documents index not found")
@@ -1024,7 +1079,7 @@ async def get_split_document(
     if not run:
         raise HTTPException(status_code=404, detail=f"Run not found: {run_id}")
 
-    outputs_dir = settings.get_run_path(run.doc_id, run_id) / "outputs"
+    outputs_dir = settings.get_published_run_path(run.doc_id, run_id) / "outputs"
     index_path = outputs_dir / "documents_index.json"
     documents_dir = outputs_dir / "documents"
     if not index_path.exists():
@@ -1074,7 +1129,7 @@ async def delete_split_documents(
     if not run:
         raise HTTPException(status_code=404, detail=f"Run not found: {run_id}")
 
-    outputs_dir = settings.get_run_path(run.doc_id, run_id) / "outputs"
+    outputs_dir = settings.get_published_run_path(run.doc_id, run_id) / "outputs"
     index_path = outputs_dir / "documents_index.json"
     documents_dir = outputs_dir / "documents"
     if not index_path.exists():
@@ -1146,7 +1201,7 @@ async def get_source_map(
     if not run:
         raise HTTPException(status_code=404, detail=f"Run not found: {run_id}")
 
-    sm_path = settings.get_run_path(run.doc_id, run_id) / "source_map.json"
+    sm_path = settings.get_published_run_path(run.doc_id, run_id) / "source_map.json"
     if not sm_path.exists():
         raise HTTPException(status_code=404, detail="Source map not found")
 
@@ -1168,7 +1223,7 @@ async def get_quality(
     if not run:
         raise HTTPException(status_code=404, detail=f"Run not found: {run_id}")
 
-    quality_path = settings.get_run_path(run.doc_id, run_id) / "outputs" / "quality.json"
+    quality_path = settings.get_published_run_path(run.doc_id, run_id) / "outputs" / "quality.json"
     if not quality_path.exists():
         raise HTTPException(status_code=404, detail="Quality report not found")
 
@@ -1190,7 +1245,7 @@ async def get_quality_gate(
     if not run:
         raise HTTPException(status_code=404, detail=f"Run not found: {run_id}")
 
-    quality_gate_path = settings.get_run_path(run.doc_id, run_id) / "outputs" / "quality_gate.json"
+    quality_gate_path = settings.get_published_run_path(run.doc_id, run_id) / "outputs" / "quality_gate.json"
     if not quality_gate_path.exists():
         return {
             "status": "unknown",
@@ -1219,7 +1274,7 @@ async def get_assets_index(
     if not run:
         raise HTTPException(status_code=404, detail=f"Run not found: {run_id}")
 
-    index_path = settings.get_run_path(run.doc_id, run_id) / "outputs" / "assets_index.jsonl"
+    index_path = settings.get_published_run_path(run.doc_id, run_id) / "outputs" / "assets_index.jsonl"
     if not index_path.exists():
         raise HTTPException(status_code=404, detail="Assets index not found")
 
@@ -1254,7 +1309,7 @@ async def get_enrichments(
     if not run:
         raise HTTPException(status_code=404, detail=f"Run not found: {run_id}")
 
-    enrichments_path = settings.get_run_path(run.doc_id, run_id) / "outputs" / "enrichments.jsonl"
+    enrichments_path = settings.get_published_run_path(run.doc_id, run_id) / "outputs" / "enrichments.jsonl"
     if not enrichments_path.exists():
         return {"enrichments": [], "total": 0}
 
@@ -1294,7 +1349,7 @@ async def get_manifest(
     if not run:
         raise HTTPException(status_code=404, detail=f"Run not found: {run_id}")
 
-    manifest_path = settings.get_run_path(run.doc_id, run_id) / "manifest.json"
+    manifest_path = settings.get_published_run_path(run.doc_id, run_id) / "manifest.json"
     if not manifest_path.exists():
         raise HTTPException(status_code=404, detail="Manifest not found")
 

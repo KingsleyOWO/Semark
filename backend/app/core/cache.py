@@ -9,6 +9,7 @@ Cache keys:
 import hashlib
 import json
 import shutil
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -124,15 +125,13 @@ class CacheManager:
         Returns the cache path.
         """
         cache_key = self.get_parse_cache_key(doc_id, config, version=version)
-        cache_path = self.get_parse_cache_path(doc_id, cache_key)
+        # Old checkpoints may still reference the preceding cache directory.
+        cache_path = self.get_parse_cache_path(doc_id, cache_key) / uuid.uuid4().hex
 
         # Ensure cache directory exists
         cache_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Copy output to cache (or move if same filesystem)
-        if cache_path.exists():
-            shutil.rmtree(cache_path)
-
         shutil.copytree(source_path, cache_path)
 
         # Store in database

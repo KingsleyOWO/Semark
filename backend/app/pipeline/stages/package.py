@@ -187,13 +187,20 @@ def coerce_visual_vlm_output(output: dict[str, Any]) -> dict[str, Any]:
             result[key] = value
     return result
 
+# Only a bullet glyph is markup. Digits, dots and a dash glued to a number are
+# content: lstrip("-•0123456789.、 ") turned 「2023 年…1.89」 into 「年…1.89」 and
+# deleted the OCR labels 「1.89」/「-0.1」 outright. A model's own 「1. 」 numbering
+# now survives too, which is harmless repetition next to a lost figure value.
+_VLM_BULLET_RE = re.compile(r"^(?:•\s*|[-*]\s+)+")
+
+
 def split_vlm_lines(value: Any) -> list[str]:
     """Return clean, unique lines from VLM text/list fields."""
     text = render_vlm_text(value)
     lines: list[str] = []
     seen: set[str] = set()
     for raw_line in text.splitlines():
-        line = re.sub(r"\s+", " ", raw_line.strip().lstrip("-•0123456789.、 "))
+        line = re.sub(r"\s+", " ", _VLM_BULLET_RE.sub("", raw_line.strip())).strip()
         if not line or line in seen:
             continue
         seen.add(line)

@@ -5,6 +5,7 @@ MinerU-oriented normalization stage. It emits MinerU-compatible content_list
 items so later stages can stay parser-agnostic.
 """
 
+import contextvars
 import hashlib
 import html
 import json
@@ -39,6 +40,14 @@ class _ImageExport:
 
 def parse_word_document(input_path: Path, output_dir: Path) -> WordParseResult:
     """Parse a DOCX document into MinerU-compatible content_list JSON."""
+    token = _NUMBER_LABELS.set({})
+    try:
+        return _parse_word_document(input_path, output_dir)
+    finally:
+        _NUMBER_LABELS.reset(token)
+
+
+def _parse_word_document(input_path: Path, output_dir: Path) -> WordParseResult:
     output_root = output_dir / input_path.stem / "native"
     output_root.mkdir(parents=True, exist_ok=True)
 
@@ -52,6 +61,9 @@ def parse_word_document(input_path: Path, output_dir: Path) -> WordParseResult:
         )
 
     content_controls = _unwrap_content_controls(document)
+    # Cell text is read several times per table (rows, picture labels, HTML),
+    # so list numbers are counted once, in document order, before any of it.
+    _NUMBER_LABELS.set(_number_labels(document))
 
     content_items: list[dict[str, Any]] = []
     markdown_lines: list[str] = []
@@ -104,6 +116,14 @@ def parse_word_document(input_path: Path, output_dir: Path) -> WordParseResult:
                 paragraph_count += 1
                 recent_texts.append(text)
                 recent_texts = recent_texts[-3:]
+
+            for box_text in _text_box_texts(block):
+                content_items.append({
+                    "type": "text", "text": box_text, "text_level": 0, "page_idx": 0, "bbox": [0, 0, 0, 0],
+                    "metadata": {"source": "native_docx", "block_index": block_idx, "text_box": True},
+                })
+                markdown_lines.extend([box_text, ""])
+                paragraph_count += 1
 
             for rel_id in _paragraph_image_rel_ids(block):
                 append_image(rel_id, block_idx)
@@ -216,7 +236,199 @@ def _iter_block_items(parent: DocumentType | _Cell):
 
 
 def _paragraph_text(paragraph: Paragraph) -> str:
-    return " ".join(part.strip() for part in paragraph.text.splitlines() if part.strip()).strip()
+    text = " ".join(part.strip() for part in paragraph.text.splitlines() if part.strip()).strip()
+    label = _NUMBER_LABELS.get().get(paragraph._p)
+    return f"{label}{text}".strip() if label and text else text
+
+
+def _text_box_texts(paragraph: Paragraph) -> list[str]:
+    """Paragraphs of the text boxes anchored in ``paragraph``, each box once.
+
+    A modern box is stored twice: mc:Choice (wps:txbx) and an mc:Fallback VML
+    copy for older readers. Boxes nested in a box belong to that box's own
+    paragraphs, which this function visits recursively.
+    """
+    texts: list[str] = []
+    for box in paragraph._p.iter(qn("w:txbxContent")):
+        between = []
+        for ancestor in box.iterancestors():
+            if ancestor is paragraph._p:
+                break
+            between.append(ancestor.tag)
+        if _MC_FALLBACK in between or qn("w:txbxContent") in between or qn("w:p") in between:
+            continue
+        for child in box.iterchildren(qn("w:p")):
+            inner = Paragraph(child, paragraph._parent)
+            text = _paragraph_text(inner)
+            if text:
+                texts.append(text)
+            texts.extend(_text_box_texts(inner))
+    return texts
+
+
+_MC_FALLBACK = "{http://schemas.openxmlformats.org/markup-compatibility/2006}Fallback"
+_NUMBER_LABELS: contextvars.ContextVar[dict[Any, str]] = contextvars.ContextVar("word_number_labels", default={})
+
+
+def _number_labels(document: DocumentType) -> dict[Any, str]:
+    """Render Word's automatic list numbers, which never appear in the runs.
+
+    Counts follow Word: lists sharing an abstract definition continue each
+    other unless a w:num restarts a level with startOverride, and a level
+    restarts whenever a shallower level advances.
+    """
+    try:
+        numbering = document.part.numbering_part.element
+    except (KeyError, NotImplementedError):
+        return {}
+    abstracts = {a.get(qn("w:abstractNumId")): a for a in numbering.iterchildren(qn("w:abstractNum"))}
+    instances: dict[str, tuple[str, dict[int, int]]] = {}
+    for num in numbering.iterchildren(qn("w:num")):
+        abstract_ref = num.find(qn("w:abstractNumId"))
+        if abstract_ref is None:
+            continue
+        overrides = {}
+        for override in num.iterchildren(qn("w:lvlOverride")):
+            start = override.find(qn("w:startOverride"))
+            if start is not None:
+                overrides[int(override.get(qn("w:ilvl"), "0"))] = int(start.get(qn("w:val"), "0"))
+        instances[num.get(qn("w:numId"))] = (abstract_ref.get(qn("w:val")), overrides)
+
+    counters: dict[str, dict[int, int]] = {}
+    started: set[str] = set()
+    labels: dict[Any, str] = {}
+    for p in document.element.body.iter(qn("w:p")):
+        if any(ancestor.tag == _MC_FALLBACK for ancestor in p.iterancestors()):
+            continue
+        num_id, ilvl = _paragraph_num_ref(p, document)
+        if not num_id or num_id == "0" or num_id not in instances:
+            continue
+        abstract_id, overrides = instances[num_id]
+        abstract = abstracts.get(abstract_id)
+        if abstract is None:
+            continue
+        levels = {int(lvl.get(qn("w:ilvl"), "0")): lvl for lvl in abstract.iterchildren(qn("w:lvl"))}
+        if ilvl not in levels:
+            continue
+        counts = counters.setdefault(abstract_id, {})
+        if num_id not in started:
+            started.add(num_id)
+            for level, start in overrides.items():
+                counts[level] = start - 1
+        level = levels[ilvl]
+        counts[ilvl] = counts.get(ilvl, _level_int(level, "w:start", 0) - 1) + 1
+        for deeper in [lvl for lvl in counts if lvl > ilvl]:
+            del counts[deeper]
+        labels[p] = _render_number_label(level, levels, counts)
+    return labels
+
+
+def _paragraph_num_ref(p, document: DocumentType) -> tuple[str | None, int]:
+    """numId/ilvl set on the paragraph, else inherited through its style chain."""
+    ppr = p.pPr
+    num_pr = ppr.numPr if ppr is not None else None
+    if num_pr is not None and num_pr.numId is not None:
+        return str(num_pr.numId.val), int(num_pr.ilvl.val) if num_pr.ilvl is not None else 0
+    style_id = ppr.pStyle.val if ppr is not None and ppr.pStyle is not None else None
+    seen = set()
+    while style_id and style_id not in seen:
+        seen.add(style_id)
+        style = document.styles.element.get_by_id(style_id)
+        if style is None:
+            break
+        style_num = style.pPr.numPr if style.pPr is not None else None
+        if style_num is not None and style_num.numId is not None:
+            return str(style_num.numId.val), int(style_num.ilvl.val) if style_num.ilvl is not None else 0
+        based_on = style.basedOn
+        style_id = based_on.val if based_on is not None else None
+    return None, 0
+
+
+def _level_int(level, tag: str, default: int) -> int:
+    node = level.find(qn(tag))
+    try:
+        return int(node.get(qn("w:val"))) if node is not None else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _render_number_label(level, levels: dict[int, Any], counts: dict[int, int]) -> str:
+    fmt_node = level.find(qn("w:numFmt"))
+    fmt = fmt_node.get(qn("w:val")) if fmt_node is not None else "decimal"
+    text_node = level.find(qn("w:lvlText"))
+    template = text_node.get(qn("w:val"), "") if text_node is not None else ""
+    if fmt == "none" or not template:
+        return ""
+    if fmt == "bullet":
+        label = "•"
+    else:
+        legal = level.find(qn("w:isLgl")) is not None
+
+        def placeholder(match):
+            ref = int(match.group(1)) - 1
+            ref_level = levels.get(ref)
+            ref_fmt_node = ref_level.find(qn("w:numFmt")) if ref_level is not None else None
+            ref_fmt = ref_fmt_node.get(qn("w:val")) if ref_fmt_node is not None else "decimal"
+            return _format_number(counts.get(ref, 1), "decimal" if legal else ref_fmt)
+
+        label = re.sub(r"%([1-9])", placeholder, template)
+    suffix_node = level.find(qn("w:suff"))
+    suffix = suffix_node.get(qn("w:val")) if suffix_node is not None else "tab"
+    return label + ("" if suffix == "nothing" else " ")
+
+
+_CJK_DIGITS = "〇一二三四五六七八九"
+
+
+def _cjk_number(value: int) -> str:
+    if value <= 0 or value >= 10000:
+        return str(value)
+    parts = []
+    for unit_value, unit in ((1000, "千"), (100, "百"), (10, "十"), (1, "")):
+        digit, value = divmod(value, unit_value)
+        if digit:
+            parts.append(("" if unit == "十" and digit == 1 and not parts else _CJK_DIGITS[digit]) + unit)
+        elif parts and value:
+            if parts[-1] != "零":
+                parts.append("零")
+    return "".join(parts)
+
+
+def _roman(value: int) -> str:
+    if value <= 0 or value >= 4000:
+        return str(value)
+    out = ""
+    for number, symbol in ((1000, "M"), (900, "CM"), (500, "D"), (400, "CD"), (100, "C"), (90, "XC"),
+                           (50, "L"), (40, "XL"), (10, "X"), (9, "IX"), (5, "V"), (4, "IV"), (1, "I")):
+        while value >= number:
+            out += symbol
+            value -= number
+    return out
+
+
+def _format_number(value: int, fmt: str) -> str:
+    if fmt in ("taiwaneseCountingThousand", "taiwaneseCounting", "chineseCounting", "chineseCountingThousand",
+               "chineseLegalSimplified", "japaneseCounting"):
+        return _cjk_number(value)
+    if fmt == "ideographDigital":
+        return "".join(_CJK_DIGITS[int(d)] for d in str(value))
+    if fmt == "ideographTraditional" and 1 <= value <= 10:
+        return "甲乙丙丁戊己庚辛壬癸"[value - 1]
+    if fmt == "ideographZodiac" and 1 <= value <= 12:
+        return "子丑寅卯辰巳午未申酉戌亥"[value - 1]
+    if fmt in ("upperRoman", "lowerRoman"):
+        roman = _roman(value)
+        return roman if fmt == "upperRoman" else roman.lower()
+    if fmt in ("upperLetter", "lowerLetter") and value > 0:
+        letter = chr(ord("A") + (value - 1) % 26) * ((value - 1) // 26 + 1)
+        return letter if fmt == "upperLetter" else letter.lower()
+    if fmt == "decimalZero":
+        return f"{value:02d}"
+    if fmt == "decimalFullWidth":
+        return str(value).translate(str.maketrans("0123456789", "０１２３４５６７８９"))
+    if fmt == "decimalEnclosedCircle" and 1 <= value <= 20:
+        return chr(0x2460 + value - 1)
+    return str(value)
 
 
 def _paragraph_level(paragraph: Paragraph) -> int:
@@ -365,6 +577,7 @@ def _cell_text(cell: _Cell) -> str:
         text = _paragraph_text(paragraph)
         if text:
             parts.append(text)
+        parts.extend(_text_box_texts(paragraph))
     return " / ".join(parts).strip()
 
 

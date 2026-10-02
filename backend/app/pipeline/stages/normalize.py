@@ -1013,8 +1013,13 @@ class NormalizeStage:
         Runs after supplementing, so the duplicate detection upstream compares
         like with like, and over every text-bearing payload field rather than
         ``text`` alone — table cells and captions carry the same misreads.
+
+        Native Word text has no OCR step, so converting it only rewrites what
+        the author typed (a consultant's 「…杰」 became 「…傑」).
         """
         for block in blocks:
+            if (block.payload.get("word_source") or {}).get("source") == "native_docx":
+                continue
             for key in _ZH_TEXT_PAYLOAD_KEYS:
                 if key in block.payload:
                     block.payload[key] = _convert_payload_value(block.payload[key])

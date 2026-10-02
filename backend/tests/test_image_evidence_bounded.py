@@ -245,3 +245,22 @@ async def test_image_audit_format_retry_uses_same_budget_and_persisted_resume_ca
     owner.state = json.loads(owner.state_path.read_text())
     assert await runner.validate(candidate, [0], folder, image_origin='picture', image_pruned=True)
     assert owner.state['usage']['model_calls'] == 8 and len(model.audits) == 2
+
+
+@pytest.mark.asyncio
+async def test_repaired_picture_text_is_brought_to_zh_tw_like_enrichment_text(tmp_path):
+    # v20 Lumio run: a repaired storefront photo shipped 「画面展示了一个室内商业空间」
+    # and 「雷诺瓦…」, labelled verified. Enrichment text goes through render_vlm_text;
+    # repair text skipped it.
+    from app.models.document_ir import BlockType
+    from app.pipeline.image_recovery import build_image_parts_candidate
+
+    ir, owner, runner = await setup(tmp_path)
+    ir.blocks[0].type = BlockType.IMAGE
+    parts = {'visual_facts': ['画面展示了一个室内商业空间'], 'information_status': 'informative', 'gaps': [],
+             'text_regions': [{'text': '雷诺瓦拼图文化坊', 'bbox': [0, 0, 500, 200]}], 'text_dependent': False}
+    candidate = build_image_parts_candidate(runner, ir, ir.blocks[0], 0, [0, 0, 1000, 1000],
+                                            runner.inventory.image(0), parts, [], tmp_path / 'zh-candidate')
+
+    texts = [b.payload['text'] for b in candidate.blocks]
+    assert texts == ['圖片可確認內容：畫面展示了一個室內商業空間', '圖片文字：晴諾米拼圖工作坊']

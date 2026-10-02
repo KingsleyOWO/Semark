@@ -183,11 +183,12 @@ class DocumentReview(AgenticRepair):
         before = self.state["usage"]["seconds"]
         started = time.monotonic()
         try:
-            return await self._inspect_page(page, ir, inventory, run_path)
+            record = await self._inspect_page(page, ir, inventory, run_path)
         except Exception as exc:
             record = {"page_idx": page, "status": "needs_review", "reason": "source_review_error: " + str(exc)[:500]}
             self.state["pages"][str(page)] = record
-            return record
+        try:
+            return self._certify_native_text_blocks(page, ir, inventory, run_path, record)
         finally:
             counted = self.state["usage"]["seconds"] - before
             self.state["usage"]["seconds"] += max(0, time.monotonic() - started - counted)
@@ -295,6 +296,85 @@ class DocumentReview(AgenticRepair):
         return {page: self.build_page_review_input(page, ir, inventory, run_path)["scoped_fingerprint"]
                 for page in (inventory.pages if pages is None else pages)}
 
+    def _native_text_evidence(self, inventory):
+        from app.pipeline.native_page_check import NativePageText
+
+        if getattr(inventory, "_native_text_pdf", None) != inventory.pdf:
+            inventory._native_text = NativePageText(inventory.pdf)
+            inventory._native_text_pdf = inventory.pdf
+        return inventory._native_text
+
+    def _native_text_proof(self, page, blocks, inventory, run_path, evidence):
+        proof = inventory.directory / f"native-text-p{page:04d}.json"
+        atomic_write_json(proof, {
+            "method": "native_word_text_layer", "page_idx": page,
+            "pdf_sha256": hashlib.sha256(inventory.pdf.read_bytes()).hexdigest(),
+            "block_ids": [b.block_id for b in blocks], "printed_lines": evidence.lines[page],
+        }, ensure_ascii=False, indent=2)
+        return {"path": str(proof.relative_to(run_path)), "sha256": hashlib.sha256(proof.read_bytes()).hexdigest(),
+                "label": f"Word-rendered PDF text layer for physical page {page + 1}"}
+
+    def _certify_native_text_blocks(self, page, ir, inventory, run_path, record):
+        """After a picture page's audit, certify its native text from the text layer.
+
+        One picture's failed reading left a whole Lumio page of paragraphs
+        unreviewed and out of RAG. The page stays needs_review and the pictures
+        keep whatever the audit said; only text and table blocks the text layer
+        proves become verified with complete context. A model finding that the
+        reading order is wrong is not overridden.
+        """
+        from app.pipeline.native_page_check import document_source_text
+        from app.pipeline.review_sources import content_blocks
+
+        if (self.limits.mode == "off" or record.get("status") == "verified" or not inventory.pdf
+                or not inventory.complete or ir.has_physical_pages()):
+            return record
+        blocks = inventory.blocks(page, ir)
+        pictures = [b for b in blocks if b.type == BlockType.IMAGE or b.payload.get("agentic_image_origin")]
+        text_blocks = [b for b in blocks if b not in pictures]
+        previous = record.get("review") or {}
+        if not pictures or not text_blocks or (previous and not previous.get("reading_order_correct")):
+            return record
+        try:
+            scope = self.build_page_review_input(page, ir, inventory, run_path)
+        except ValueError:
+            return record
+        evidence = self._native_text_evidence(inventory)
+        nearby = [b for neighbor in (page - 1, page + 1) if neighbor in inventory.pages
+                  for b in inventory.blocks(neighbor, ir) if b not in blocks and b.type != BlockType.IMAGE
+                  and not b.payload.get("agentic_image_origin")]
+        payload = scope["payload"]
+        reason = evidence.check(page, text_blocks, inventory.mapping, documents=payload["delivered_documents"],
+                                chunks=payload["delivered_chunks"], chunks_required=payload["chunks_required"],
+                                nearby=nearby, document_text=document_source_text(content_blocks(ir)),
+                                expected_pictures=len({b.payload.get("agentic_image_origin") or b.block_id
+                                                       for b in pictures}))
+        self.state.setdefault("native_text_checks", {})[str(page)] = "text blocks: " + (reason or "pass")[:290]
+        if reason:
+            return record
+        observation = "Native Word text matches the Word-rendered page text layer and its delivered documents and chunks."
+        findings = {f["block_id"]: f for f in previous.get("blocks", [])}
+        for block in text_blocks:
+            findings[block.block_id] = BlockReview(block_id=block.block_id, status="verified",
+                                                   observation=observation, context_complete=True).model_dump()
+        for block in pictures:
+            findings.setdefault(block.block_id, BlockReview(
+                block_id=block.block_id, status="needs_review",
+                observation="Picture content is not covered by the text layer and was not confirmed.").model_dump())
+        record["review"] = PageReview(
+            blocks=[BlockReview.model_validate(findings[b.block_id]) for b in blocks],
+            source_complete=False, reading_order_correct=True,
+            observation=previous.get("observation") or "Text and tables matched the text layer; pictures unconfirmed.",
+            issues=(previous.get("issues") or ["Picture content was not confirmed against the source."])[:30],
+            declared_gaps_only=False).model_dump()
+        record["images"] = (record.get("images") or scope["evidence"]) + [
+            self._native_text_proof(page, text_blocks, inventory, run_path, evidence)]
+        record.setdefault("block_ids", [b.block_id for b in blocks])
+        record.setdefault("delivery_sha256", scope["delivery_sha256"])
+        record["native_text_blocks_verified"] = [b.block_id for b in text_blocks]
+        self._save()
+        return record
+
     def _native_text_review(self, page, ir, inventory, run_path, record, bundle):
         """Certify a plain native-Word page from the Word-rendered PDF text layer.
 
@@ -302,7 +382,7 @@ class DocumentReview(AgenticRepair):
         tables is proven by string comparison, or handed back (None) to the
         model audit with the reason kept in review_state.
         """
-        from app.pipeline.native_page_check import NativePageText, document_source_text
+        from app.pipeline.native_page_check import document_source_text
         from app.pipeline.review_sources import content_blocks
 
         if not inventory.pdf or not inventory.complete or ir.has_physical_pages():
@@ -314,10 +394,7 @@ class DocumentReview(AgenticRepair):
             scope = self.build_page_review_input(page, ir, inventory, run_path)
         except ValueError:
             return None
-        if getattr(inventory, "_native_text_pdf", None) != inventory.pdf:
-            inventory._native_text = NativePageText(inventory.pdf)
-            inventory._native_text_pdf = inventory.pdf
-        evidence = inventory._native_text
+        evidence = self._native_text_evidence(inventory)
         nearby = [b for neighbor in (page - 1, page + 1) if neighbor in inventory.pages
                   for b in inventory.blocks(neighbor, ir) if b not in blocks and b.type != BlockType.IMAGE]
         payload = scope["payload"]
@@ -328,15 +405,7 @@ class DocumentReview(AgenticRepair):
             self.state.setdefault("native_text_checks", {})[str(page)] = reason[:300]
             return None
         self.state.setdefault("native_text_checks", {})[str(page)] = "pass"
-        proof = inventory.directory / f"native-text-p{page:04d}.json"
-        atomic_write_json(proof, {
-            "method": "native_word_text_layer", "page_idx": page,
-            "pdf_sha256": hashlib.sha256(inventory.pdf.read_bytes()).hexdigest(),
-            "block_ids": [b.block_id for b in blocks], "printed_lines": evidence.lines[page],
-        }, ensure_ascii=False, indent=2)
-        images = scope["evidence"] + [{
-            "path": str(proof.relative_to(run_path)), "sha256": hashlib.sha256(proof.read_bytes()).hexdigest(),
-            "label": f"Word-rendered PDF text layer for physical page {page + 1}"}]
+        images = scope["evidence"] + [self._native_text_proof(page, blocks, inventory, run_path, evidence)]
         observation = "Native Word text matches the Word-rendered page text layer and its delivered documents and chunks."
         review = PageReview(
             blocks=[BlockReview(block_id=b.block_id, status="verified", observation=observation, context_complete=True)

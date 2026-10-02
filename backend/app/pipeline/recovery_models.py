@@ -1,11 +1,27 @@
 """Strict tool contracts; document content never supplies tool names or paths."""
 from typing import Literal
 
+from annotated_types import MaxLen
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+NOTE_FIELDS = ("reason", "observation", "information_reason")
 
 
 class Contract(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+    @model_validator(mode="before")
+    @classmethod
+    def shorten_notes(cls, data):
+        """An explanation past its limit is shortened, not rejected; delivered content is never cut."""
+        if not isinstance(data, dict):
+            return data
+        for name in NOTE_FIELDS:
+            field, value = cls.model_fields.get(name), data.get(name)
+            limit = next((m.max_length for m in field.metadata if isinstance(m, MaxLen)), None) if field else None
+            if limit and isinstance(value, str) and len(value) > limit:
+                data = {**data, name: value[:limit - 1] + "…"}
+        return data
 
 
 class RecoveryDecision(Contract):

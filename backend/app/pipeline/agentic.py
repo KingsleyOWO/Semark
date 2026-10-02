@@ -142,6 +142,14 @@ def visual_issues(ir: DocumentIR, enrichments: list[dict] | None = None) -> list
     return sorted(issues, key=lambda i: (-i["priority"], i["page_idx"], i["block_id"]))
 
 
+def without_echoes(data, request, schema):
+    """A request field copied back unchanged is not an answer; any other extra field still fails."""
+    if not isinstance(data, dict):
+        return data
+    return {key: value for key, value in data.items()
+            if key in schema.model_fields or key not in request or value != request[key]}
+
+
 class RegionModel:
     """One request per call; failed/truncated responses still consume usage."""
 
@@ -256,7 +264,7 @@ class RegionModel:
         try:
             if finish == "length":
                 raise ValueError("output_truncated: response exceeded the configured token limit; shorten/group facts without omitting cells")
-            data = json.loads(self.adapter._extract_json_payload(raw))
+            data = without_echoes(json.loads(self.adapter._extract_json_payload(raw)), payload, schema)
             return schema.model_validate(data).model_dump(), tokens
         except (ValueError, TypeError) as exc:
             raise ModelOutputError(str(exc), tokens, finish, raw) from exc
@@ -321,7 +329,7 @@ class AgenticRepair:
             data, tokens = await asyncio.wait_for(client.query(task, payload, image, schema), timeout=timeout)
             self.state["usage"]["tokens"] += tokens
             entry["tokens"] = tokens
-            data = schema.model_validate(data).model_dump()
+            data = schema.model_validate(without_echoes(data, payload, schema)).model_dump()
             entry["output"] = data
             return data
         except ModelOutputError as exc:

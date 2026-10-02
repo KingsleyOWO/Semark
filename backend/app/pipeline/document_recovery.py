@@ -152,6 +152,25 @@ def restore_publication(run_path, backup):
             target.unlink()
 
 
+def adopt_candidate_evidence(records, pages, folder, root):
+    """Bring the files that committed page records cite from the candidate folder into the live run.
+
+    A record written while auditing a candidate cites paths relative to that
+    folder; delivery re-hashes them in the live run, where a missing file
+    invalidates the whole review. Live evidence is never replaced.
+    """
+    for page in pages:
+        for image in records.get(str(page), {}).get("images", []):
+            live, staged = root / image["path"], folder / image["path"]
+            if live.is_file() and hashlib.sha256(live.read_bytes()).hexdigest() == image["sha256"]:
+                continue
+            if (live.exists() or not live.resolve().is_relative_to(root.resolve()) or not staged.is_file()
+                    or hashlib.sha256(staged.read_bytes()).hexdigest() != image["sha256"]):
+                raise ValueError("candidate_evidence_missing_or_conflicting: " + image["path"])
+            live.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(staged, live)
+
+
 class RecoveryCommitError(RuntimeError):
     """Abort the run without publishing a partly rebuilt accepted candidate."""
 
@@ -646,6 +665,7 @@ class RecoveryController:
                                 current = self.owner.review_scope_fingerprints(candidate, live_inventory, self.root)
                                 if current != checked["fingerprints"]:
                                     raise ValueError("rebuilt_delivery_differs_from_verified_candidate")
+                                adopt_candidate_evidence(checked["records"], checked["affected_pages"], folder, self.root)
                                 from app.pipeline.review_sources import delivery_digest
                                 for page, record in checked["records"].items():
                                     record["delivery_sha256"] = delivery_digest(self.root)

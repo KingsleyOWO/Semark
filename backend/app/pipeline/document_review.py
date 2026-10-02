@@ -295,9 +295,67 @@ class DocumentReview(AgenticRepair):
         return {page: self.build_page_review_input(page, ir, inventory, run_path)["scoped_fingerprint"]
                 for page in (inventory.pages if pages is None else pages)}
 
+    def _native_text_review(self, page, ir, inventory, run_path, record, bundle):
+        """Certify a plain native-Word page from the Word-rendered PDF text layer.
+
+        No model call and no budget: a page holding only native Word text and
+        tables is proven by string comparison, or handed back (None) to the
+        model audit with the reason kept in review_state.
+        """
+        from app.pipeline.native_page_check import NativePageText, document_source_text
+        from app.pipeline.review_sources import content_blocks
+
+        if not inventory.pdf or not inventory.complete or ir.has_physical_pages():
+            return None
+        blocks = inventory.blocks(page, ir)
+        if not blocks or any(b.type == BlockType.IMAGE or "word_source" not in b.payload for b in blocks):
+            return None
+        try:
+            scope = self.build_page_review_input(page, ir, inventory, run_path)
+        except ValueError:
+            return None
+        if getattr(inventory, "_native_text_pdf", None) != inventory.pdf:
+            inventory._native_text = NativePageText(inventory.pdf)
+            inventory._native_text_pdf = inventory.pdf
+        evidence = inventory._native_text
+        nearby = [b for neighbor in (page - 1, page + 1) if neighbor in inventory.pages
+                  for b in inventory.blocks(neighbor, ir) if b not in blocks and b.type != BlockType.IMAGE]
+        payload = scope["payload"]
+        reason = evidence.check(page, blocks, inventory.mapping, documents=payload["delivered_documents"],
+                                chunks=payload["delivered_chunks"], chunks_required=payload["chunks_required"],
+                                nearby=nearby, document_text=document_source_text(content_blocks(ir)))
+        if reason:
+            self.state.setdefault("native_text_checks", {})[str(page)] = reason[:300]
+            return None
+        self.state.setdefault("native_text_checks", {})[str(page)] = "pass"
+        proof = inventory.directory / f"native-text-p{page:04d}.json"
+        atomic_write_json(proof, {
+            "method": "native_word_text_layer", "page_idx": page,
+            "pdf_sha256": hashlib.sha256(inventory.pdf.read_bytes()).hexdigest(),
+            "block_ids": [b.block_id for b in blocks], "printed_lines": evidence.lines[page],
+        }, ensure_ascii=False, indent=2)
+        images = scope["evidence"] + [{
+            "path": str(proof.relative_to(run_path)), "sha256": hashlib.sha256(proof.read_bytes()).hexdigest(),
+            "label": f"Word-rendered PDF text layer for physical page {page + 1}"}]
+        observation = "Native Word text matches the Word-rendered page text layer and its delivered documents and chunks."
+        review = PageReview(
+            blocks=[BlockReview(block_id=b.block_id, status="verified", observation=observation, context_complete=True)
+                    for b in blocks],
+            source_complete=True, reading_order_correct=True, issues=[],
+            observation="Every printed line and every block was matched by string comparison; no model call.")
+        record.clear()
+        record.update(page_idx=page, fingerprint=scope["fingerprint"], scoped_fingerprint=scope["scoped_fingerprint"],
+                      images=images, delivery_sha256=bundle, reviewed_delivery_sha256=bundle,
+                      block_ids=[b.block_id for b in blocks], declared_gap_ids=[], review=review.model_dump())
+        self._record(record, "verified", "native_word_text_layer_match")
+        return record
+
     async def _inspect_page(self, page, ir, inventory, run_path):
         record = self.state["pages"].setdefault(str(page), {"page_idx": page, "status": "not_reviewed"})
         bundle = delivery_digest(run_path)
+        if self.limits.mode != "off" and (native := self._native_text_review(page, ir, inventory, run_path,
+                                                                             record, bundle)):
+            return native
         exhausted = self.state["usage"]["model_calls"] >= self.limits.max_model_calls or self._remaining() <= 0
         if exhausted and record.get("reason") and not record.get("review") and record.get("delivery_sha256") == bundle:
             return record

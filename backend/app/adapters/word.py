@@ -581,12 +581,16 @@ def _cell_text(cell: _Cell) -> str:
     return " / ".join(parts).strip()
 
 
+# Placeholder name for a table the document never named; not source text.
+GENERATED_TABLE_CAPTION = "Word 表格 {}"
+
+
 def _table_caption(recent_texts: list[str], table_count: int) -> str:
     for text in reversed(recent_texts):
         compact = text.replace(" ", "")
         if len(text) <= 100 and any(token in compact for token in ("表", "Table", "附件")):
             return text
-    return f"Word 表格 {table_count}"
+    return GENERATED_TABLE_CAPTION.format(table_count)
 
 
 def _image_caption(recent_texts: list[str], image_count: int) -> str:

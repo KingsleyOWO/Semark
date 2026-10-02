@@ -10,6 +10,7 @@ from pydantic import Field, model_validator
 
 from app.pipeline.content_coverage import normalized_text
 from app.pipeline.recovery_models import Contract, NativeItem
+from app.pipeline.zh_text import to_taiwan_traditional
 
 WORD_PICTURE_BATCH_SIZE = 2
 
@@ -126,6 +127,16 @@ async def read_word_picture_batch(owner, payload, images, *, source_ids):
     return WordPictureReading(items=items)
 
 
+def appears_in(piece, text):
+    """Model-written wording found in delivery as written or after zh-TW conversion of both.
+
+    Conversion is gated per text, so it can rewrite a delivery that keeps an
+    author's simplified glyph; the unconverted comparison still applies.
+    """
+    return (normalized_text(piece) in normalized_text(text)
+            or normalized_text(to_taiwan_traditional(piece)) in normalized_text(to_taiwan_traditional(text)))
+
+
 def relationship_issue(reading, finding, delivered, *, documents=None, chunks=None):
     """Cannot certify absent coverage, unsupported quotations or opposite relations.
 
@@ -140,18 +151,17 @@ def relationship_issue(reading, finding, delivered, *, documents=None, chunks=No
     ids = [c.relation_id for c in checks]
     if len(ids) != len(set(ids)) or set(ids) != set(relations):
         return 'Image relationship audit omitted, duplicated or invented source relation IDs.'
-    target = normalized_text(delivered)
     for check in checks:
         relation = relations[check.relation_id]
         if not relation.certain or check.status != 'matched':
             return f'Image relationship {check.relation_id} remains {check.status if relation.certain else "uncertain"}: {relation.source_fact}'
-        quote = normalized_text(check.delivered_quote)
-        if not quote or quote not in target:
+        quote = check.delivered_quote
+        if not normalized_text(quote) or not appears_in(quote, delivered):
             return f'Image relationship {check.relation_id} has no grounded quote in its own delivered content.'
         for label, excerpts in [('documents', documents), ('chunks', chunks)]:
             if excerpts is not None and not any(
                     finding.block_id in e.get('block_ids', [e.get('block_id')])
-                    and quote in normalized_text(e.get('text', e.get('content', '')))
+                    and appears_in(quote, e.get('text', e.get('content', '')))
                     for e in excerpts):
                 return f'Image relationship {check.relation_id} has no owned quote in actual {label}.'
         if relation.kind == 'arrow' and check.direction != relation.direction:

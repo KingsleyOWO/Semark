@@ -10,7 +10,7 @@ from app.pipeline.content_coverage import normalized_text
 from app.pipeline.recovery_models import Contract
 from app.pipeline.review_sources import digest
 
-READING_VERSION = "source-contracts-20260929.3-image-information"
+READING_VERSION = "source-contracts-20261002.1-enlarged-pictures"
 
 
 def image_validation_tasks(owner):

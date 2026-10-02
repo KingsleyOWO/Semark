@@ -27,7 +27,7 @@ from app.pipeline.review_sources import (
     review_scope_digest,
 )
 
-REVIEW_VERSION = "document-review-20261001.1-image-relationships"
+REVIEW_VERSION = "document-review-20261002.1-enlarged-script-folded-readings"
 SCHEDULER_VERSION = "tool-scheduler-20260930.1-complete-tool-budget"
 
 
@@ -64,14 +64,14 @@ def target_block_reviews(review, required_ids, context_ids=()):
 def word_picture_issue(reading, delivered):
     """Blind source reading can reject a caption, never certify it on its own."""
     from app.pipeline.content_coverage import normalized_text
+    from app.pipeline.image_source_review import appears_in
     if not reading.complete:
         return "Independent Word image reading is incomplete: " + reading.observation
     if not reading.text.strip():
         return "Independent Word image reading supplied no content; verification is unavailable."
     if reading.kind == "transcription":
-        target = normalized_text(delivered)
-        lines = [normalized_text(line) for line in reading.text.splitlines() if normalized_text(line)]
-        if not lines or not all(line in target for line in lines):
+        lines = [line for line in reading.text.splitlines() if normalized_text(line)]
+        if not lines or not all(appears_in(line, delivered) for line in lines):
             return "Independent original image wording is absent or different in delivery: " + reading.text[:400]
     return ""
 

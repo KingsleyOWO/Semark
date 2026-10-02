@@ -5,6 +5,7 @@ publish files. Only complete, independently verified interpretations replace
 the delivery view; original source blocks remain available as evidence.
 """
 import asyncio
+import base64
 import hashlib
 import json
 import re
@@ -142,6 +143,13 @@ def visual_issues(ir: DocumentIR, enrichments: list[dict] | None = None) -> list
     return sorted(issues, key=lambda i: (-i["priority"], i["page_idx"], i["block_id"]))
 
 
+# Calls that read one or two pictures see them as large as the draft did; page
+# audits already carry up to seven images, so theirs are sent as stored.
+PICTURE_READING_TASKS = {"verify_native_reading", "read_image_parts", "read_image_parts_alternate",
+                         "verify_image_parts", "read_image_relations", "read_image_relations_alternate",
+                         "resolve_image_evidence"}
+
+
 def without_echoes(data, request, schema):
     """A request field copied back unchanged is not an answer; any other extra field still fails."""
     if not isinstance(data, dict):
@@ -244,9 +252,11 @@ class RegionModel:
                     + "\nRequired JSON schema:\n" + json.dumps(schema.model_json_schema(), ensure_ascii=False)}]
         images = image if isinstance(image, list) else ([image] if image else [])
         for index, path in enumerate(images):
+            enlarged = self.adapter._enlarged_figure_png(path) if task in PICTURE_READING_TASKS else None
+            url = ("data:image/png;base64," + base64.b64encode(enlarged).decode("ascii") if enlarged
+                   else self.adapter._encode_image_as_data_uri(path))
             content += [{"type": "text", "text": f"Evidence image {index + 1}"},
-                        {"type": "image_url", "image_url": {
-                            "url": self.adapter._encode_image_as_data_uri(path), "detail": "high"}}]
+                        {"type": "image_url", "image_url": {"url": url, "detail": "high"}}]
         # Decisions are short. Repairs/verifications have room for whole tables.
         limit = (min(self.max_tokens, 384) if task == "recovery_plan" else
                  min(self.max_tokens, 768) if task == "decide" else self.max_tokens)

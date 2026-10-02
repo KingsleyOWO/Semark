@@ -6,6 +6,40 @@ from app.pipeline.delivery import atomic_write_json, atomic_write_jsonl, atomic_
 from app.pipeline.privacy import scrub_transcribed_privacy
 from app.pipeline.review_policy import dependency_closed_subset, reviewed_block_usable
 
+# Picture content is delivered whether or not the source review could confirm
+# it (policy chosen 2026-10-01: enlarged figures now read correctly, while the
+# same model as verifier passed 3 of 18 usable Lumio figures). The review
+# decides which label the content carries, never whether it ships.
+IMAGE_LABELS = {
+    "zh-TW": {"verified": "〔圖片內容：自動辨識，已核對〕", "unverified": "〔圖片內容：自動辨識，未核對〕"},
+    "en": {"verified": "[Image content: automatic reading, verified]",
+           "unverified": "[Image content: automatic reading, not verified]"},
+}
+# Gaps (unreadable regions), invalid evidence and missing context still exclude.
+_UNVERIFIED_PICTURE_REASONS = {"content_or_context_unverified", "source_not_mapped"}
+
+
+def is_picture_content(block):
+    return block.type == BlockType.IMAGE or bool(block.payload.get("agentic_image_origin"))
+
+
+def _label_pictures(content, pictures):
+    """Put each picture's label on the line before its text, in block order.
+
+    A picture whose text cannot be located (a rebuilt split part) is labelled
+    at the top, so no picture content ships unlabelled.
+    """
+    cursor = 0
+    for anchor, label in pictures:
+        position = content.find(anchor, cursor) if anchor else -1
+        if position < 0:
+            content = label + "\n" + content
+            cursor += len(label) + 1
+            continue
+        content = content[:position] + label + "\n" + content[position:]
+        cursor = position + len(label) + 1 + len(anchor)
+    return content
+
 
 class DeliveredBlockEvidence:
     """Exact text in chunks owned by this block, including recorded bounded parts.
@@ -104,17 +138,20 @@ def build_automatic_delivery(ir, run_path, config, review_summary, ledger, upstr
                             "unreadable_source" if block.payload.get("agentic_gap") else
                             "source_evidence_invalid" if not valid else
                             "source_not_mapped" if not source_pages else "content_or_context_unverified")
+    pictures = {b.block_id for b in ir.blocks if is_picture_content(b) and not rendered[b.block_id][1]}
+    unverified_pictures = {bid for bid in pictures if reasons.get(bid) in _UNVERIFIED_PICTURE_REASONS} if valid else set()
     # Dependants cannot survive missing required context, including chains. Navigation alone is not required.
-    retained = dependency_closed_subset(eligible, dependencies)
+    retained = dependency_closed_subset(eligible | unverified_pictures, dependencies)
     reasons.update({bid: "required_context_unverified" for bid in eligible - retained})
-    eligible = retained
+    unverified_pictures &= retained
+    eligible &= retained
 
     renderer = ChunkStage(config)
     renderer._asset_text = renderer._load_asset_retrieval_text(outputs)
     asset_records = {item.get("block_id"): item for item in read_jsonl(outputs / "assets_index.jsonl")}
-    non_informative = {b.block_id for b in ir.blocks if b.block_id in eligible
+    non_informative = {b.block_id for b in ir.blocks if b.block_id in retained
                        and b.payload.get("agentic_information_status") == "non_informative"}
-    rag_eligible = dependency_closed_subset(eligible - non_informative, dependencies)
+    rag_eligible = dependency_closed_subset(retained - non_informative, dependencies)
     # The review binds source blocks to the delivered chunks. Re-grouping verified
     # blocks changes inter-block boundaries, so prove each owned block separately
     # rather than asking a fuzzy global matcher to certify the new concatenation.
@@ -135,7 +172,12 @@ def build_automatic_delivery(ir, run_path, config, review_summary, ledger, upstr
         groups.append(current)
     chunks = []
     export_reasons = {bid: "non_informative_image" if bid in non_informative else "required_context_not_retrievable"
-                      for bid in eligible - rag_eligible}
+                      for bid in retained - rag_eligible}
+    from app.pipeline.semantic.language import resolve_semantic_output_language
+    labels = IMAGE_LABELS[resolve_semantic_output_language(config.package.semantic_output_language.value, ir)]
+    anchors = {bid: next((line for line in scrub_transcribed_privacy(
+                   renderer._blocks_to_text([ir.get_block(bid)])).splitlines() if line.strip()), "")
+               for bid in pictures & rag_eligible}
     export_reasons.update({bid: "rechunk_content_not_verified" for bid in absent})
     if config.package.generate_chunks:
         for group in groups:
@@ -174,14 +216,22 @@ def build_automatic_delivery(ir, run_path, config, review_summary, ledger, upstr
                             parts = split_verified_image(renderer, ir, chunk, targets,
                                                          config.package.chunk_max_tokens, asset_records)
                         if not parts:
+                            parts = split_picture_lines(renderer, ir, chunk, targets,
+                                                        config.package.chunk_max_tokens, asset_records)
+                        if not parts:
                             export_reasons.update({bid: "complete_context_exceeds_chunk_limit" for bid in targets})
                             continue
                     for part, _ in parts:
+                        part.content = _label_pictures(part.content, [
+                            (anchors.get(bid, ""), labels["verified" if bid in eligible else "unverified"])
+                            for bid in part.block_ids if bid in pictures])
                         if any(c.block_ids == part.block_ids and c.content == part.content for c in chunks):
                             continue
                         _scrub_chunk_metadata(part.metadata)
                         part.chunk_id = f"verified_{len(chunks):06d}"
-                        part.metadata.update(source_verified=True, source_pages=sorted({p for bid in part.block_ids
+                        unverified = sorted(bid for bid in part.block_ids if bid not in eligible)
+                        part.metadata.update(source_verified=not unverified, unverified_block_ids=unverified,
+                                              source_pages=sorted({p for bid in part.block_ids
                                               for p in records[bid]["source_pages"]}),
                                               content_kinds=sorted({ir.get_block(bid).payload.get("agentic_content_kind", "transcription")
                                                                    for bid in part.block_ids}))
@@ -197,7 +247,12 @@ def build_automatic_delivery(ir, run_path, config, review_summary, ledger, upstr
         if excluded:
             continue
         if bid in eligible:
-            reading_copy.append(text)
+            reading_copy.append(labels["verified"] + "\n" + text if bid in pictures else text)
+        elif bid in unverified_pictures:
+            reading_copy.append(labels["unverified"] + "\n" + text)
+            gaps.append({"block_id": bid, "source_pages": records.get(bid, {}).get("source_pages", []),
+                         "reason": reasons.get(bid, "not_verified"), "marker": labels["unverified"],
+                         "included": True, "evidence": [], "detail": {}})
         else:
             record = records.get(bid, {})
             indices = record.get("source_pages", [])
@@ -241,7 +296,10 @@ def build_automatic_delivery(ir, run_path, config, review_summary, ledger, upstr
                       "blocks": [{"block_id": b.block_id, "verified": b.block_id in eligible,
                                   "rag_eligible": b.block_id in exported, "reason": reasons.get(b.block_id),
                                   "rag_exclusion_reason": None if b.block_id in exported else export_reasons.get(b.block_id, reasons.get(b.block_id)),
-                                  "source_pages": records.get(b.block_id, {}).get("source_pages", [])}
+                                  "source_pages": records.get(b.block_id, {}).get("source_pages", []),
+                                  "image_label": ("verified" if b.block_id in eligible else "unverified"
+                                                  if b.block_id in unverified_pictures else None)
+                                  if b.block_id in pictures else None}
                                  for b in ir.blocks if not rendered[b.block_id][1]]}, ensure_ascii=False, indent=2)
     return summary
 
@@ -386,6 +444,51 @@ def split_verified_image(renderer, ir, chunk, targets, max_tokens, asset_records
         part.content = content
         part.metadata["image_content_section"] = {block.block_id: section}
         parts.append((part, texts))
+    return parts
+
+
+def split_picture_lines(renderer, ir, chunk, targets, max_tokens, asset_records):
+    """Last resort for picture content over the chunk limit: whole lines per part.
+
+    Dropping the picture loses all of it (the Lumio 8-brand table, 4 of 26
+    figures). Each part repeats the picture's title and supplied context so it
+    stays attributable, and no line is ever cut; a single line over the limit
+    keeps the old refusal.
+    """
+    from copy import deepcopy
+
+    from app.pipeline.stages.chunk import estimate_tokens
+
+    if len(targets) != 1:
+        return []
+    block = ir.get_block(targets[0])
+    if not is_picture_content(block):
+        return []
+    lines = [line for line in scrub_transcribed_privacy(renderer._blocks_to_text([block])).splitlines() if line.strip()]
+    if len(lines) < 2:
+        return []
+    title = scrub_transcribed_privacy(str(asset_records.get(block.block_id, {}).get("title") or lines[0]))
+    body = lines[1:] if lines[0].strip() == title.strip() else lines
+    context = [scrub_transcribed_privacy(renderer._blocks_to_text([ir.get_block(bid)]))
+               for bid in chunk.block_ids if bid != block.block_id]
+    header = "\n\n".join(t for t in [*context, title] if t)
+    # Room for the label line _label_pictures adds to every part.
+    budget = max_tokens - estimate_tokens(header) - 32
+    if budget <= 0 or any(estimate_tokens(line) > budget for line in body):
+        return []
+    groups, current = [], []
+    for line in body:
+        if current and estimate_tokens("\n".join([*current, line])) > budget:
+            groups.append(current)
+            current = []
+        current.append(line)
+    groups.append(current)
+    parts = []
+    for index, group in enumerate(groups, 1):
+        part = deepcopy(chunk)
+        part.content = header + "\n" + "\n".join(group)
+        part.metadata["picture_part"] = {"block_id": block.block_id, "index": index, "count": len(groups)}
+        parts.append((part, [part.content]))
     return parts
 
 

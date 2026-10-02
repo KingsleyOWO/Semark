@@ -37,7 +37,8 @@ class ImageSourceRelation(Contract):
         if self.kind == 'arrow' and self.direction == 'none':
             raise ValueError('Arrows require a direction, or explicit uncertain direction')
         if self.kind == 'spatial_position' and self.horizontal == self.vertical == 'unspecified':
-            raise ValueError('Spatial positions require a side relative to the stated source axes/reference')
+            # A position with no stated side is kept as an uncertain relation, which can never certify.
+            self.horizontal, self.vertical, self.certain = 'uncertain', 'uncertain', False
         if self.certain and 'uncertain' in (self.direction, self.horizontal, self.vertical):
             raise ValueError('An uncertain direction/position cannot be certain')
         return self

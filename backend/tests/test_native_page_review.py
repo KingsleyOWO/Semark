@@ -81,3 +81,50 @@ async def test_review_switched_off_certifies_nothing(tmp_path, monkeypatch):
     _, report = await DocumentReview(config(mode="off"), model, model).run(ir, tmp_path, source_path=word)
 
     assert report["summary"]["verified_pages"] == 0
+
+
+@pytest.mark.asyncio
+async def test_text_on_a_picture_page_is_certified_when_the_picture_review_fails(tmp_path, monkeypatch):
+    # Lumio p25: one picture's reading hit two format errors, the page audit never
+    # ran, and the page's 19 native paragraphs were left out of RAG with it.
+    from PIL import Image
+
+    from app.pipeline.review_sources import SourceInventory
+
+    ir, word = _word_fixture(tmp_path, monkeypatch, [["一、計畫摘要", "本計畫協助企業建立品牌識別。"]],
+                             ["一、計畫摘要", "本計畫協助企業建立品牌識別。"])
+    picture = tmp_path / "logo.png"
+    Image.new("RGB", (120, 80), "yellow").save(picture)
+    rendered = tmp_path / "rendered.pdf"
+    with fitz.open(rendered) as pdf:
+        pdf[0].insert_image(fitz.Rect(60, 200, 180, 280), filename=str(picture))
+        pdf.saveIncr()
+    ir.blocks.append(Block(block_id="pic", type=BlockType.IMAGE, page_idx=0, reading_order=2,
+                           payload={"img_path": str(picture), "caption_context": "",
+                                    "word_source": {"source": "native_docx", "block_index": 2}}))
+    write_delivery(tmp_path, ir)
+    prepare = SourceInventory.prepare
+
+    async def with_picture(self, **kwargs):
+        await prepare(self, **kwargs)
+        self.mapping["pic"] = [0]
+    monkeypatch.setattr(SourceInventory, "prepare", with_picture)
+
+    class FailingModel(AuditModel):
+        async def query(self, task, payload, image, schema):
+            self.calls.append((task, payload, image))
+            raise ValueError("1 validation error for PageReview")
+
+    model = FailingModel()
+    output, report = await DocumentReview(config(), model, model).run(ir, tmp_path, source_path=word)
+
+    page = report["pages"][0]
+    assert page["status"] == "needs_review"
+    # The page keeps its needs_review status (and so does each block's coverage
+    # status); only text the text layer proved becomes usable for RAG.
+    blocks = {b["block_id"]: b for b in report["blocks"]}
+    assert blocks["b0"]["rag_eligible"] and blocks["b1"]["rag_eligible"]
+    assert not blocks["pic"]["rag_eligible"]
+    finalize_delivery(output, tmp_path, config())
+    chunks = [json.loads(line) for line in (tmp_path / "outputs/rag_chunks.jsonl").read_text().splitlines()]
+    assert {"b0", "b1"} <= {bid for c in chunks for bid in c["block_ids"]}

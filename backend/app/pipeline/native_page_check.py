@@ -115,11 +115,13 @@ class NativePageText:
 
     def check(self, page: int, blocks: list[Block], mapping: dict[str, list[int]], *,
               documents: list[dict], chunks: list[dict], chunks_required: bool,
-              nearby: Sequence[Block] = (), document_text: str = "") -> str | None:
+              nearby: Sequence[Block] = (), document_text: str = "", expected_pictures: int = 0) -> str | None:
         """None when the page is proven; otherwise why the model audit must decide.
 
         ``document_text`` is the whole document's normalized source; a package
         label around text from any page of it is scaffolding, not invented output.
+        ``expected_pictures`` is how many parsed pictures the page holds when
+        only its text is being checked; a page drawing more is missing one.
         """
         if not blocks:
             return "page_has_no_blocks"
@@ -127,8 +129,8 @@ class NativePageText:
             return "page_has_picture_blocks"
         if bad := next((b for b in blocks if not _is_plain_native(b)), None):
             return f"{bad.block_id}: not a plain native Word block"
-        if self.unparsed_pictures[page]:
-            return f"{len(self.unparsed_pictures[page])} drawn picture(s) on the page are not in the parse"
+        if len(self.unparsed_pictures[page]) > expected_pictures:
+            return f"{len(self.unparsed_pictures[page])} drawn picture(s) on the page, {expected_pictures} parsed"
         for block in blocks:
             pages = mapping.get(block.block_id) or []
             if not pages or pages != list(range(pages[0], pages[-1] + 1)):

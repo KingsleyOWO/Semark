@@ -330,3 +330,87 @@ async def test_independent_table_survives_neighbor_with_oversized_dependencies(t
     chunks = read_chunks(tmp_path)
     assert any('independent' in c['block_ids'] and '100' in c['content'] for c in chunks)
     assert all('dependent' not in c['block_ids'] for c in chunks)
+
+
+def _picture_fixture(tmp_path, picture_status):
+    blocks = [Block(block_id='b0', type=BlockType.TEXT, page_idx=0, reading_order=0,
+                    payload={'text': 'Source page 1: Revenue 100, cost 80.'}),
+              Block(block_id='pic', type=BlockType.IMAGE, page_idx=0, reading_order=1,
+                    payload={'img_path': 'pic.png', 'caption': ''})]
+    ir, source = fixture(tmp_path, blocks=blocks)
+    outputs = tmp_path / 'outputs'
+    (outputs / 'assets_index.jsonl').write_text(json.dumps(
+        {'asset_id': 'fig0000', 'block_id': 'pic', 'retrieval_text': 'Shelves of boxed puzzles in a shop'}))
+    (outputs / 'documents/main.md').write_text('Source page 1: Revenue 100, cost 80.\n\nShelves of boxed puzzles in a shop')
+    (outputs / 'chunks.jsonl').write_text('\n'.join(json.dumps(c) for c in [
+        {'chunk_id': 'c0', 'block_ids': ['b0'], 'page_indices': [0], 'content': 'Source page 1: Revenue 100, cost 80.'},
+        {'chunk_id': 'c1', 'block_ids': ['pic'], 'page_indices': [0], 'content': 'Shelves of boxed puzzles in a shop'}]))
+
+    def review(_, value):
+        for block in value['blocks']:
+            block['context_complete'] = True
+            if block['block_id'] == 'pic' and picture_status == 'needs_review':
+                block['status'] = 'needs_review'
+                value.update(source_complete=False, issues=['Shop sign cannot be confirmed.'])
+        return value
+    return ir, source, AuditModel(review)
+
+
+@pytest.mark.asyncio
+async def test_unverified_picture_content_reaches_rag_and_delivery_with_its_label(tmp_path):
+    # 2026-10-01 policy: picture content is delivered either way; review decides the label.
+    ir, source, model = _picture_fixture(tmp_path, 'needs_review')
+    ir, _ = await DocumentReview(config(), model, model).run(ir, tmp_path, source_path=source)
+    result = finalize_delivery(ir, tmp_path, config())
+
+    chunks = read_chunks(tmp_path)
+    picture = next(c for c in chunks if 'pic' in c['block_ids'])
+    assert '[Image content: automatic reading, not verified]\nShelves of boxed puzzles' in picture['content']
+    assert picture['metadata']['source_verified'] is False
+    assert picture['metadata']['unverified_block_ids'] == ['pic']
+    # The verified paragraph shares the chunk and stays unlabelled.
+    assert picture['content'].startswith('Source page 1: Revenue 100, cost 80.')
+    delivery = (tmp_path / 'outputs/delivery.md').read_text()
+    assert '[Image content: automatic reading, not verified]\nShelves of boxed puzzles' in delivery
+    report = json.loads((tmp_path / 'outputs/processing_report.json').read_text())
+    entry = next(b for b in report['blocks'] if b['block_id'] == 'pic')
+    assert entry['verified'] is False and entry['rag_eligible'] is True and entry['image_label'] == 'unverified'
+    assert result['processing_status'] == 'partial'
+
+
+@pytest.mark.asyncio
+async def test_verified_picture_content_carries_the_verified_label(tmp_path):
+    ir, source, model = _picture_fixture(tmp_path, 'verified')
+    ir, _ = await DocumentReview(config(), model, model).run(ir, tmp_path, source_path=source)
+    finalize_delivery(ir, tmp_path, config())
+
+    picture = next(c for c in read_chunks(tmp_path) if 'pic' in c['block_ids'])
+    assert '[Image content: automatic reading, verified]\nShelves of boxed puzzles' in picture['content']
+    assert picture['metadata']['source_verified'] is True
+
+
+@pytest.mark.asyncio
+async def test_oversized_picture_is_split_on_line_boundaries_instead_of_dropped(tmp_path):
+    rows = [f'Brand {i:02d} | yellow and black | handwritten type | local culture' for i in range(40)]
+    ir, source, model = _picture_fixture(tmp_path, 'needs_review')
+    text = 'Brand comparison table\n' + '\n'.join(rows)
+    outputs = tmp_path / 'outputs'
+    (outputs / 'assets_index.jsonl').write_text(json.dumps(
+        {'asset_id': 'fig0000', 'block_id': 'pic', 'title': 'Brand comparison table', 'retrieval_text': text}))
+    (outputs / 'documents/main.md').write_text('Source page 1: Revenue 100, cost 80.\n\n' + text)
+    (outputs / 'chunks.jsonl').write_text('\n'.join(json.dumps(c) for c in [
+        {'chunk_id': 'c0', 'block_ids': ['b0'], 'page_indices': [0], 'content': 'Source page 1: Revenue 100, cost 80.'},
+        {'chunk_id': 'c1', 'block_ids': ['pic'], 'page_indices': [0], 'content': text}]))
+    cfg = config()
+    cfg.package.chunk_max_tokens = 120
+    ir, _ = await DocumentReview(cfg, model, model).run(ir, tmp_path, source_path=source)
+    finalize_delivery(ir, tmp_path, cfg)
+
+    parts = [c for c in read_chunks(tmp_path) if 'pic' in c['block_ids']]
+    assert len(parts) > 1
+    label = '[Image content: automatic reading, not verified]'
+    assert all(p['content'].startswith(label) or label in p['content'] for p in parts)
+    assert all('Brand comparison table' in p['content'] for p in parts)
+    delivered = '\n'.join(p['content'] for p in parts)
+    assert all(row in delivered for row in rows)  # every row survives, none cut in half
+    assert all(len(p['content']) < len(text) for p in parts)

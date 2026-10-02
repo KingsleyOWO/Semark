@@ -95,7 +95,10 @@ async def test_same_labels_cannot_certify_reversed_or_omitted_visual_meaning(tmp
     assert report['summary']['needs_review_pages'] == 1
     assert report['pages'][0]['image_issues'][0]['failure_kind'] == 'image_relationship_mismatch'
     finalize_delivery(ir, tmp_path, config())
-    assert not (tmp_path / 'outputs/rag_chunks.jsonl').read_text().strip()
+    # Since 2026-10-01 unconfirmed picture content may ship, but only labelled as
+    # not verified; what must never happen is the picture passing as verified.
+    chunks = [json.loads(line) for line in (tmp_path / 'outputs/rag_chunks.jsonl').read_text().splitlines()]
+    assert not any('b0' in c['block_ids'] and c['metadata'].get('source_verified') for c in chunks)
     assert correct not in (tmp_path / 'outputs/delivery.md').read_text()
 
 

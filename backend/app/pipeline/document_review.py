@@ -1,6 +1,7 @@
 """Always-planned source review, bounded repairs, and review of the final delivery."""
 import asyncio
 import hashlib
+import json
 import time
 from pathlib import Path
 from typing import Literal
@@ -27,6 +28,7 @@ from app.pipeline.review_sources import (
     review_scope_digest,
 )
 
+NATIVE_TEXT_PROOF = "Word-rendered PDF text layer for physical page {}"
 REVIEW_VERSION = "document-review-20261002.1-enlarged-script-folded-readings"
 SCHEDULER_VERSION = "tool-scheduler-20260930.1-complete-tool-budget"
 
@@ -305,14 +307,17 @@ class DocumentReview(AgenticRepair):
         return inventory._native_text
 
     def _native_text_proof(self, page, blocks, inventory, run_path, evidence):
-        proof = inventory.directory / f"native-text-p{page:04d}.json"
-        atomic_write_json(proof, {
+        """Content-addressed, so a later proof of the same page never invalidates a recorded one."""
+        content = json.dumps({
             "method": "native_word_text_layer", "page_idx": page,
             "pdf_sha256": hashlib.sha256(inventory.pdf.read_bytes()).hexdigest(),
             "block_ids": [b.block_id for b in blocks], "printed_lines": evidence.lines[page],
-        }, ensure_ascii=False, indent=2)
-        return {"path": str(proof.relative_to(run_path)), "sha256": hashlib.sha256(proof.read_bytes()).hexdigest(),
-                "label": f"Word-rendered PDF text layer for physical page {page + 1}"}
+        }, ensure_ascii=False, indent=2).encode()
+        sha = hashlib.sha256(content).hexdigest()
+        proof = inventory.directory / f"native-text-p{page:04d}-{sha[:16]}.json"
+        if not proof.is_file():
+            proof.write_bytes(content)
+        return {"path": str(proof.relative_to(run_path)), "sha256": sha, "label": NATIVE_TEXT_PROOF.format(page + 1)}
 
     def _certify_native_text_blocks(self, page, ir, inventory, run_path, record):
         """After a picture page's audit, certify its native text from the text layer.
@@ -367,7 +372,8 @@ class DocumentReview(AgenticRepair):
             observation=previous.get("observation") or "Text and tables matched the text layer; pictures unconfirmed.",
             issues=(previous.get("issues") or ["Picture content was not confirmed against the source."])[:30],
             declared_gaps_only=False).model_dump()
-        record["images"] = (record.get("images") or scope["evidence"]) + [
+        proven = NATIVE_TEXT_PROOF.format(page + 1)
+        record["images"] = [i for i in record.get("images") or scope["evidence"] if i.get("label") != proven] + [
             self._native_text_proof(page, text_blocks, inventory, run_path, evidence)]
         record.setdefault("block_ids", [b.block_id for b in blocks])
         record.setdefault("delivery_sha256", scope["delivery_sha256"])

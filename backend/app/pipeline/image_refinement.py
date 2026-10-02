@@ -78,9 +78,11 @@ async def revise_image_regions(runner, candidate, selected, review, source, fold
         elif item.region_kind == "uncertain":
             mark_region_omitted(block, origin, page)
         else:
-            text = ("圖片文字：" + item.text if item.text else "")
+            from app.pipeline.zh_text import to_taiwan_traditional
+
+            text = ("圖片文字：" + to_taiwan_traditional(item.text) if item.text else "")
             if item.description:
-                text += ("\n" if text else "") + "圖片可確認內容：" + item.description
+                text += ("\n" if text else "") + "圖片可確認內容：" + to_taiwan_traditional(item.description)
             if item.region_kind == "no_information":
                 text = "圖片區域：無可提取的實質資訊。"
             block.payload.update(text=text, agentic_region_kind=item.region_kind,

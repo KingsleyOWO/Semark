@@ -11,6 +11,9 @@ from app.pipeline.delivery import atomic_write_json, atomic_write_text
 from app.pipeline.privacy import scrub_transcribed_privacy, set_privacy_scrub_enabled
 from app.pipeline.stages.normalize import is_non_content
 
+# Section heading for blocks the documents missed; not source text itself.
+SUPPLEMENT_HEADINGS = {"en": "Additional Source Content", "zh-TW": "補充原文內容"}
+
 
 def read_json(path: Path, default: Any) -> Any:
     if not path.exists():
@@ -73,7 +76,7 @@ def preserve_document_content(ir: DocumentIR, run_path: Path) -> int:
     if main not in files:
         raise ValueError("A delivery with missing content needs a main document")
     english = not any("\u4e00" <= c <= "\u9fff" for _, text in missing for c in text[:100])
-    heading = "Additional Source Content" if english else "補充原文內容"
+    heading = SUPPLEMENT_HEADINGS["en" if english else "zh-TW"]
     additions = [f"\n\n## {heading}\n"]
     for block, text in missing:
         additions.append(f"<!-- source-block:{block.block_id} -->\n{text}\n")

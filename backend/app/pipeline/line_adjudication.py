@@ -68,10 +68,15 @@ def adjudicate(disputed, delivered, ocr_lines):
     for line in disputed:
         reading = _folded(line)
         delivered_line, counterpart = _counterpart(line, delivered)
+        own_reads, own = _ocr_window(reading, ocr_lines)
+        if counterpart is not None and len(reading) >= MIN_EVIDENCE and reading in own and counterpart not in own:
+            # OCR reads this line on its own, apart from its delivered look-alike: the sticky-note
+            # wall holds both 「值得信任的」 and 「值得信賴的態度★2」, so the first was omitted, not misread.
+            delivered_line, counterpart = None, None
         verdict = "unresolved"
         if counterpart is None:
-            ocr_reads, ocr = _ocr_window(reading, ocr_lines)
-            if len(reading) >= MIN_EVIDENCE and reading in ocr:
+            ocr_reads = own_reads
+            if len(reading) >= MIN_EVIDENCE and reading in own:
                 verdict = "reading"
         else:
             ocr_reads, ocr = _ocr_window(counterpart, ocr_lines)

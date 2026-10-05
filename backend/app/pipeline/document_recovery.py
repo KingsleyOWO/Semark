@@ -231,7 +231,11 @@ class RecoveryController:
             blocks = ([ir.get_block(problem["block_id"])] if problem.get("block_id") else
                       self.inventory.blocks(problem["page_idx"], ir))
             return max((priorities.get(b.block_id, 0) for b in blocks if b), default=0)
-        return sorted(result, key=lambda problem: -priority(problem))
+        # A picture a cheap verbatim patch can fix goes first: a full re-read costs 8-20
+        # calls and can use up the budget before any patch runs.
+        def patch_first(problem):
+            return problem.get("kind") != "image" or self.repair_method(problem["block_id"]) != "delivery_patch"
+        return sorted(result, key=lambda problem: (patch_first(problem), -priority(problem)))
 
     def available(self):
         return (self.state["actions"] < self.owner.limits.max_recovery_actions

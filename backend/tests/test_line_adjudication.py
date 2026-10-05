@@ -182,3 +182,10 @@ async def test_a_picture_without_a_disputed_line_does_not_wait_for_ocr(tmp_path,
         ir, tmp_path, source_path=source)
 
     assert report["pages"][0]["status"] == "verified"
+
+
+def test_a_short_line_ocr_also_reads_beside_its_look_alike_is_a_separate_omitted_line():
+    # The sticky-note wall holds both 「值得信任的」 and 「值得信賴的態度★2」; only the latter was delivered.
+    verdict = adjudicate(["值得信任的"], "值得信賴的態度★2\n創造", ["值得信任的", "值得信賴的態度★2"])[0]
+
+    assert (verdict["verdict"], verdict["delivered_line"]) == ("reading", None)

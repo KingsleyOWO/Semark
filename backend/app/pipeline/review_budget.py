@@ -4,6 +4,8 @@ import statistics
 
 from app.pipeline.recovery_models import MAX_REGION_CONTEXT_READS
 
+TIME_SCALED_ACTIONS = 6
+
 
 def document_budget(limits, pages):
     """User limits are hard ceilings, including for existing run configurations."""
@@ -14,7 +16,10 @@ def document_budget(limits, pages):
         actions = min(pages, limits.max_recovery_actions) if limits.recovery_enabled else 0
         recovery = tool_cost({}, "read_regions")
         calls = min(calls, max(24, pages * 2 + max(12, actions * (recovery["model_calls"] + 1))))
-        seconds = min(seconds, max(900, pages * 75 + max(600, actions * (
+        # Time scales with at most six full repairs: extra actions are mostly 4-call
+        # delivery patches, and allowing more of them must not lengthen the run.
+        timed = min(actions, TIME_SCALED_ACTIONS)
+        seconds = min(seconds, max(900, pages * 75 + max(600, timed * (
             recovery["seconds"] + call_seconds({}, "recovery_plan")))))
     return {"policy": "adaptive" if limits.adaptive_budget else "fixed", "source_pages": pages,
             "max_model_calls": calls, "max_seconds": seconds,

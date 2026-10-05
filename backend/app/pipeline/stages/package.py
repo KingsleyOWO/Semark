@@ -2677,6 +2677,8 @@ class PackageStage:
                 form_entries=form_entries,
                 asset_entries=assets,
                 semantic_output_language=semantic_output_language,
+                picture_texts=[asset.retrieval_text for asset in assets if asset.type == "figure_asset"]
+                + [block.get_text() for block in document_ir.blocks if block.payload.get("agentic_image_origin")],
             ),
             encoding="utf-8",
         )
@@ -3103,6 +3105,7 @@ class PackageStage:
         source_title: str,
         assets: list[AssetEntry],
         semantic_output_language: str = "zh-TW",
+        picture_texts: Any = (),
     ) -> str:
         body = source_md.strip()
         table_collection_groups = self._table_collection_groups(assets)
@@ -3114,7 +3117,8 @@ class PackageStage:
         skip_next_blank = False
         source_title_key = re.sub(r"\s+", "", self._clean_export_title(source_title)).lower()
         last_heading_key = ""
-        for line in body.splitlines():
+        picture_lines = self._picture_paragraph_lines(body, picture_texts)
+        for number, line in enumerate(body.splitlines()):
             stripped = line.strip()
             if re.fullmatch(r"\[\[asset:[^\]]+\]\]", stripped):
                 continue
@@ -3158,7 +3162,7 @@ class PackageStage:
                 skip_next_blank = False
                 continue
             skip_next_blank = False
-            if self._is_low_value_visual_ocr_line(stripped):
+            if number not in picture_lines and self._is_low_value_visual_ocr_line(stripped):
                 continue
             line = self._clean_split_main_display_line(line)
             if semantic_output_language == "en":
@@ -3329,6 +3333,28 @@ class PackageStage:
         if meaningful_facts:
             return False
         return has_shape_signal and len(re.sub(r"\s+", "", text)) < 160
+
+    @staticmethod
+    def _picture_paragraph_lines(body: str, picture_texts: Any) -> set[int]:
+        """Line numbers of paragraphs that are wholly a picture's delivered text.
+
+        A one-to-three digit line is OCR noise in prose but a value in a picture
+        (a review count, a score), so the low-value filter spares these lines.
+        """
+        known = {line.strip() for text in picture_texts for line in str(text).splitlines() if line.strip()}
+        protected: set[int] = set()
+        if not known:
+            return protected
+        paragraph: list[int] = []
+        lines = body.splitlines()
+        for number, line in enumerate([*lines, ""]):
+            if line.strip():
+                paragraph.append(number)
+                continue
+            if paragraph and all(lines[i].strip() in known for i in paragraph):
+                protected.update(paragraph)
+            paragraph = []
+        return protected
 
     @staticmethod
     def _is_low_value_visual_ocr_line(line: str) -> bool:
@@ -4833,6 +4859,7 @@ class PackageStage:
         form_entries: list[dict[str, Any]],
         asset_entries: list[AssetEntry] | None = None,
         semantic_output_language: str = "zh-TW",
+        picture_texts: Any = (),
     ) -> str:
         del source_filename
         language = "en" if semantic_output_language == "en" else "zh-TW"
@@ -4874,6 +4901,7 @@ class PackageStage:
             source_title,
             asset_entries or [],
             semantic_output_language=language,
+            picture_texts=picture_texts,
         )
         return "\n".join(header).strip() + "\n\n" + body + "\n"
 

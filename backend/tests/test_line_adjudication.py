@@ -132,3 +132,52 @@ async def test_a_picture_with_more_lines_than_one_ocr_pass_is_read_in_overlappin
     assert regions[0] == [0, 0, 1000, 1000] and len(regions) == 5
     assert all(b[1] < a[3] for a, b in zip(regions[1:], regions[2:], strict=False))  # consecutive bands overlap
     assert lines == [f"band {r[1]}" for r in regions[1:]]
+
+
+@pytest.mark.asyncio
+async def test_the_page_audit_sees_the_ocr_vote_before_judging_the_picture(tmp_path, monkeypatch):
+    # The audit model shares the drafting model's habit of "correcting" a printed typo.
+    # Given OCR's independent reading up front, it judges the source as printed.
+    ir, source, model = _picture_page(tmp_path, monkeypatch, DELIVERED.splitlines())
+    seen = {}
+
+    class AutocorrectingAudit(type(model)):
+        async def query(self, task, payload, image, schema):
+            value, tokens = await super().query(task, payload, image, schema)
+            if task == "audit_page":
+                votes = payload.get("independent_ocr_votes", {}).get("b0", [])
+                seen["votes"] = votes
+                if not any(v["verdict"] == "delivery" and "Samles" in v["ocr_reads"] for v in votes):
+                    value["blocks"][0].update(status="needs_review",
+                                              observation="The source reads Alphabet Samples; delivery writes Samles.")
+            return value, tokens
+
+    _, report = await DocumentReview(config(recovery_enabled=False), AutocorrectingAudit(),
+                                     AutocorrectingAudit()).run(ir, tmp_path, source_path=source)
+
+    assert report["pages"][0]["status"] == "verified"
+    assert seen["votes"][0]["delivered_line"] == "Alphabet Samles"
+
+
+@pytest.mark.asyncio
+async def test_a_picture_without_a_disputed_line_does_not_wait_for_ocr(tmp_path, monkeypatch):
+    ir, source, model = _picture_page(tmp_path, monkeypatch, DELIVERED.splitlines())
+    from app.adapters import ocr
+
+    async def unused(*args, **kwargs):
+        raise AssertionError("OCR runs only where readings disagree")
+    monkeypatch.setattr(ocr, "read_ocr", unused)
+
+    class Agreeing(type(model)):
+        async def query(self, task, payload, image, schema):
+            value, tokens = await super().query(task, payload, image, schema)
+            if task == "verify_native_reading":
+                value["items"][0]["text"] = DELIVERED
+            else:
+                assert "independent_ocr_votes" not in payload
+            return value, tokens
+
+    _, report = await DocumentReview(config(recovery_enabled=False), Agreeing(), Agreeing()).run(
+        ir, tmp_path, source_path=source)
+
+    assert report["pages"][0]["status"] == "verified"

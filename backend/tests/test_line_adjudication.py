@@ -132,6 +132,7 @@ async def test_a_picture_with_more_lines_than_one_ocr_pass_is_read_in_overlappin
     assert regions[0] == [0, 0, 1000, 1000] and len(regions) == 5
     assert all(b[1] < a[3] for a, b in zip(regions[1:], regions[2:], strict=False))  # consecutive bands overlap
     assert lines == [f"band {r[1]}" for r in regions[1:]]
+    assert all("seconds" in entry for entry in review.state["ocr_lines"].values())  # OCR time is reported
 
 
 @pytest.mark.asyncio

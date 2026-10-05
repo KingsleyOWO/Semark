@@ -318,9 +318,21 @@ class DocumentReview(AgenticRepair):
             try:
                 with Image.open(source) as image:
                     scale = 2 if image.width * image.height < 1_500_000 else 1
-                value = await ocr.read_ocr(source, [0, 0, 1000, 1000], scale, inventory.directory / "ocr" / sha[:16],
-                                           timeout=min(90, remaining))
-                cache[key] = {"lines": [line.get("text", "") for line in value.get("lines", [])]}
+                folder = inventory.directory / "ocr" / sha[:16]
+                try:
+                    regions = [[0, 0, 1000, 1000]]
+                    value = await ocr.read_ocr(source, regions[0], scale, folder, timeout=min(90, remaining))
+                    lines = [line.get("text", "") for line in value.get("lines", [])]
+                except ValueError as exc:
+                    if not str(exc).startswith("ocr_output_capacity_exceeded"):
+                        raise
+                    # More lines than one response holds: overlapping bands, so no line is cut at a border.
+                    lines = []
+                    for top in (0, 250, 500, 750):
+                        value = await ocr.read_ocr(source, [0, top, 1000, min(1000, top + 300)], scale, folder,
+                                                   timeout=min(90, max(1, self._remaining())))
+                        lines += [line.get("text", "") for line in value.get("lines", [])]
+                cache[key] = {"lines": lines}
             except (ValueError, TimeoutError, OSError) as exc:
                 cache[key] = {"error": str(exc)[:200]}
             finally:

@@ -102,3 +102,33 @@ async def test_a_picture_the_ocr_vote_cannot_settle_stays_unverified(tmp_path, m
 
     assert report["pages"][0]["status"] == "needs_review"
     assert report["pages"][0]["image_issues"][0]["failure_kind"] == "reading_disagreement"
+
+
+@pytest.mark.asyncio
+async def test_a_picture_with_more_lines_than_one_ocr_pass_is_read_in_overlapping_bands(tmp_path, monkeypatch):
+    # A sticky-note wall of 148 lines exceeds one PaddleOCR response; bands overlap so no line is cut.
+    from types import SimpleNamespace
+
+    from app.adapters import ocr
+
+    regions = []
+
+    async def read_ocr(source, region, scale, folder, *, timeout=90):
+        regions.append(region)
+        if region == [0, 0, 1000, 1000]:
+            raise ValueError("ocr_output_capacity_exceeded: select a smaller region")
+        return {"lines": [{"text": f"band {region[1]}"}]}
+    monkeypatch.setattr(ocr, "read_ocr", read_ocr)
+    monkeypatch.setattr(ocr, "ocr_python", lambda: "/usr/bin/python3")
+    picture = tmp_path / "wall.png"
+    Image.new("RGB", (1190, 1476), "white").save(picture)
+    review = DocumentReview(config())
+    review.state = {"usage": {"model_calls": 0, "seconds": 0.0}}
+    review.state_path = tmp_path / "state.json"
+    review.limits = config().agentic
+
+    lines = await review._ocr_lines(picture, SimpleNamespace(directory=tmp_path))
+
+    assert regions[0] == [0, 0, 1000, 1000] and len(regions) == 5
+    assert all(b[1] < a[3] for a, b in zip(regions[1:], regions[2:], strict=False))  # consecutive bands overlap
+    assert lines == [f"band {r[1]}" for r in regions[1:]]

@@ -194,14 +194,14 @@ def coerce_visual_vlm_output(output: dict[str, Any]) -> dict[str, Any]:
 _VLM_BULLET_RE = re.compile(r"^(?:•\s*|[-*]\s+)+")
 
 
-def split_vlm_lines(value: Any) -> list[str]:
-    """Return clean, unique lines from VLM text/list fields."""
+def split_vlm_lines(value: Any, unique: bool = True) -> list[str]:
+    """Return clean lines from VLM text/list fields, unique unless a transcription needs its repeats."""
     text = render_vlm_text(value)
     lines: list[str] = []
     seen: set[str] = set()
     for raw_line in text.splitlines():
         line = re.sub(r"\s+", " ", _VLM_BULLET_RE.sub("", raw_line.strip())).strip()
-        if not line or line in seen:
+        if not line or unique and line in seen:
             continue
         seen.add(line)
         lines.append(line)
@@ -4440,6 +4440,18 @@ class PackageStage:
                 best = (dx, text)
         return best[1] if best else ""
 
+    def _figure_retrieval_text(self, title: str, caption: str, semantic: str, keywords: list) -> str:
+        """The RAG text of a figure. A title cut from the description does not stand in for it."""
+        from app.pipeline.content_coverage import normalized_text
+
+        parts = [title]
+        if caption and normalized_text(caption) not in normalized_text(f"{title}\n{semantic}"):
+            parts.append(caption)
+        parts.append(semantic)
+        if keywords:
+            parts.extend(self._strip_watermark_lines(list(keywords)))
+        return "\n".join(part for part in parts if part).strip()
+
     def _render_visual_semantic_content(
         self,
         title: str,
@@ -4466,16 +4478,17 @@ class PackageStage:
         language = "en" if semantic_output_language == "en" else "zh-TW"
         output = coerce_visual_vlm_output(output)
         structured_lines = split_vlm_lines(output.get("structured_content", ""))
-        all_text_lines = self._strip_watermark_lines(split_vlm_lines(output.get("all_text", "")))
+        all_text_lines = self._strip_watermark_lines(split_vlm_lines(output.get("all_text", ""), unique=False))
         facts = []
         for line in split_vlm_lines(output.get("facts", [])):
             if language == "en":
                 if line.strip():
                     facts.append(line)
                 continue
-            zh_count = sum(1 for ch in line if "一" <= ch <= "鿿")
-            ascii_count = sum(1 for ch in line if ch.isascii() and ch.isalpha())
-            if zh_count >= 8 and zh_count >= ascii_count:
+            # A Chinese sentence stays even when brand names and codes outnumber its
+            # characters: 「左欄標準色為 Revival Yellow，PANTONE 1222 C…」 is what pairs
+            # each colour with its values.
+            if sum(1 for ch in line if "一" <= ch <= "鿿") >= 8:
                 facts.append(line)
         facts = self._strip_watermark_lines(facts)
         keywords = self._strip_watermark_lines(split_vlm_lines(output.get("keywords", [])))
@@ -4492,11 +4505,12 @@ class PackageStage:
                 parts.extend(structured_lines)
             if parts:
                 # Chinese-language semantic content survived the filter; append the
-                # figure's visible OCR text (deduped) as extra searchable labels and
-                # keep raw English out of the zh-TW corpus.
-                for line in all_text_lines:
-                    if line not in parts:
-                        parts.append(line)
+                # figure's visible OCR text as extra searchable labels and keep raw
+                # English out of the zh-TW corpus. Only lines repeating a fact are
+                # skipped: a label repeated per column ("CODE" above each colour's
+                # value) is what ties each value to its column.
+                semantic = set(parts)
+                parts.extend(line for line in all_text_lines if line not in semantic)
                 return "\n".join(parts).strip()
             # No zh semantic content. If the figure carries real Chinese OCR, use it
             # as-is (respecting the "no English caption leak" policy). Otherwise the
@@ -4511,10 +4525,12 @@ class PackageStage:
             caption = render_vlm_text(output.get("semantic_caption", ""))
             raw_facts = self._strip_watermark_lines(split_vlm_lines(output.get("facts", [])))
             fallback_parts: list[str] = []
-            for line in [caption, *raw_facts, *all_text_lines]:
+            for line in [caption, *raw_facts]:
                 line = line.strip()
                 if line and line not in fallback_parts:
                     fallback_parts.append(line)
+            semantic = set(fallback_parts)
+            fallback_parts.extend(line.strip() for line in all_text_lines if line.strip() and line.strip() not in semantic)
             return "\n".join(fallback_parts).strip()
 
         path_lines = [line for line in structured_lines if " > " in line]
@@ -5041,10 +5057,7 @@ class PackageStage:
                             enrichment_output,
                             semantic_output_language=semantic_output_language,
                         )
-                        retrieval_parts = [title, semantic_retrieval]
-                        if keywords:
-                            retrieval_parts.extend(self._strip_watermark_lines(list(keywords)))
-                        retrieval_text = "\n".join(part for part in retrieval_parts if part).strip()
+                        retrieval_text = self._figure_retrieval_text(title, semantic_caption, semantic_retrieval, keywords)
 
                         asset = AssetEntry(
                             type="figure_asset",

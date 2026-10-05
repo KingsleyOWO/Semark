@@ -29,7 +29,7 @@ from app.pipeline.review_sources import (
 )
 
 NATIVE_TEXT_PROOF = "Word-rendered PDF text layer for physical page {}"
-REVIEW_VERSION = "document-review-20261002.1-enlarged-script-folded-readings"
+REVIEW_VERSION = "document-review-20261005.1-relationship-accounting"
 SCHEDULER_VERSION = "tool-scheduler-20260930.1-complete-tool-budget"
 
 

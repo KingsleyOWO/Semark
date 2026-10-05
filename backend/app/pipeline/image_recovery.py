@@ -102,6 +102,28 @@ def delivery_patch_statements(state, page, block_id):
     return statements
 
 
+KEPT_PIECE_CHARS = 600  # well under one chunk, so each kept piece is one exact delivered span
+
+
+def kept_text_pieces(text):
+    """Split kept delivery into consecutive pieces, never reordering or dropping a character."""
+    pieces, current = [], ""
+    for line in text.splitlines():
+        while len(line) > KEPT_PIECE_CHARS:
+            cut = line.rfind("。", 0, KEPT_PIECE_CHARS) + 1 or KEPT_PIECE_CHARS
+            pieces, current = pieces + ([current] if current else []), ""
+            pieces.append(line[:cut])
+            line = line[cut:]
+        if current and len(current) + 1 + len(line) > KEPT_PIECE_CHARS:
+            pieces.append(current)
+            current = line
+        else:
+            current = f"{current}\n{line}" if current else line
+    if current:
+        pieces.append(current)
+    return pieces
+
+
 def delivery_patch_attempted(recovery_state, block_id):
     return any(s.get("action") == "repair_image" and s.get("block_id") == block_id
                and s.get("method") == "delivery_patch" for s in recovery_state.get("steps", []))
@@ -133,12 +155,11 @@ def build_delivery_patch_candidate(runner, ir, block, page, region, source, stat
               "agentic_image_origin": block.block_id, "image_source_context": block.payload.get("word_source", {}),
               "agentic_evidence_ids": [relationship_evidence], "agentic_relationship_evidence_id": relationship_evidence,
               "agentic_content_kind": "visual_summary"}
-    replacements = [
-        Block(block_id=f"recovery_{folder.name}_image_k0", type=BlockType.TEXT, page_idx=block.page_idx,
-              bbox_norm=region, payload={**common, "text": delivered}),
-        Block(block_id=f"recovery_{folder.name}_image_r0", type=BlockType.TEXT, page_idx=block.page_idx,
-              bbox_norm=region, payload={**common, "text": "\n".join(statements)}),
-    ]
+    replacements = [Block(block_id=f"recovery_{folder.name}_image_k{index}", type=BlockType.TEXT,
+                          page_idx=block.page_idx, bbox_norm=region, payload={**common, "text": piece})
+                    for index, piece in enumerate(kept_text_pieces(delivered))]
+    replacements.append(Block(block_id=f"recovery_{folder.name}_image_r0", type=BlockType.TEXT, page_idx=block.page_idx,
+                              bbox_norm=region, payload={**common, "text": "\n".join(statements)}))
     candidate = ir.model_copy(deep=True)
     index = next(i for i, old in enumerate(candidate.blocks) if old.block_id == block.block_id)
     candidate.blocks[index:index + 1] = replacements

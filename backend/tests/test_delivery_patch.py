@@ -134,3 +134,32 @@ def test_after_a_patch_the_next_attempt_is_a_full_repair_not_the_patch_again(tmp
 
     full = {"action": "repair_image", "model_role": "primary", "block_id": "picture"}
     assert runner.select_strategy(decision, [patch, full], ["repair_image", "defer"]).action == "defer"
+
+
+def test_a_long_delivery_is_kept_in_pieces_each_small_enough_for_one_chunk():
+    # The product page's 1,450-character delivery spanned two chunks, so no chunk held it as one span.
+    from app.pipeline.image_recovery import kept_text_pieces
+
+    lines = [f"第{i}項商品：拼圖 1000 片，售價 US$11.97，送貨 7 月 25 日" for i in range(60)]
+    pieces = kept_text_pieces("\n".join(lines))
+
+    assert len(pieces) > 1 and all(len(piece) <= 600 for piece in pieces)
+    assert "\n".join(pieces) == "\n".join(lines)
+
+
+@pytest.mark.asyncio
+async def test_cheap_patches_are_planned_before_full_repairs(tmp_path):
+    # v20.4 spent the recovery budget on two failing 20-call re-reads; three 4-call patches never ran.
+    _, owner, runner = await setup(tmp_path, PatchModel())
+    ir = runner.inventory.ir
+    for bid in ("dense", "picture"):
+        ir.blocks.append(Block(block_id=bid, type=BlockType.IMAGE, page_idx=0, payload={}))
+        runner.inventory.mapping[bid] = [0]
+    record = _record()
+    record["image_issues"].insert(0, {"block_id": "dense", "failure_kind": "reading_disagreement",
+                                      "detail": "Independent original image wording is absent."})
+    owner.state["pages"]["0"] = record
+
+    order = [p["id"] for p in runner.problems(ir) if p["id"].startswith("image:")]
+
+    assert order == ["image:picture", "image:dense"]

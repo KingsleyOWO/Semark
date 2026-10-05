@@ -34,7 +34,7 @@ def call_seconds(state, task):
 
 
 def tool_cost(state, action, *, pictures=0, layout="horizontal2", word_pictures=0, image_read_calls=(3, 3),
-              layout_cached=False, detail_regions=0, image_geometry=False, relation_patch=False):
+              layout_cached=False, detail_regions=0, image_geometry=False, delivery_patch=False):
     """Includes candidate audit AND post-rebuild audit, not just generation."""
     tasks = ["audit_page", "audit_page"]
     overhead = 15
@@ -50,7 +50,7 @@ def tool_cost(state, action, *, pictures=0, layout="horizontal2", word_pictures=
         # Each original image uses separate scene/text observations. One bounded
         # split per reader permits at most three calls, including failed format.
         tasks += (["read_image_parts"] * 3 + ["verify_image_parts"] * 3) * pictures
-    elif action == "repair_image" and relation_patch:
+    elif action == "repair_image" and delivery_patch:
         # No reading: one per-image audit with a format retry and the page audit before/after commit.
         tasks = ["audit_image_parts"] * 2 + ["audit_page"] * 2
     elif action == "repair_image" and image_geometry:
@@ -79,7 +79,7 @@ def tool_cost(state, action, *, pictures=0, layout="horizontal2", word_pictures=
     completed = [step["duration_seconds"] for step in state.get("recovery", {}).get("steps", [])
                  if step.get("action") == action and step.get("layout", "horizontal2") == layout
                  and step.get("duration_seconds")]
-    if completed and not (action == "repair_image" and (image_geometry or relation_patch or sum(image_read_calls) < 4) or action == "inspect_layout" and layout_cached):
+    if completed and not (action == "repair_image" and (image_geometry or delivery_patch or sum(image_read_calls) < 4) or action == "inspect_layout" and layout_cached):
         estimate = max(estimate, statistics.median(completed[-5:]) * 1.25)
     return {"model_calls": len(tasks), "seconds": round(estimate, 1),
             "format_fallback": "bounded splits use remaining shared budget; never override limits"}

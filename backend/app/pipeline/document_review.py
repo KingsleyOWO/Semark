@@ -434,7 +434,7 @@ class DocumentReview(AgenticRepair):
     def _certify_native_text_blocks(self, page, ir, inventory, run_path, record):
         """After a picture page's audit, certify its native text from the text layer.
 
-        One picture's failed reading left a whole Lumio page of paragraphs
+        One picture's failed reading left a whole Validation page of paragraphs
         unreviewed and out of RAG. The page stays needs_review and the pictures
         keep whatever the audit said; only text and table blocks the text layer
         proves become verified with complete context. A model finding that the

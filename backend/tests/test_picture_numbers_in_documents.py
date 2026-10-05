@@ -1,6 +1,6 @@
 """Numbers inside a picture's delivered text stay in the documents; the page-number rule stays for prose.
 
-Lumio v20.5: the main document dropped every line of one to three digits as
+Validation v20.5: the main document dropped every line of one to three digits as
 OCR noise. In picture content those lines are values: Amazon review counts
 153/178/155/62, a sticky-note count, Lighthouse scores. 57 such lines in 11
 pictures left documents/ (the RAG delivery) while chunks kept them.

@@ -4512,7 +4512,7 @@ class PackageStage:
                     facts.append(line)
                 continue
             # A Chinese sentence stays even when brand names and codes outnumber its
-            # characters: 「左欄標準色為 Revival Yellow，PANTONE 1222 C…」 is what pairs
+            # characters: 「左欄標準色為 Harbor Yellow，PANTONE 1235 C…」 is what pairs
             # each colour with its values.
             if sum(1 for ch in line if "一" <= ch <= "鿿") >= 8:
                 facts.append(line)

@@ -2,7 +2,7 @@
 
 _normalize_zh_text exists to undo MinerU's OCR glyph misreads (税→稅). A DOCX
 paragraph has no OCR step, so converting it can only change what the author
-wrote: on the Lumio report a consultant's name 「…杰」 shipped as 「…傑」 and
+wrote: on the Validation report a consultant's name 「…杰」 shipped as 「…傑」 and
 「客户」 as 「客戶」, and the delivered text no longer matched the source page.
 """
 

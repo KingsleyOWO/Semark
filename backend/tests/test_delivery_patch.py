@@ -1,6 +1,6 @@
 """A picture that fails only because its delivery omits a relationship gets that sentence, not a re-read.
 
-Lumio v20.1: a product page's delivery listed the three size options but never
+Validation v20.1: a product page's delivery listed the three size options but never
 said 30cm is the selected one; a social-media slide lacked the value paired with
 Average Likes. A full repair re-reads every pixel (8-20 calls) and fails the
 same way; adding the relationship the audit saw takes one per-image audit. A
@@ -45,7 +45,7 @@ def test_only_a_picture_failing_on_omitted_relationships_or_lines_gets_a_patch()
         {"reading_line": "Alphabet Samples", "delivered_line": "alphabetsamles", "verdict": "delivery"}]}}
     assert delivery_patch_statements({"pages": {"0": omitted}}, 0, "picture") == ["圖片文字：值得信任的"]
     misread = {**omitted, "line_adjudications": {"picture": [
-        {"reading_line": "PANTONE 1022C", "delivered_line": "pantone1222c", "verdict": "reading"}]}}
+        {"reading_line": "PANTONE 1035C", "delivered_line": "pantone1222c", "verdict": "reading"}]}}
     assert delivery_patch_statements({"pages": {"0": misread}}, 0, "picture") == []
 
 

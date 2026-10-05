@@ -2,9 +2,9 @@
 
 qwen3-vl turns every 32x32 px into one visual token and never enlarges an
 image itself: a 190x142 storefront photo reaches the model as ~24 tokens, so
-the sign 「晴諾米拼圖工作坊」 is a fraction of a token tall and comes back
+the sign 「晴諾米拼圖工作室」 is a fraction of a token tall and comes back
 guessed as 「晴陸米拼圖工作店」. The same photo enlarged 6x reads correctly
-(Lumio replay, 2026-10-01).
+(Validation replay, 2026-10-01).
 """
 
 import base64

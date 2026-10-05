@@ -1,8 +1,8 @@
 """The independent review reading sees the picture as large as the draft did, in either script.
 
-Lumio v20: the draft read the brand-guideline slides enlarged (~2,900 visual
+Validation v20: the draft read the brand-guideline slides enlarged (~2,900 visual
 tokens) while the review read them as stored (~250), so the review misread
-「晴諾米拼圖工作坊」 as 「集諾米所屬工作」 and rejected the correct draft. Two
+「晴諾米拼圖工作室」 as 「集諾米所屬工作」 and rejected the correct draft. Two
 review readings also came back in simplified script and could never match
 the zh-TW delivery.
 """
@@ -61,7 +61,7 @@ def _reading(text):
 
 def test_a_simplified_review_reading_matches_the_zh_tw_delivery():
     delivered = "右列為晴諾米拼圖視覺識別系統之主要英文字體。"
-    assert word_picture_issue(_reading("右列为雷诺瓦拼图视觉识别系统之主要英文字体。"), delivered) == ""
+    assert word_picture_issue(_reading("右列为晴诺米拼图视觉识别系统之主要英文字体。"), delivered) == ""
     assert word_picture_issue(_reading("右列為集諾米拼圖視覺識別系統之主要英文字體。"), delivered)
 
 

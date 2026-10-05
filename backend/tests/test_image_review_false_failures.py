@@ -1,6 +1,6 @@
 """Image reviews must not fail correct deliveries on bookkeeping, nor RAG drop delivered meaning.
 
-Lumio v20.1 spot check, 20 unverified pictures: 15 failed on relationship
+Validation v20.1 spot check, 20 unverified pictures: 15 failed on relationship
 accounting rather than misreading. Workshop photos whose every relation the
 audit matched verbatim stayed unverified because sideless "positions" had been
 turned into uncertainties; slides with no relationships failed on an ID the
@@ -50,10 +50,10 @@ def test_a_sideless_position_on_a_picture_with_axes_stays_uncertain():
 
 
 def test_relation_ids_the_audit_invents_certify_nothing_and_fail_nothing():
-    delivered = "品牌標語：慢慢前行，遇見更好的自己"
-    assert relationship_issue(_reading([]), _finding(("b0_text", "慢慢前行，遇見更好的自己")), delivered) == ""
-    reading = _reading([_relation("r0", "other", "品牌標語為持續前行")])
-    assert relationship_issue(reading, _finding(("r0", "持續前行"), ("r9", "遇見")), delivered) == ""
+    delivered = "品牌標語：一步一步，拼出想要的生活"
+    assert relationship_issue(_reading([]), _finding(("b0_text", "一步一步，拼出想要的生活")), delivered) == ""
+    reading = _reading([_relation("r0", "other", "品牌標語為一步一步")])
+    assert relationship_issue(reading, _finding(("r0", "一步一步"), ("r9", "遇見")), delivered) == ""
     assert "omitted" in relationship_issue(reading, _finding(("r9", "遇見")), delivered)
 
 
@@ -78,12 +78,12 @@ def test_a_quote_crossing_its_own_chunk_split_is_found():
 
 
 def test_picture_rag_text_keeps_the_full_description_and_chinese_facts_carrying_codes():
-    caption = ("此圖為品牌識別系統的色彩規範說明，以左右兩欄並列呈現兩種標準色：左側為「Revival Yellow」黃色背景，"
-               "右側為「Noir Gray」灰色背景。每欄皆展示品牌方形圖示。")
-    fact = "左欄標準色為「Revival Yellow」，色碼為 PANTONE 1222 C、RGB 255,200,70、CMYK 0,25,80,0、HEX #fbc93e。"
+    caption = ("此圖為品牌識別系統的色彩規範說明，以左右兩欄並列呈現兩種標準色：左側為「Harbor Yellow」黃色背景，"
+               "右側為「Slate Gray」灰色背景。每欄皆展示品牌方形圖示。")
+    fact = "左欄標準色為「Harbor Yellow」，色碼為 PANTONE 1235 C、RGB 255,200,70、CMYK 0,25,80,0、HEX #f9c74f。"
     stage = PackageStage()
     semantic = stage._render_visual_semantic_content(caption[:80], {"semantic_caption": caption, "facts": [fact],
-                                                                     "all_text": ["Revival Yellow"]})
+                                                                     "all_text": ["Harbor Yellow"]})
 
     assert fact in semantic
     assert caption in stage._figure_retrieval_text(caption[:80], caption, semantic, [])
@@ -91,15 +91,15 @@ def test_picture_rag_text_keeps_the_full_description_and_chinese_facts_carrying_
 
 def test_a_quote_whose_first_line_also_appears_earlier_is_still_found():
     reading = _reading([_relation("r0", "table_relation", "晴諾米列的四欄")])
-    delivered = ("此圖比較晴諾米拼圖工作坊與七個品牌。\n" + "\n".join(["其他品牌的設計語言說明"] * 20)
-                 + "\n晴諾米拼圖工作坊\nLUMIO\n拼圖不只是拼圖®\n黃＋黑色調")
-    assert relationship_issue(reading, _finding(("r0", "晴諾米拼圖工作坊\n拼圖不只是拼圖®\n黃＋黑色調")), delivered) == ""
+    delivered = ("此圖比較晴諾米拼圖工作室與七個品牌。\n" + "\n".join(["其他品牌的設計語言說明"] * 20)
+                 + "\n晴諾米拼圖工作室\nLUMIO\n拼圖就是生活®\n黃＋黑色調")
+    assert relationship_issue(reading, _finding(("r0", "晴諾米拼圖工作室\n拼圖就是生活®\n黃＋黑色調")), delivered) == ""
 
 
 def test_repeated_transcription_lines_survive_into_picture_rag_text():
     # Two colour columns each label their codes: dropping the second "CODE" leaves #777777 unlabelled.
     output = {"facts": ["此頁並列兩種品牌標準色與各自的色碼。"],
-              "all_text": ["Revival Yellow", "CODE", "#fbc93e", "Noir Gray", "CODE", "#777777", "100%", "100%"]}
+              "all_text": ["Harbor Yellow", "CODE", "#f9c74f", "Slate Gray", "CODE", "#777777", "100%", "100%"]}
     lines = PackageStage()._render_visual_semantic_content("品牌標準色", output).splitlines()
 
     assert lines.count("CODE") == 2 and lines.count("100%") == 2

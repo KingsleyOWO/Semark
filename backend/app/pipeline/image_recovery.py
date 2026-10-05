@@ -219,7 +219,7 @@ def build_image_parts_blocks(runner, block, page, region, source, parts, evidenc
         add("圖片內容：僅空白或裝飾性圖形，沒有可提取的實質資訊。", "visual_summary", "information")
         replacements[-1].payload["agentic_information_status"] = "non_informative"
     # Model text gets the zh-TW repair enrichment text gets in render_vlm_text;
-    # a repaired photo otherwise shipped 「画面…」/「雷诺瓦…」 labelled verified.
+    # a repaired photo otherwise shipped 「画面…」/「晴诺米…」 labelled verified.
     from app.pipeline.zh_text import to_taiwan_traditional
 
     for index, text in enumerate(parts["visual_facts"] if parts.get("information_status") != "non_informative" else []):

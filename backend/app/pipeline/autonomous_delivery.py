@@ -8,7 +8,7 @@ from app.pipeline.review_policy import dependency_closed_subset, reviewed_block_
 
 # Picture content is delivered whether or not the source review could confirm
 # it (policy chosen 2026-10-01: enlarged figures now read correctly, while the
-# same model as verifier passed 3 of 18 usable Lumio figures). The review
+# same model as verifier passed 3 of 18 usable Validation figures). The review
 # decides which label the content carries, never whether it ships.
 IMAGE_LABELS = {
     "zh-TW": {"verified": "〔圖片內容：自動辨識，已核對〕", "unverified": "〔圖片內容：自動辨識，未核對〕"},
@@ -450,7 +450,7 @@ def split_verified_image(renderer, ir, chunk, targets, max_tokens, asset_records
 def split_picture_lines(renderer, ir, chunk, targets, max_tokens, asset_records):
     """Last resort for picture content over the chunk limit: whole lines per part.
 
-    Dropping the picture loses all of it (the Lumio 8-brand table, 4 of 26
+    Dropping the picture loses all of it (the Validation 8-brand table, 4 of 26
     figures). Each part repeats the picture's title and supplied context so it
     stays attributable, and no line is ever cut; a single line over the limit
     keeps the old refusal.

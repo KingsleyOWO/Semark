@@ -1,6 +1,6 @@
 """Evidence a page record cites must still verify in the live run.
 
-Lumio v20.1 spot check: a repair candidate's audit certified page 2's text
+Validation v20.1 spot check: a repair candidate's audit certified page 2's text
 from the text layer and wrote the proof inside the candidate folder. The
 committed record cited it, the live run never had the file, and delivery
 treated the whole review as tampered: nothing reached RAG.

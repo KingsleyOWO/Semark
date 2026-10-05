@@ -455,7 +455,8 @@ async def test_review_includes_original_word_picture_beyond_the_page_thumbnail(t
         async def query(self, task, payload, image, schema):
             if task == 'verify_native_reading':
                 self.calls.append((task, payload, image))
-                assert set(payload) == {'sources', 'image_order', 'source_relation_contract'}
+                # Blind: no caption, prose or prior output; only the document language code.
+                assert set(payload) == {'sources', 'image_order', 'source_relation_contract', 'relationship_language'}
                 return {'items': [{'source_id': sid, 'text': blind_text, 'complete': complete,
                                    'kind': 'transcription', 'observation': 'Read original lettering.',
                                    'image_type': 'other', 'relationships': [], 'relationships_complete': True}

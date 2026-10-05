@@ -103,7 +103,8 @@ Keep each source_fact <=320 characters; maximum 16 relationships. If more substa
 set relationships_complete=false and explain the omitted scope; never silently truncate or claim completeness.
 Photos/logos/documents without substantive relationships may have an empty list with relationships_complete=true.
 Lettering completeness and relationship completeness are separate. Put literal wording in text, never only
-in observation. This reading is candidate evidence for an independent pixel/delivery audit, not certification."""
+in observation. Write each source_fact in relationship_language (zh-TW: Traditional Chinese), quoting printed
+labels exactly as printed. This reading is candidate evidence for an independent pixel/delivery audit, not certification."""
 
 RELATION_AUDIT_INSTRUCTIONS = """independent_image_readings are BLIND source observations, not ground truth.
 Check them again against the original pixels and the actual delivered documents/chunks, never by agreement.

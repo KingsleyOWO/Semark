@@ -35,7 +35,7 @@ OCR_VOTE_POLICY = (
     "reads what the delivery says; ocr_reads is what it read. Source lettering is delivered as printed, including "
     "the author's typos and variant spellings: never 'correct' it, and do not fail a block for a spelling OCR "
     "confirms. OCR is evidence, not certification: still check every other part of the picture against the pixels.")
-REVIEW_VERSION = "document-review-20261005.2-ocr-votes-before-audit"
+REVIEW_VERSION = "document-review-20261005.3-relationships-in-document-language"
 SCHEDULER_VERSION = "tool-scheduler-20260930.1-complete-tool-budget"
 
 
@@ -139,12 +139,17 @@ class DocumentReview(AgenticRepair):
                 if key not in cache:
                     pending[key] = path
         pending = list(pending.items())
+        from app.pipeline.semantic.language import resolve_semantic_output_language
+        # Relationship sentences can be delivered verbatim by a delivery patch, so they
+        # are written in the document's language; printed lettering is still copied as printed.
+        language = resolve_semantic_output_language(self.config.package.semantic_output_language.value, inventory.ir)
         for start in range(0, len(pending), WORD_PICTURE_BATCH_SIZE):
             batch = pending[start:start + WORD_PICTURE_BATCH_SIZE]
             ids = [f"image{i}" for i in range(len(batch))]
             # No captions, neighboring prose or previous outputs enter this blind call.
             reading = await read_word_picture_batch(self, {
                 "sources": [{"source_id": sid} for sid in ids], "image_order": ids,
+                "relationship_language": language,
             }, [path for _, path in batch], source_ids=ids)
             for (key, _), item in zip(batch, reading.items, strict=True):
                 cache[key] = item.model_dump()

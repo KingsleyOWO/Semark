@@ -189,3 +189,22 @@ def test_a_short_line_ocr_also_reads_beside_its_look_alike_is_a_separate_omitted
     verdict = adjudicate(["值得信任的"], "值得信賴的態度★2\n創造", ["值得信任的", "值得信賴的態度★2"])[0]
 
     assert (verdict["verdict"], verdict["delivered_line"]) == ("reading", None)
+
+
+@pytest.mark.asyncio
+async def test_the_blind_reading_states_relationships_in_the_document_language(tmp_path, monkeypatch):
+    # A delivery patch adds the reading's relationship sentences verbatim; an English
+    # sentence 「The 30cm option is selected…」 landed in a Chinese document.
+    ir, source, model = _picture_page(tmp_path, monkeypatch, DELIVERED.splitlines())
+    seen = {}
+
+    class Capture(type(model)):
+        async def query(self, task, payload, image, schema):
+            if task == "verify_native_reading":
+                seen.update(payload)
+            return await super().query(task, payload, image, schema)
+
+    await DocumentReview(config(recovery_enabled=False), Capture(), Capture()).run(ir, tmp_path, source_path=source)
+
+    assert seen["relationship_language"] == "zh-TW"
+    assert "relationship_language" in seen["source_relation_contract"]

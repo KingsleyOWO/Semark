@@ -414,3 +414,36 @@ async def test_oversized_picture_is_split_on_line_boundaries_instead_of_dropped(
     delivered = '\n'.join(p['content'] for p in parts)
     assert all(row in delivered for row in rows)  # every row survives, none cut in half
     assert all(len(p['content']) < len(text) for p in parts)
+
+
+@pytest.mark.asyncio
+async def test_unverified_picture_under_an_unverified_heading_still_ships_labelled(tmp_path):
+    # A 31-page PDF held back 29 of 46 pictures: each sat under a heading its page
+    # review could not verify. A heading is navigation; the picture already ships
+    # labelled unverified, and the unverified heading text itself still stays out.
+    blocks = [Block(block_id='heading', type=BlockType.TEXT, page_idx=0, reading_order=0,
+                    payload={'text': 'Source page 1', 'text_level': 1}),
+              Block(block_id='pic', type=BlockType.IMAGE, page_idx=0, reading_order=1,
+                    payload={'img_path': 'pic.png', 'caption': ''})]
+    ir, source = fixture(tmp_path, blocks=blocks)
+    outputs = tmp_path / 'outputs'
+    (outputs / 'assets_index.jsonl').write_text(json.dumps(
+        {'asset_id': 'fig0000', 'block_id': 'pic', 'retrieval_text': 'Shelves of boxed puzzles in a shop'}))
+    (outputs / 'documents/main.md').write_text('# Source page 1\n\nShelves of boxed puzzles in a shop')
+    (outputs / 'chunks.jsonl').write_text('\n'.join(json.dumps(c) for c in [
+        {'chunk_id': 'c0', 'block_ids': ['heading'], 'page_indices': [0], 'content': '# Source page 1'},
+        {'chunk_id': 'c1', 'block_ids': ['pic'], 'page_indices': [0], 'content': 'Shelves of boxed puzzles in a shop'}]))
+
+    def review(_, value):
+        for block in value['blocks']:
+            block['status'] = 'needs_review'
+        value.update(source_complete=False, issues=['Heading and picture unconfirmed.'])
+        return value
+    model = AuditModel(review)
+    ir, _ = await DocumentReview(config(), model, model).run(ir, tmp_path, source_path=source)
+    finalize_delivery(ir, tmp_path, config())
+
+    chunks = read_chunks(tmp_path)
+    picture = next(c for c in chunks if 'pic' in c['block_ids'])
+    assert '[Image content: automatic reading, not verified]' in picture['content']
+    assert all('heading' not in c['block_ids'] for c in chunks)

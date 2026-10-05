@@ -99,7 +99,7 @@ def build_automatic_delivery(ir, run_path, config, review_summary, ledger, upstr
     rendered = {b.block_id: (text, reason) for b, text, reason in expected_blocks(ir, outputs)}
     valid = (review_summary.get("evidence_valid", False) and review_summary.get("inventory_complete")
              and config.agentic.mode != "off" and not upstream_veto)
-    eligible, reasons, dependencies = set(), {}, {}
+    eligible, reasons, dependencies, navigation = set(), {}, {}, {}
     heading_stack = []
     for block in ir.blocks:
         bid = block.block_id
@@ -113,6 +113,7 @@ def build_automatic_delivery(ir, run_path, config, review_summary, ledger, upstr
             heading_stack.append((level, bid))
         else:
             dependencies[bid] = {h[1] for h in heading_stack}
+        navigation[bid] = set(dependencies[bid])
         record = records.get(bid, {})
         source_records = [pages.get(index, {}) for index in record.get("source_pages", [])]
         findings = [next((v for v in p.get("review", {}).get("blocks", []) if v["block_id"] == bid), {})
@@ -140,8 +141,14 @@ def build_automatic_delivery(ir, run_path, config, review_summary, ledger, upstr
                             "source_not_mapped" if not source_pages else "content_or_context_unverified")
     pictures = {b.block_id for b in ir.blocks if is_picture_content(b) and not rendered[b.block_id][1]}
     unverified_pictures = {bid for bid in pictures if reasons.get(bid) in _UNVERIFIED_PICTURE_REASONS} if valid else set()
-    # Dependants cannot survive missing required context, including chains. Navigation alone is not required.
-    retained = dependency_closed_subset(eligible | unverified_pictures, dependencies)
+    # Dependants cannot survive missing required context, including chains. Navigation alone is not required:
+    # a picture already shipping labelled unverified does not need its section heading verified (a 31-page
+    # PDF held back 29 of 46 pictures that way). Units, qualifiers and other recorded dependencies still bind it.
+    closure = {bid: deps - navigation.get(bid, set()) if bid in unverified_pictures
+               and not (set(records.get(bid, {}).get("depends_on_block_ids", []))
+                        | set(ir.get_block(bid).payload.get("agentic_depends_on_block_ids", []))) & navigation.get(bid, set())
+               else deps for bid, deps in dependencies.items()}
+    retained = dependency_closed_subset(eligible | unverified_pictures, closure)
     reasons.update({bid: "required_context_unverified" for bid in eligible - retained})
     unverified_pictures &= retained
     eligible &= retained
@@ -151,7 +158,7 @@ def build_automatic_delivery(ir, run_path, config, review_summary, ledger, upstr
     asset_records = {item.get("block_id"): item for item in read_jsonl(outputs / "assets_index.jsonl")}
     non_informative = {b.block_id for b in ir.blocks if b.block_id in retained
                        and b.payload.get("agentic_information_status") == "non_informative"}
-    rag_eligible = dependency_closed_subset(retained - non_informative, dependencies)
+    rag_eligible = dependency_closed_subset(retained - non_informative, closure)
     # The review binds source blocks to the delivered chunks. Re-grouping verified
     # blocks changes inter-block boundaries, so prove each owned block separately
     # rather than asking a fuzzy global matcher to certify the new concatenation.
@@ -159,7 +166,7 @@ def build_automatic_delivery(ir, run_path, config, review_summary, ledger, upstr
     absent = {bid for bid in rag_eligible
               if not evidence.covers(bid, scrub_transcribed_privacy(
                   renderer._blocks_to_text([ir.get_block(bid)])))}
-    rag_eligible = dependency_closed_subset(rag_eligible - absent, dependencies)
+    rag_eligible = dependency_closed_subset(rag_eligible - absent, closure)
     # Gaps delimit chunk groups: overlap may never bridge an excluded region.
     groups, current = [], []
     for block in ir.blocks:
@@ -182,7 +189,7 @@ def build_automatic_delivery(ir, run_path, config, review_summary, ledger, upstr
     if config.package.generate_chunks:
         for group in groups:
             # Supply only verified heading/dependency blocks; never borrow unreviewed metadata.
-            required = set().union(*(dependencies[b.block_id] for b in group))
+            required = set().union(*(closure[b.block_id] for b in group))
             selected = {b.block_id for b in group} | required
             subset = ir.model_copy(update={"blocks": [b for b in ir.blocks if b.block_id in selected]})
             generated = renderer._chunk_blocks(subset, "rag", config.package.chunk_max_tokens,
@@ -190,7 +197,7 @@ def build_automatic_delivery(ir, run_path, config, review_summary, ledger, upstr
             def closed_chunk(ids, heading_path):
                 included = set(ids)
                 while True:
-                    expanded = included | set().union(*(dependencies[bid] for bid in included))
+                    expanded = included | set().union(*(closure[bid] for bid in included))
                     if expanded == included:
                         break
                     included = expanded

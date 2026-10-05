@@ -1,8 +1,8 @@
 """When the review's own reading disagrees with the delivery, a different reader settles the lines.
 
-Lumio v20.1: the second model reading "corrected" the slide's 「Alphabet Samles」
-(the author's typo, faithfully drafted) to 「Samples」 and read 「把散落的日常」 as
-「日常生活」, failing correct drafts. PaddleOCR, which shares none of the vision
+Validation v20.1: the second model reading "corrected" the slide's 「Alphabet Samles」
+(the author's typo, faithfully drafted) to 「Samples」 and read 「把散落的片刻」 as
+「片刻時光」, failing correct drafts. PaddleOCR, which shares none of the vision
 model's habits, read both exactly as drafted. It is a third vote, not truth: a
 line it cannot settle stays unverified.
 """
@@ -19,12 +19,12 @@ from app.pipeline.line_adjudication import adjudicate
 from app.pipeline.review_sources import SourceInventory
 
 DELIVERED = ("右列為晴諾米拼圖視覺識別系統之主要英文字體。\nAlphabet Samles\nABCDEFGHIJKLMNOPQRSTUVWXYZ\n"
-             "把尋常的每一天，拼成更自在、更明亮的自己；把散落的日常，拼成你想要的生活。")
+             "把普通的午後，拼成更安靜、更自在的心情；把散落的片刻，拼成完整的週末。")
 
 
 def test_ocr_agreeing_with_the_delivery_overrules_the_second_reading():
-    verdicts = adjudicate(["Alphabet Samples", "把尋常的每一天，拼成更自在、更明亮的自己；把散落的日常生活，拼成你想要的生活。"],
-                          DELIVERED, ["Alphabet Samles", "把尋常的每一天，拼成更自在、更明亮的自己；把散落的日", "常，拼成你想要的生活。"])
+    verdicts = adjudicate(["Alphabet Samples", "把普通的午後，拼成更安靜、更自在的心情；把散落的片刻時光，拼成完整的週末。"],
+                          DELIVERED, ["Alphabet Samles", "把普通的午後，拼成更安靜、更自在的心情；把散落的片", "刻，拼成完整的週末。"])
 
     assert [v["verdict"] for v in verdicts] == ["delivery", "delivery"]
 

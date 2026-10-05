@@ -1,7 +1,7 @@
 """The figure prompt keeps neighbouring text out of the picture and lets unread text stay unread.
 
 v6 asked for "ALL text visible" with no way to say "unreadable", and appended
-the neighbouring paragraphs as "Context from document:". On the Lumio
+the neighbouring paragraphs as "Context from document:". On the Validation
 figures the model then wrote the cover's company and meeting names into a
 storefront photo's facts and filled unreadable slide text with invented
 recommendations. Replay of the same 26 figures (enlarged): context leaks in

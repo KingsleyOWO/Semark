@@ -44,7 +44,7 @@ from app.pipeline.semantic.normalizer import fields_to_dicts, normalize_fields
 VLM_MIN_IMAGE_SIDE = 32
 
 # Enlarging past this adds pixels without adding detail; 6x already takes a
-# 190x142 photo's sign from a fraction of a token to legible (Lumio replay).
+# 190x142 photo's sign from a fraction of a token to legible (Validation replay).
 FIGURE_MAX_UPSCALE = 6.0
 FIGURE_KINDS = frozenset({"figure_caption", "figure_description"})
 
@@ -381,7 +381,7 @@ REFERENCE TEXT FROM DOCUMENT:
     "figure_caption": {
         # v7: unreadable text is marked [?] instead of guessed, neighbouring text
         # is labelled as not-the-image, chart values keep their labels
-        # (Lumio replay 2026-10-01: context leaks 3 -> 1 of 26 figures).
+        # (Validation replay 2026-10-01: context leaks 3 -> 1 of 26 figures).
         "version": "v7",
         "system": """You are a document analyst. Analyze images including diagrams, charts, and organizational structures.
 Your task is to:

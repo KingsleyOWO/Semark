@@ -85,7 +85,7 @@ async def test_review_switched_off_certifies_nothing(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_text_on_a_picture_page_is_certified_when_the_picture_review_fails(tmp_path, monkeypatch):
-    # Lumio p25: one picture's reading hit two format errors, the page audit never
+    # Validation p25: one picture's reading hit two format errors, the page audit never
     # ran, and the page's 19 native paragraphs were left out of RAG with it.
     from PIL import Image
 

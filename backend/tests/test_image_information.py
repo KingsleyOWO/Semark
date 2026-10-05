@@ -70,7 +70,7 @@ async def local_candidate(tmp_path, model):
     common = {**runner.source_payload(0), 'agentic_image_origin': 'picture',
               'agentic_source_image': str(original.relative_to(runner.root)), 'agentic_content_kind': 'transcription'}
     candidate.blocks[-1:] = [
-        Block(block_id='sign', type=BlockType.TEXT, page_idx=0, payload={**common, 'text': '圖片文字：晴諾米拼圖工作坊',
+        Block(block_id='sign', type=BlockType.TEXT, page_idx=0, payload={**common, 'text': '圖片文字：晴諾米拼圖工作室',
                                   'agentic_image_region': [350, 150, 705, 240]}),
         Block(block_id='icon', type=BlockType.TEXT, page_idx=0, payload={**common, 'text': 'Wrong unreadable-text gap',
             'agentic_image_region': [100, 100, 300, 300], 'agentic_gap': {'reason': 'image_text_unresolved'}})]
@@ -88,7 +88,7 @@ async def test_local_graphic_revision_requires_new_actual_delivery_audit_and_pre
     assert [b.block_id for b in candidate.blocks[:-2]] == [b.block_id for b in ir.blocks[:-1]]
     for block in ir.blocks[:-1]:
         assert candidate.get_block(block.block_id).model_dump() == block.model_dump()
-    assert candidate.get_block('sign').get_text() == '圖片文字：晴諾米拼圖工作坊'
+    assert candidate.get_block('sign').get_text() == '圖片文字：晴諾米拼圖工作室'
     assert '黃色拼圖' in candidate.get_block('icon').get_text()
     assert not candidate.get_block('icon').payload.get('agentic_gap')
     assert all('Wrong unreadable' not in d['text'] for d in model.audits[-1]['delivered_documents'])

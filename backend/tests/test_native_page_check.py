@@ -1,6 +1,6 @@
 """Native-Word pages are checked against the Word-rendered PDF text layer, without a model.
 
-On the 47-page Lumio report the model audit spent 32 calls / 44 minutes on
+On the 47-page Validation report the model audit spent 32 calls / 44 minutes on
 pages holding only native Word text and tables, mostly to say 「與來源逐字一致」.
 The same conversion's text layer answers that by string comparison, and it is
 stricter: it caught an auto-numbered 「1、」, a text box and a name the zh-TW

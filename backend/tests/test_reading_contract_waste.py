@@ -1,6 +1,6 @@
 """Response-contract slips that are not source evidence must not burn a model call.
 
-Lumio v20: 19 of 113 review calls were thrown away for an echoed request
+Validation v20: 19 of 113 review calls were thrown away for an echoed request
 field, an over-long explanation, or a spatial relation without a side.
 """
 import pytest

@@ -342,7 +342,9 @@ class DocumentReview(AgenticRepair):
             except (ValueError, TimeoutError, OSError) as exc:
                 cache[key] = {"error": str(exc)[:200]}
             finally:
-                self.state["usage"]["seconds"] += time.monotonic() - started
+                elapsed = time.monotonic() - started
+                cache.setdefault(key, {})["seconds"] = round(elapsed, 2)
+                self.state["usage"]["seconds"] += elapsed
                 self._save()
         return cache[key].get("lines")
 

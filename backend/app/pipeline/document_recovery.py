@@ -298,18 +298,18 @@ class RecoveryController:
 
     def repair_method(self, block_id):
         """Which method repair_image will use next for this picture."""
-        from app.pipeline.image_recovery import relation_patch_attempted, relation_patch_statements
+        from app.pipeline.image_recovery import delivery_patch_attempted, delivery_patch_statements
         pages = getattr(getattr(self, "inventory", None), "mapping", {}).get(block_id) or []
-        if (len(pages) == 1 and relation_patch_statements(getattr(self.owner, "state", {}), pages[0], block_id)
-                and not relation_patch_attempted(getattr(self, "state", {}), block_id)):
-            return "relation_patch"
+        if (len(pages) == 1 and delivery_patch_statements(getattr(self.owner, "state", {}), pages[0], block_id)
+                and not delivery_patch_attempted(getattr(self, "state", {}), block_id)):
+            return "delivery_patch"
         return "full"
 
     def image_targets(self, ir, page):
         """Only existing images with unambiguous source ownership can be patched."""
         tried = {}
         for step in self.state["steps"]:
-            if (step["action"] == "repair_image" and step.get("method") != "relation_patch"
+            if (step["action"] == "repair_image" and step.get("method") != "delivery_patch"
                     and step.get("evidence_revision", "") == self.image_evidence_revision(step.get("page_idx"), step.get("block_id"))):
                 tried.setdefault(step.get("block_id"), []).append(step.get("model_role", "primary"))
         roles = {"primary", "review"} if self.alternate_available() else {"primary"}
@@ -400,13 +400,13 @@ class RecoveryController:
         layout_cached = bool(action == "inspect_layout" and self.layout_store.cached(page))
         if region_count is None:
             region_count = 3 if str(page) in self.state["layout_pages"] else 0
-        patch = action == "repair_image" and self.repair_method(problem.get("block_id")) == "relation_patch"
+        patch = action == "repair_image" and self.repair_method(problem.get("block_id")) == "delivery_patch"
         cost = tool_cost(self.owner.state, action, pictures=features["embedded_images"], layout=layout,
                          word_pictures=features["word_images"], image_read_calls=reads,
                          layout_cached=layout_cached, detail_regions=region_count, image_geometry=geometry,
-                         relation_patch=patch)
+                         delivery_patch=patch)
         if patch:
-            cost["method"] = "relation_patch: keep delivered text, add missing relationship sentences, then audit"
+            cost["method"] = "delivery_patch: keep delivered text, add the omitted relationships/lines, then audit"
         if geometry:
             cost["method"] = "source_axis_measurement_and_located_relationships"
         from app.pipeline.review_budget import call_seconds
@@ -641,8 +641,8 @@ class RecoveryController:
                             previous_protection[1] + reserve * call_seconds(self.owner.state, "audit_page"))
                         candidate, pages = await asyncio.wait_for(
                             operation(ir, problem, decision, folder, skill), max(0, deadline - time.monotonic()))
-                        if (folder / "relation-patch.json").is_file():
-                            step["method"] = "relation_patch"
+                        if (folder / "delivery-patch.json").is_file():
+                            step["method"] = "delivery_patch"
                         self.record_candidate(ir, candidate, pages, folder, decision.action)
                         if decision.action == "resolve_source":
                             await self.renderer(self.owner.config, candidate, folder, self.root, self.parse_cache)

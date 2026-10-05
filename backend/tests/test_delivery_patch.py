@@ -14,7 +14,7 @@ from PIL import Image
 from test_document_recovery import RecoveryModel, cfg, setup
 
 from app.models.document_ir import Block, BlockType
-from app.pipeline.image_recovery import relation_patch_statements
+from app.pipeline.image_recovery import delivery_patch_statements
 from app.pipeline.stages.chunk import ChunkStage
 from app.pipeline.stages.package import PackageStage
 
@@ -34,10 +34,19 @@ def _record(status="missing", kind="image_relationship_mismatch"):
             "image_issues": [{"block_id": "picture", "failure_kind": kind, "detail": "Image relationship r0 remains missing."}]}
 
 
-def test_only_a_picture_failing_on_omitted_relationships_gets_a_patch():
-    assert relation_patch_statements({"pages": {"0": _record()}}, 0, "picture") == ["圖片關係：" + FACT]
-    assert relation_patch_statements({"pages": {"0": _record(status="contradicted")}}, 0, "picture") == []
-    assert relation_patch_statements({"pages": {"0": _record(kind="reading_disagreement")}}, 0, "picture") == []
+def test_only_a_picture_failing_on_omitted_relationships_or_lines_gets_a_patch():
+    assert delivery_patch_statements({"pages": {"0": _record()}}, 0, "picture") == ["圖片關係：" + FACT]
+    assert delivery_patch_statements({"pages": {"0": _record(status="contradicted")}}, 0, "picture") == []
+    assert delivery_patch_statements({"pages": {"0": _record(kind="reading_disagreement")}}, 0, "picture") == []
+    # Lines the review's reading and PaddleOCR both see but the delivery lacks are added;
+    # a delivered line OCR contradicts is never rewritten by a patch.
+    omitted = {**_record(kind="reading_disagreement"), "line_adjudications": {"picture": [
+        {"reading_line": "值得信任的", "delivered_line": None, "verdict": "reading"},
+        {"reading_line": "Alphabet Samples", "delivered_line": "alphabetsamles", "verdict": "delivery"}]}}
+    assert delivery_patch_statements({"pages": {"0": omitted}}, 0, "picture") == ["圖片文字：值得信任的"]
+    misread = {**omitted, "line_adjudications": {"picture": [
+        {"reading_line": "PANTONE 1022C", "delivered_line": "pantone1222c", "verdict": "reading"}]}}
+    assert delivery_patch_statements({"pages": {"0": misread}}, 0, "picture") == []
 
 
 class PatchModel(RecoveryModel):
@@ -58,7 +67,7 @@ class PatchModel(RecoveryModel):
 
 
 @pytest.mark.asyncio
-async def test_a_relation_patch_keeps_the_delivery_and_adds_the_missing_sentence(tmp_path):
+async def test_a_delivery_patch_keeps_the_delivery_and_adds_the_missing_sentence(tmp_path):
     model = PatchModel()
     config = cfg(max_recovery_actions=1)
     config.agentic.max_seconds = 2000
@@ -95,7 +104,7 @@ async def test_a_relation_patch_keeps_the_delivery_and_adds_the_missing_sentence
     result = await runner.run(ir)
 
     step = runner.state["steps"][0]
-    assert (step["action"], step.get("method"), step["status"]) == ("repair_image", "relation_patch", "applied")
+    assert (step["action"], step.get("method"), step["status"]) == ("repair_image", "delivery_patch", "applied")
     kept = next(b for b in result.blocks if b.block_id.endswith("_image_k0"))
     added = next(b for b in result.blocks if b.block_id.endswith("_image_r0"))
     assert "商品提供 30cm、40cm、50cm 三種尺寸。" in kept.payload["text"]
@@ -116,9 +125,9 @@ def test_after_a_patch_the_next_attempt_is_a_full_repair_not_the_patch_again(tmp
     runner.evidence = EvidenceStore(tmp_path, "source")
     runner.state = {"steps": []}
     decision = RecoveryDecision(action="repair_image", block_id="picture", reason="Repair picture")
-    assert runner.repair_method("picture") == "relation_patch"
+    assert runner.repair_method("picture") == "delivery_patch"
 
-    patch = {"action": "repair_image", "model_role": "primary", "block_id": "picture", "method": "relation_patch"}
+    patch = {"action": "repair_image", "model_role": "primary", "block_id": "picture", "method": "delivery_patch"}
     runner.state["steps"].append(patch)
     assert runner.repair_method("picture") == "full"
     assert runner.select_strategy(decision, [patch], ["repair_image", "defer"]).action == "repair_image"

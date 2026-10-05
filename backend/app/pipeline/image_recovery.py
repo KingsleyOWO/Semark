@@ -36,9 +36,9 @@ async def repair_image(runner, ir, problem, decision, folder, skill):
     if source != original:
         shutil.copy2(original, source)
     prior = runner.owner.state.get("pages", {}).get(str(page), {}).get("word_image_readings", {}).get(block.block_id, {})
-    if (statements := relation_patch_statements(runner.owner.state, page, block.block_id)) \
-            and not relation_patch_attempted(runner.state, block.block_id):
-        return build_relation_patch_candidate(runner, ir, block, page, region, source, statements, folder), [page]
+    if (statements := delivery_patch_statements(runner.owner.state, page, block.block_id)) \
+            and not delivery_patch_attempted(runner.state, block.block_id):
+        return build_delivery_patch_candidate(runner, ir, block, page, region, source, statements, folder), [page]
     from app.pipeline.image_geometry import geometry_eligible, measured_axes, repair_axis_image
     if geometry_eligible(prior) and (axes := measured_axes(source)):
         return await repair_axis_image(runner, ir, block, page, region, source, folder, prior, axes,
@@ -59,12 +59,15 @@ async def repair_image(runner, ir, problem, decision, folder, skill):
     return build_image_parts_candidate(runner, ir, block, page, region, source, parts, evidence_ids, folder), [page]
 
 
-def relation_patch_statements(state, page, block_id):
-    """Statements for relations the audit saw in the source but not in the delivery, when that is all that failed.
+def delivery_patch_statements(state, page, block_id):
+    """What a picture's delivery omits, when omission is all that failed; otherwise nothing.
 
-    A picture whose text and drafted meaning are right but whose delivery never
-    states, say, which size option is selected needs that sentence, not a fresh
-    reading of every pixel.
+    Two kinds of omission, each seen by two looks at the source: a relationship
+    the blind reading listed and the audit found missing from the delivery, and a
+    transcription line the review's reading and PaddleOCR both read but the
+    delivery lacks. A picture whose text and meaning are right needs those
+    sentences, not a fresh reading of every pixel. A delivered line OCR
+    contradicts is never rewritten here.
     """
     from app.pipeline.image_source_review import WordPictureItem
     from app.pipeline.zh_text import to_taiwan_traditional
@@ -73,26 +76,39 @@ def relation_patch_statements(state, page, block_id):
     raw = record.get("word_image_readings", {}).get(block_id)
     finding = next((b for b in record.get("review", {}).get("blocks", []) if b["block_id"] == block_id), None)
     issues = [i for i in record.get("image_issues", []) if i["block_id"] == block_id]
-    if not raw or not finding or not issues or any(i["failure_kind"] != "image_relationship_mismatch" for i in issues):
+    kinds = {i["failure_kind"] for i in issues}
+    if not raw or not finding or not kinds or not kinds <= {"image_relationship_mismatch", "reading_disagreement"}:
         return []
     reading = WordPictureItem.model_validate(raw)
-    relations = {r.relation_id: r for r in reading.relationships}
-    checks = [c for c in finding.get("image_relationship_checks", []) if c["relation_id"] in relations]
-    missing = [c for c in checks if c["status"] == "missing"]
-    if (not reading.complete or not reading.relationships_complete or not missing
-            or any(c["status"] not in {"matched", "missing"} for c in checks)
-            or any(not relations[c["relation_id"]].certain for c in missing)):
+    if not reading.complete:
         return []
-    return ["圖片關係：" + to_taiwan_traditional(relations[c["relation_id"]].source_fact) for c in missing]
+    statements = []
+    if "image_relationship_mismatch" in kinds:
+        relations = {r.relation_id: r for r in reading.relationships}
+        checks = [c for c in finding.get("image_relationship_checks", []) if c["relation_id"] in relations]
+        missing = [c for c in checks if c["status"] == "missing"]
+        if (not reading.relationships_complete or not missing
+                or any(c["status"] not in {"matched", "missing"} for c in checks)
+                or any(not relations[c["relation_id"]].certain for c in missing)):
+            return []
+        statements += ["圖片關係：" + to_taiwan_traditional(relations[c["relation_id"]].source_fact) for c in missing]
+    if "reading_disagreement" in kinds:
+        verdicts = record.get("line_adjudications", {}).get(block_id) or []
+        omitted = [v for v in verdicts if v["verdict"] == "reading" and not v["delivered_line"]]
+        if not omitted or any(v["verdict"] == "unresolved" or v["verdict"] == "reading" and v["delivered_line"]
+                              for v in verdicts):
+            return []
+        statements += ["圖片文字：" + to_taiwan_traditional(v["reading_line"]) for v in omitted]
+    return statements
 
 
-def relation_patch_attempted(recovery_state, block_id):
+def delivery_patch_attempted(recovery_state, block_id):
     return any(s.get("action") == "repair_image" and s.get("block_id") == block_id
-               and s.get("method") == "relation_patch" for s in recovery_state.get("steps", []))
+               and s.get("method") == "delivery_patch" for s in recovery_state.get("steps", []))
 
 
-def build_relation_patch_candidate(runner, ir, block, page, region, source, statements, folder):
-    """Keep the picture's delivered text verbatim and add the missing relationship sentences.
+def build_delivery_patch_candidate(runner, ir, block, page, region, source, statements, folder):
+    """Keep the picture's delivered text verbatim and add what it omits.
 
     The same per-image and page audits decide; a rejected patch leaves the
     original delivery untouched (no pruning to gaps), and the next attempt is a
@@ -106,14 +122,14 @@ def build_relation_patch_candidate(runner, ir, block, page, region, source, stat
     # Only the picture's real delivered text is kept; a "[Image]" placeholder would replace content.
     delivered = renderer._asset_text.get(block.block_id, "").strip()
     if not delivered:
-        raise ValueError("relation_patch_requires_delivered_picture_text")
+        raise ValueError("delivery_patch_requires_delivered_picture_text")
     prior = WordPictureItem.model_validate(runner.owner.state["pages"][str(page)]["word_image_readings"][block.block_id])
     relationship_evidence = runner.evidence.add(
         provider="blind_word_image_reading", kind="image_relationship_reading", page=page, block_id=block.block_id,
         source=source, content=prior.model_dump())
     common = {**runner.source_payload(page), "agentic_source_region": region,
               "agentic_source_image": str(source.relative_to(runner.root)),
-              "agentic_recovery_tool": "repair_image", "agentic_image_repair_method": "relation_patch",
+              "agentic_recovery_tool": "repair_image", "agentic_image_repair_method": "delivery_patch",
               "agentic_image_origin": block.block_id, "image_source_context": block.payload.get("word_source", {}),
               "agentic_evidence_ids": [relationship_evidence], "agentic_relationship_evidence_id": relationship_evidence,
               "agentic_content_kind": "visual_summary"}
@@ -128,7 +144,7 @@ def build_relation_patch_candidate(runner, ir, block, page, region, source, stat
     candidate.blocks[index:index + 1] = replacements
     for order, item in enumerate(candidate.blocks):
         item.reading_order = order
-    atomic_write_json(folder / "relation-patch.json", {"source_block_id": block.block_id, "statements": statements,
+    atomic_write_json(folder / "delivery-patch.json", {"source_block_id": block.block_id, "statements": statements,
                                                        "kept_delivered_text": delivered}, ensure_ascii=False, indent=2)
     return candidate
 
@@ -291,7 +307,7 @@ async def validate_image_parts(runner, candidate, pages, folder, origin, *, allo
     for block in selected:
         replace_image_review_dependencies(block, findings[block.block_id])
     accepted = image_review_accepted(selected, findings, review)
-    if any(b.payload.get("agentic_image_repair_method") in {"axis_geometry", "relation_patch"} for b in selected):
+    if any(b.payload.get("agentic_image_repair_method") in {"axis_geometry", "delivery_patch"} for b in selected):
         # One measured proposal / one verbatim patch: no fallback to guessing or pruning content into gaps.
         return accepted
     if accepted and not any(b.payload.get("agentic_gap") for b in selected):

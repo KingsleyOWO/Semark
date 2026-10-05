@@ -21,15 +21,16 @@ def _folded(text):
 
 
 def _counterpart(line, delivered):
+    """(as delivered, folded) of the delivered line this reading line stands for, or (None, None)."""
     target = _folded(line)
-    best, score = None, 0.0
+    best, score = (None, None), 0.0
     for candidate in delivered.splitlines():
         folded = _folded(candidate)
         if folded:
             ratio = difflib.SequenceMatcher(None, target, folded, autojunk=False).ratio()
             if ratio > score:
-                best, score = folded, ratio
-    return best if score >= MIN_SIMILARITY else None
+                best, score = (candidate.strip(), folded), ratio
+    return best if score >= MIN_SIMILARITY else (None, None)
 
 
 def _snippets(reading, delivered):
@@ -47,28 +48,33 @@ def _ocr_window(text, ocr_lines):
     vote on 「Alphabet Samles」.
     """
     folded = [_folded(line) for line in ocr_lines]
-    best, score = "", 0.0
+    best, score = ("", ""), 0.0
     for start in range(len(folded)):
         for end in range(start + 1, min(start + 3, len(folded)) + 1):
             window = "".join(folded[start:end])
             ratio = difflib.SequenceMatcher(None, text, window, autojunk=False).ratio()
             if ratio > score:
-                best, score = window, ratio
-    return best if score >= MIN_SIMILARITY else ""
+                best, score = ("\n".join(ocr_lines[start:end]), window), ratio
+    return best if score >= MIN_SIMILARITY else ("", "")
 
 
 def adjudicate(disputed, delivered, ocr_lines):
-    """Verdict per disputed reading line: delivery (OCR backs the delivery), reading, or unresolved."""
+    """Verdict per disputed reading line: delivery (OCR backs the delivery), reading, or unresolved.
+
+    Each verdict carries the delivered line and the OCR lines it was judged on,
+    as read, so an auditor can see the evidence rather than a bare vote.
+    """
     verdicts = []
     for line in disputed:
         reading = _folded(line)
-        counterpart = _counterpart(line, delivered)
+        delivered_line, counterpart = _counterpart(line, delivered)
         verdict = "unresolved"
         if counterpart is None:
-            if len(reading) >= MIN_EVIDENCE and reading in _ocr_window(reading, ocr_lines):
+            ocr_reads, ocr = _ocr_window(reading, ocr_lines)
+            if len(reading) >= MIN_EVIDENCE and reading in ocr:
                 verdict = "reading"
         else:
-            ocr = _ocr_window(counterpart, ocr_lines)
+            ocr_reads, ocr = _ocr_window(counterpart, ocr_lines)
             votes = set()
             for ours, theirs in _snippets(reading, counterpart):
                 backs_delivery = len(ours) >= MIN_EVIDENCE and ours in ocr
@@ -77,5 +83,6 @@ def adjudicate(disputed, delivered, ocr_lines):
                           "reading" if backs_reading and not backs_delivery else "unresolved")
             verdict = ("reading" if "reading" in votes else
                        "delivery" if votes == {"delivery"} else "unresolved")
-        verdicts.append({"reading_line": line, "delivered_line": counterpart, "verdict": verdict})
+        verdicts.append({"reading_line": line, "delivered_line": delivered_line, "ocr_reads": ocr_reads,
+                         "verdict": verdict})
     return verdicts

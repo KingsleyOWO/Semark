@@ -29,7 +29,13 @@ from app.pipeline.review_sources import (
 )
 
 NATIVE_TEXT_PROOF = "Word-rendered PDF text layer for physical page {}"
-REVIEW_VERSION = "document-review-20261005.1-relationship-accounting"
+OCR_VOTE_POLICY = (
+    "independent_ocr_votes: PaddleOCR, a text-recognition engine sharing nothing with you or the blind reader, "
+    "read the original picture wherever the blind reading and the delivery disagree. verdict=delivery means OCR "
+    "reads what the delivery says; ocr_reads is what it read. Source lettering is delivered as printed, including "
+    "the author's typos and variant spellings: never 'correct' it, and do not fail a block for a spelling OCR "
+    "confirms. OCR is evidence, not certification: still check every other part of the picture against the pixels.")
+REVIEW_VERSION = "document-review-20261005.2-ocr-votes-before-audit"
 SCHEDULER_VERSION = "tool-scheduler-20260930.1-complete-tool-budget"
 
 
@@ -340,6 +346,33 @@ class DocumentReview(AgenticRepair):
                 self._save()
         return cache[key].get("lines")
 
+    async def _ocr_votes(self, blocks, readings, inventory, record):
+        """PaddleOCR votes on each picture line the blind reading cannot find in the delivery.
+
+        Only pictures whose readings disagree with their delivery wait for OCR.
+        """
+        from app.adapters import ocr
+        from app.pipeline.content_coverage import normalized_text
+        from app.pipeline.image_source_review import appears_in
+        from app.pipeline.line_adjudication import adjudicate
+
+        if not ocr.ocr_python():
+            return {}
+        votes = {}
+        for block in blocks:
+            reading = readings.get(block.block_id)
+            source = getattr(inventory, "word_images", {}).get(block.block_id)
+            if not reading or source is None or not reading.complete or reading.kind != "transcription":
+                continue
+            delivered = self._delivery_cache[0]._block_to_text(block)
+            disputed = [line for line in reading.text.splitlines()
+                        if normalized_text(line) and not appears_in(line, delivered)]
+            if disputed and (lines := await self._ocr_lines(source, inventory)):
+                votes[block.block_id] = adjudicate(disputed, delivered, lines)
+        if votes:
+            record.setdefault("line_adjudications", {}).update(votes)
+        return votes
+
     async def _settle_with_ocr(self, block_id, reading, delivered, inventory, run_path, record):
         """Let PaddleOCR vote on the lines the review's own reading disagrees with the delivery on.
 
@@ -574,6 +607,12 @@ class DocumentReview(AgenticRepair):
                              or b.payload.get("agentic_image_origin") == origin]
                     for origin in readings}
                 payload["image_relationship_policy"] = RELATION_AUDIT_INSTRUCTIONS
+                votes = await self._ocr_votes(blocks, readings, inventory, record)
+                if votes:
+                    # The audit model shares the drafting model's weights and its habit of
+                    # "correcting" printed typos; it judges with OCR's reading in hand.
+                    payload["independent_ocr_votes"] = votes
+                    payload["ocr_vote_policy"] = OCR_VOTE_POLICY
                 if len(str(payload)) > 65000:
                     self._record(record, "not_reviewed", "page_exceeds_image_relationship_context_limit")
                     return record

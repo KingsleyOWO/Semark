@@ -9,7 +9,6 @@ from test_document_recovery import RecoveryModel, setup
 
 from app.pipeline.image_reading import ImageParts, ImageText, read_contract
 from app.pipeline.image_source_review import (
-    ImageSourceRelation,
     WordPictureItem,
     relationship_issue,
 )
@@ -66,18 +65,24 @@ def test_an_over_long_explanation_is_shortened_but_content_never_is():
         ImageText.model_validate({'region_id': 'r', 'bbox': [0, 0, 1000, 1000], 'readable': True, 'text': '字' * 1601})
 
 
-def test_a_position_without_a_side_is_kept_as_uncertain_and_never_certifies():
-    relation = ImageSourceRelation.model_validate(
-        {'relation_id': 'r0', 'kind': 'spatial_position', 'source_fact': 'The logo sits above the brand name.',
-         'bbox': [0, 0, 1000, 500], 'certain': True})
-
-    assert (relation.horizontal, relation.vertical, relation.certain) == ('uncertain', 'uncertain', False)
+def test_a_position_without_a_side_does_not_reject_the_reading_nor_certify_a_chart():
+    # The sideless position is kept instead of failing the whole reading; on a chart
+    # with axes it stays uncertain (descriptions elsewhere: test_image_review_false_failures).
     reading = WordPictureItem.model_validate(
-        {'source_id': 'image0', 'text': 'LUMIO', 'complete': True, 'observation': 'Logo.', 'image_type': 'logo',
-         'relationships': [relation.model_dump()], 'relationships_complete': True})
+        {'source_id': 'image0', 'text': 'LUMIO', 'complete': True, 'observation': 'Map.', 'image_type': 'diagram',
+         'relationships': [
+             {'relation_id': 'r0', 'kind': 'axis_mapping', 'source_fact': 'Horizontal axis: simple to bold.',
+              'bbox': [0, 400, 1000, 600], 'certain': True},
+             {'relation_id': 'r1', 'kind': 'spatial_position', 'source_fact': 'LUMIO sits near the axis.',
+              'bbox': [0, 0, 1000, 500], 'certain': True}],
+         'relationships_complete': True})
+
+    relation = reading.relationships[1]
+    assert (relation.horizontal, relation.vertical, relation.certain) == ('uncertain', 'uncertain', False)
 
     class Finding:
         block_id = 'b0'
-        image_relationship_checks = [type('Check', (), {'relation_id': 'r0', 'status': 'matched',
-                                                         'delivered_quote': 'LUMIO'})()]
+        image_relationship_checks = [type('Check', (), {'relation_id': rid, 'status': 'matched', 'delivered_quote': 'LUMIO',
+                                                         'direction': 'none', 'horizontal': 'unspecified',
+                                                         'vertical': 'unspecified'})() for rid in ('r0', 'r1')]
     assert 'uncertain' in relationship_issue(reading, Finding(), 'LUMIO')

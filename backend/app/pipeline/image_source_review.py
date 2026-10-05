@@ -37,9 +37,6 @@ class ImageSourceRelation(Contract):
             raise ValueError('Source relationship bbox must be a nonempty original-image 0..1000 rectangle')
         if self.kind == 'arrow' and self.direction == 'none':
             raise ValueError('Arrows require a direction, or explicit uncertain direction')
-        if self.kind == 'spatial_position' and self.horizontal == self.vertical == 'unspecified':
-            # A position with no stated side is kept as an uncertain relation, which can never certify.
-            self.horizontal, self.vertical, self.certain = 'uncertain', 'uncertain', False
         if self.certain and 'uncertain' in (self.direction, self.horizontal, self.vertical):
             raise ValueError('An uncertain direction/position cannot be certain')
         return self
@@ -49,6 +46,23 @@ class WordPictureItem(NativeItem):
     image_type: Literal['photo', 'logo', 'chart', 'table', 'diagram', 'document', 'other']
     relationships: list[ImageSourceRelation] = Field(max_length=16)
     relationships_complete: bool
+
+    @model_validator(mode='after')
+    def sideless_positions(self):
+        """A side is only meaningful against stated axes.
+
+        On a chart with axes, a position given without a side stays uncertain and
+        can never certify; on a photo or slide it is a description ("people around
+        a long table") and is checked like any other stated relationship.
+        """
+        axes = any(r.kind == 'axis_mapping' for r in self.relationships)
+        for relation in self.relationships:
+            if relation.kind == 'spatial_position' and relation.horizontal == relation.vertical == 'unspecified':
+                if axes:
+                    relation.horizontal, relation.vertical, relation.certain = 'uncertain', 'uncertain', False
+                else:
+                    relation.kind = 'other'
+        return self
 
     @model_validator(mode='after')
     def unique_relationships(self):
@@ -137,6 +151,37 @@ def appears_in(piece, text):
             or normalized_text(to_taiwan_traditional(piece)) in normalized_text(to_taiwan_traditional(text)))
 
 
+QUOTE_LINE_GAP = 120  # normalized characters a quote may skip between the delivered lines it cites
+
+
+def quote_found(quote, text):
+    """Each cited line verbatim and in order, skipping at most a line or two between them.
+
+    Lines far apart are not one relationship: a label and an unrelated number
+    later on must not pass as a value pair.
+    """
+    if appears_in(quote, text):
+        return True
+    lines = [line for line in quote.splitlines() if normalized_text(line)]
+    if not lines:
+        return False
+    for convert in (str, to_taiwan_traditional):
+        target = normalized_text(convert(text))
+        pieces = [normalized_text(convert(line)) for line in lines]
+        start = target.find(pieces[0])
+        while start >= 0:  # the first cited line may also occur earlier, e.g. in a title
+            position = start + len(pieces[0])
+            for piece in pieces[1:]:
+                found = target.find(piece, position)
+                if found < 0 or found - position > QUOTE_LINE_GAP:
+                    break
+                position = found + len(piece)
+            else:
+                return True
+            start = target.find(pieces[0], start + 1)
+    return False
+
+
 def relationship_issue(reading, finding, delivered, *, documents=None, chunks=None):
     """Cannot certify absent coverage, unsupported quotations or opposite relations.
 
@@ -147,22 +192,22 @@ def relationship_issue(reading, finding, delivered, *, documents=None, chunks=No
     if not reading.relationships_complete:
         return 'Independent image relationships are incomplete; labels alone cannot verify visual meaning.'
     relations = {r.relation_id: r for r in reading.relationships}
-    checks = finding.image_relationship_checks
+    # A check for a relation the reading never listed certifies nothing, so it is dropped.
+    checks = [c for c in finding.image_relationship_checks if c.relation_id in relations]
     ids = [c.relation_id for c in checks]
     if len(ids) != len(set(ids)) or set(ids) != set(relations):
-        return 'Image relationship audit omitted, duplicated or invented source relation IDs.'
+        return 'Image relationship audit omitted or duplicated source relation IDs.'
     for check in checks:
         relation = relations[check.relation_id]
         if not relation.certain or check.status != 'matched':
             return f'Image relationship {check.relation_id} remains {check.status if relation.certain else "uncertain"}: {relation.source_fact}'
         quote = check.delivered_quote
-        if not normalized_text(quote) or not appears_in(quote, delivered):
+        if not normalized_text(quote) or not quote_found(quote, delivered):
             return f'Image relationship {check.relation_id} has no grounded quote in its own delivered content.'
         for label, excerpts in [('documents', documents), ('chunks', chunks)]:
-            if excerpts is not None and not any(
-                    finding.block_id in e.get('block_ids', [e.get('block_id')])
-                    and appears_in(quote, e.get('text', e.get('content', '')))
-                    for e in excerpts):
+            owned = [e.get('text', e.get('content', '')) for e in excerpts or []
+                     if finding.block_id in e.get('block_ids', [e.get('block_id')])]
+            if excerpts is not None and not quote_found(quote, '\n'.join(owned)):
                 return f'Image relationship {check.relation_id} has no owned quote in actual {label}.'
         if relation.kind == 'arrow' and check.direction != relation.direction:
             return f'Image relationship {check.relation_id} direction differs between source and delivery.'
@@ -205,8 +250,9 @@ def relationship_group_issues(reading, findings, delivered, *, documents, chunks
     Each check's quotation still belongs to the child claiming it. Renaming the
     old image to text blocks cannot make a missing/opposite relationship pass.
     """
-    checks = [(finding, check) for finding in findings for check in finding.image_relationship_checks]
     expected = {r.relation_id: r for r in reading.relationships}
+    checks = [(finding, check) for finding in findings for check in finding.image_relationship_checks
+              if check.relation_id in expected]
     ids = [check.relation_id for _, check in checks]
     if not reading.relationships_complete or len(ids) != len(set(ids)) or set(ids) != set(expected):
         detail = 'Split image relationship coverage is incomplete, duplicated or has unknown IDs.'

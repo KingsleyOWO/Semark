@@ -208,3 +208,11 @@ async def test_the_blind_reading_states_relationships_in_the_document_language(t
 
     assert seen["relationship_language"] == "zh-TW"
     assert "relationship_language" in seen["source_relation_contract"]
+
+
+def test_a_look_alike_ocr_cannot_find_is_a_misread_not_a_separate_line():
+    # The real wall prints 「值得信任的」 over 「態度 ★2」; the delivery merged them into
+    # 「值得信賴的態度★2」, which OCR never reads. That is a misread, not an omitted line.
+    verdict = adjudicate(["值得信任的"], "值得信賴的態度★2\n創造", ["值得信任的", "態度 ★2", "值得信任的"])[0]
+
+    assert verdict["delivered_line"] == "值得信賴的態度★2" and verdict["verdict"] != "delivery"

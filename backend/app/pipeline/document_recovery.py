@@ -267,18 +267,21 @@ class RecoveryController:
 
     def select_strategy(self, decision, recent, allowed):
         # Layout changes do not earn another attempt at the same failed method.
-        def strategy(action, role, regions, block):
+        def strategy(action, role, regions, block, method=None):
             return (action, role, bool(regions) if action != "repair_image" else False,
-                    block if action == "repair_image" else None)
-        attempted = {strategy(s["action"], s.get("model_role", "primary"), s.get("region_ids"), s.get("block_id"))
+                    block if action == "repair_image" else None, method if action == "repair_image" else None)
+        attempted = {strategy(s["action"], s.get("model_role", "primary"), s.get("region_ids"), s.get("block_id"),
+                              s.get("method", "full"))
                      for s in recent if s["action"] != "repair_image" or s.get("evidence_revision", "") == self.image_evidence_revision(s.get("page_idx"), s.get("block_id"))}
+        method = self.repair_method(decision.block_id) if decision.action == "repair_image" else None
         if decision.model_role == "review" and not self.alternate_available():
             decision.model_role = "primary"
         if decision.action not in {"read_source", "read_regions", "repair_image"}:
             decision.model_role = "primary"
         if decision.action == "defer" or decision.action == "ocr_image" and decision.action in allowed:
             return decision
-        if decision.action in allowed and strategy(decision.action, decision.model_role, decision.region_ids, decision.block_id) not in attempted:
+        if decision.action in allowed and strategy(decision.action, decision.model_role, decision.region_ids,
+                                                   decision.block_id, method) not in attempted:
             return decision
         strategies = [("read_source", "primary"), ("reparse_pdf", "primary"), ("read_regions", "primary")]
         if self.alternate_available():
@@ -288,16 +291,26 @@ class RecoveryController:
         for action, role in strategies:
             if action == "repair_image" and not decision.block_id:
                 continue
-            if action in allowed and strategy(action, role, [], decision.block_id) not in attempted:
+            if action in allowed and strategy(action, role, [], decision.block_id, method) not in attempted:
                 return decision.model_copy(update={"action": action, "model_role": role, "region_ids": [],
                     "reason": "Escalated to a different method after the proposed strategy was already attempted."})
         return decision.model_copy(update={"action": "defer", "region_ids": [], "reason": "No untried permitted method remains."})
+
+    def repair_method(self, block_id):
+        """Which method repair_image will use next for this picture."""
+        from app.pipeline.image_recovery import relation_patch_attempted, relation_patch_statements
+        pages = getattr(getattr(self, "inventory", None), "mapping", {}).get(block_id) or []
+        if (len(pages) == 1 and relation_patch_statements(getattr(self.owner, "state", {}), pages[0], block_id)
+                and not relation_patch_attempted(getattr(self, "state", {}), block_id)):
+            return "relation_patch"
+        return "full"
 
     def image_targets(self, ir, page):
         """Only existing images with unambiguous source ownership can be patched."""
         tried = {}
         for step in self.state["steps"]:
-            if step["action"] == "repair_image" and step.get("evidence_revision", "") == self.image_evidence_revision(step.get("page_idx"), step.get("block_id")):
+            if (step["action"] == "repair_image" and step.get("method") != "relation_patch"
+                    and step.get("evidence_revision", "") == self.image_evidence_revision(step.get("page_idx"), step.get("block_id"))):
                 tried.setdefault(step.get("block_id"), []).append(step.get("model_role", "primary"))
         roles = {"primary", "review"} if self.alternate_available() else {"primary"}
         return [b for b in self.inventory.blocks(page, ir)
@@ -387,9 +400,13 @@ class RecoveryController:
         layout_cached = bool(action == "inspect_layout" and self.layout_store.cached(page))
         if region_count is None:
             region_count = 3 if str(page) in self.state["layout_pages"] else 0
+        patch = action == "repair_image" and self.repair_method(problem.get("block_id")) == "relation_patch"
         cost = tool_cost(self.owner.state, action, pictures=features["embedded_images"], layout=layout,
                          word_pictures=features["word_images"], image_read_calls=reads,
-                         layout_cached=layout_cached, detail_regions=region_count, image_geometry=geometry)
+                         layout_cached=layout_cached, detail_regions=region_count, image_geometry=geometry,
+                         relation_patch=patch)
+        if patch:
+            cost["method"] = "relation_patch: keep delivered text, add missing relationship sentences, then audit"
         if geometry:
             cost["method"] = "source_axis_measurement_and_located_relationships"
         from app.pipeline.review_budget import call_seconds
@@ -624,6 +641,8 @@ class RecoveryController:
                             previous_protection[1] + reserve * call_seconds(self.owner.state, "audit_page"))
                         candidate, pages = await asyncio.wait_for(
                             operation(ir, problem, decision, folder, skill), max(0, deadline - time.monotonic()))
+                        if (folder / "relation-patch.json").is_file():
+                            step["method"] = "relation_patch"
                         self.record_candidate(ir, candidate, pages, folder, decision.action)
                         if decision.action == "resolve_source":
                             await self.renderer(self.owner.config, candidate, folder, self.root, self.parse_cache)

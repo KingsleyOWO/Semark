@@ -298,6 +298,71 @@ class DocumentReview(AgenticRepair):
         return {page: self.build_page_review_input(page, ir, inventory, run_path)["scoped_fingerprint"]
                 for page in (inventory.pages if pages is None else pages)}
 
+    async def _ocr_lines(self, source, inventory):
+        """PaddleOCR lines of one original picture, cached per picture and OCR runtime; None if unreadable.
+
+        Local OCR spends no model call, but its time counts against the review's limit.
+        """
+        from PIL import Image
+
+        from app.adapters import ocr
+
+        sha = hashlib.sha256(source.read_bytes()).hexdigest()
+        key = digest([sha, ocr.ocr_runtime_identity()])
+        cache = self.state.setdefault("ocr_lines", {})
+        if key not in cache:
+            remaining = self._remaining()
+            if remaining < 60:
+                return None
+            started = time.monotonic()
+            try:
+                with Image.open(source) as image:
+                    scale = 2 if image.width * image.height < 1_500_000 else 1
+                value = await ocr.read_ocr(source, [0, 0, 1000, 1000], scale, inventory.directory / "ocr" / sha[:16],
+                                           timeout=min(90, remaining))
+                cache[key] = {"lines": [line.get("text", "") for line in value.get("lines", [])]}
+            except (ValueError, TimeoutError, OSError) as exc:
+                cache[key] = {"error": str(exc)[:200]}
+            finally:
+                self.state["usage"]["seconds"] += time.monotonic() - started
+                self._save()
+        return cache[key].get("lines")
+
+    async def _settle_with_ocr(self, block_id, reading, delivered, inventory, run_path, record):
+        """Let PaddleOCR vote on the lines the review's own reading disagrees with the delivery on.
+
+        True only when OCR backs the delivery on every disputed line; the votes are
+        kept as hashed evidence. Anything else leaves the picture unverified.
+        """
+        from app.adapters import ocr
+        from app.pipeline.content_coverage import normalized_text
+        from app.pipeline.image_source_review import appears_in
+        from app.pipeline.line_adjudication import adjudicate
+
+        source = getattr(inventory, "word_images", {}).get(block_id)
+        disputed = [line for line in reading.text.splitlines() if normalized_text(line) and not appears_in(line, delivered)]
+        if source is None or not disputed or not ocr.ocr_python():
+            return False
+        lines = await self._ocr_lines(source, inventory)
+        if not lines:
+            return False
+        verdicts = adjudicate(disputed, delivered, lines)
+        record.setdefault("line_adjudications", {})[block_id] = verdicts
+        if any(v["verdict"] != "delivery" for v in verdicts):
+            return False
+        content = json.dumps({"method": "paddleocr_line_adjudication", "block_id": block_id,
+                              "image_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+                              "ocr_runtime": ocr.ocr_runtime_identity(), "ocr_lines": lines,
+                              "adjudications": verdicts}, ensure_ascii=False, indent=2).encode()
+        sha = hashlib.sha256(content).hexdigest()
+        proof = inventory.directory / f"ocr-adjudication-{block_id}-{sha[:16]}.json"
+        if not proof.is_file():
+            proof.write_bytes(content)
+        label = f"PaddleOCR line adjudication for {block_id}"
+        record["images"] = [i for i in record["images"] if i.get("label") != label] + [
+            {"path": str(proof.relative_to(run_path)), "sha256": sha, "label": label}]
+        return True
+
     def _native_text_evidence(self, inventory):
         from app.pipeline.native_page_check import NativePageText
 
@@ -524,7 +589,11 @@ class DocumentReview(AgenticRepair):
                     relation_issue = relationship_issue(reading, finding, delivered,
                         documents=payload["delivered_documents"], chunks=payload["delivered_chunks"]
                         if payload["chunks_required"] else None)
-                    if issue := relation_issue or word_picture_issue(reading, delivered):
+                    issue = relation_issue or word_picture_issue(reading, delivered)
+                    if (issue and not relation_issue and reading.complete and reading.kind == "transcription"
+                            and await self._settle_with_ocr(block.block_id, reading, delivered, inventory, run_path, record)):
+                        issue = ""
+                    if issue:
                         finding.status = "needs_review"
                         finding.context_complete = False
                         finding.observation = issue[:700]

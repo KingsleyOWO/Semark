@@ -24,5 +24,6 @@ def test_a_bare_number_line_in_prose_is_still_removed():
     assert "一、計畫摘要\n7" not in body and "一、計畫摘要" in body
 
 
-def test_recovery_may_take_twelve_actions_by_default():
-    assert AgenticConfig().max_recovery_actions == 12
+def test_recovery_takes_at_most_six_actions_by_default():
+    # 12 actions cost ~30 more minutes and verified nothing more (2026-10-05 runs).
+    assert AgenticConfig().max_recovery_actions == 6

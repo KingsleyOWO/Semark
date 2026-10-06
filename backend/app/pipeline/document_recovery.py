@@ -274,9 +274,11 @@ class RecoveryController:
         def strategy(action, role, regions, block, method=None):
             return (action, role, bool(regions) if action != "repair_image" else False,
                     block if action == "repair_image" else None, method if action == "repair_image" else None)
+        # Each attempt is a different method: new OCR evidence does not reopen a failed full repair
+        # (rerun after an OCR observation it failed the same way every time in validation).
         attempted = {strategy(s["action"], s.get("model_role", "primary"), s.get("region_ids"), s.get("block_id"),
                               s.get("method", "full"))
-                     for s in recent if s["action"] != "repair_image" or s.get("evidence_revision", "") == self.image_evidence_revision(s.get("page_idx"), s.get("block_id"))}
+                     for s in recent}
         method = self.repair_method(decision.block_id) if decision.action == "repair_image" else None
         if decision.model_role == "review" and not self.alternate_available():
             decision.model_role = "primary"
@@ -313,8 +315,7 @@ class RecoveryController:
         """Only existing images with unambiguous source ownership can be patched."""
         tried = {}
         for step in self.state["steps"]:
-            if (step["action"] == "repair_image" and step.get("method") != "delivery_patch"
-                    and step.get("evidence_revision", "") == self.image_evidence_revision(step.get("page_idx"), step.get("block_id"))):
+            if step["action"] == "repair_image" and step.get("method") != "delivery_patch":
                 tried.setdefault(step.get("block_id"), []).append(step.get("model_role", "primary"))
         roles = {"primary", "review"} if self.alternate_available() else {"primary"}
         return [b for b in self.inventory.blocks(page, ir)

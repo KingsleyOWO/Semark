@@ -85,7 +85,9 @@ async def test_patch_requires_source_citation_and_preserves_heading_role(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_ocr_observation_is_cached_and_new_evidence_unlocks_only_image_retry(tmp_path, monkeypatch):
+async def test_ocr_observation_is_cached_and_a_failed_full_repair_is_not_rerun_on_new_evidence(tmp_path, monkeypatch):
+    # 2026-10-06 rule: each recovery attempt is a different method. A full repair rerun after
+    # an OCR observation failed the same way every time in the validation runs.
     from app.adapters import ocr
     ir, owner, runner = await setup(tmp_path)
     image = runner.inventory.directory / 'picture.png'
@@ -110,7 +112,7 @@ async def test_ocr_observation_is_cached_and_new_evidence_unlocks_only_image_ret
         observed = await runner.ocr_image(ir, {'page_idx': 0}, decision, tmp_path / 'ocr', '')
     assert observed['cache_hit'] and reader.await_count == 1 and ir.to_dict() == before
     assert owner.state['usage']['model_calls'] == 0
-    assert runner.select_strategy(repair, recent, ['repair_image', 'defer']).action == 'repair_image'
+    assert runner.select_strategy(repair, recent, ['repair_image', 'defer']).action == 'defer'
     monkeypatch.setattr(ocr, 'ocr_runtime_identity', lambda: 'runtime-v2')
     await runner.ocr_image(ir, {'page_idx': 0}, decision, tmp_path / 'ocr-new', '')
     assert reader.await_count == 2

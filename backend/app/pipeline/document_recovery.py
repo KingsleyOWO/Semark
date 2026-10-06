@@ -171,6 +171,10 @@ def adopt_candidate_evidence(records, pages, folder, root):
             shutil.copy2(staged, live)
 
 
+class RebuildMismatch(ValueError):
+    """The live rebuild did not reproduce the verified candidate; nothing of it was published."""
+
+
 class RecoveryCommitError(RuntimeError):
     """Abort the run without publishing a partly rebuilt accepted candidate."""
 
@@ -717,7 +721,9 @@ class RecoveryController:
                                 live_inventory = await self.candidate_inventory(candidate, self.root)
                                 current = self.owner.review_scope_fingerprints(candidate, live_inventory, self.root)
                                 if current != checked["fingerprints"]:
-                                    raise ValueError("rebuilt_delivery_differs_from_verified_candidate")
+                                    differing = sorted(page for page in set(current) | set(checked["fingerprints"])
+                                                       if current.get(page) != checked["fingerprints"].get(page))
+                                    raise RebuildMismatch(f"rebuilt_delivery_differs_from_verified_candidate: pages {differing}")
                                 adopt_candidate_evidence(checked["records"], checked["affected_pages"], folder, self.root)
                                 from app.pipeline.review_sources import delivery_digest
                                 for page, record in checked["records"].items():
@@ -737,6 +743,10 @@ class RecoveryController:
                                 self.state.pop("pending_commit", None)
                                 self.save()
                                 if isinstance(exc, asyncio.CancelledError):
+                                    raise
+                                if isinstance(exc, RebuildMismatch):
+                                    # The previous publication is intact again: reject this candidate and go on.
+                                    # An infrastructure failure (disk, rebuild crash) still stops the run for resume.
                                     raise
                                 raise RecoveryCommitError("Candidate rebuild failed; previous publication restored") from exc
                             ir = candidate

@@ -147,7 +147,7 @@ def visual_issues(ir: DocumentIR, enrichments: list[dict] | None = None) -> list
 # audits already carry up to seven images, so theirs are sent as stored.
 PICTURE_READING_TASKS = {"verify_native_reading", "read_image_parts", "read_image_parts_alternate",
                          "verify_image_parts", "read_image_relations", "read_image_relations_alternate",
-                         "resolve_image_evidence"}
+                         "resolve_image_evidence", "propose_image_edits"}
 
 
 def without_echoes(data, request, schema):

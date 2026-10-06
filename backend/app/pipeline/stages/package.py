@@ -4472,7 +4472,9 @@ class PackageStage:
 
         parts = [title]
         if caption and normalized_text(caption) not in normalized_text(f"{title}\n{semantic}"):
-            parts.append(caption)
+            # The full description replaces its own opening words; a repeated half
+            # sentence failed the source audit as a duplicated statement.
+            parts = [caption] if normalized_text(title) in normalized_text(caption) else [title, caption]
         parts.append(semantic)
         if keywords:
             parts.extend(self._strip_watermark_lines(list(keywords)))

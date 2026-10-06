@@ -231,10 +231,11 @@ class RecoveryController:
             blocks = ([ir.get_block(problem["block_id"])] if problem.get("block_id") else
                       self.inventory.blocks(problem["page_idx"], ir))
             return max((priorities.get(b.block_id, 0) for b in blocks if b), default=0)
-        # A picture a cheap verbatim patch can fix goes first: a full re-read costs 8-20
-        # calls and can use up the budget before any patch runs.
+        # A picture a cheap verbatim patch or targeted edit can fix goes first: a full
+        # re-read costs 8-20 calls and can use up the budget before any patch runs.
         def patch_first(problem):
-            return problem.get("kind") != "image" or self.repair_method(problem["block_id"]) != "delivery_patch"
+            cheap = {"delivery_patch": 0, "targeted_edit": 1}
+            return cheap.get(self.repair_method(problem["block_id"]), 2) if problem.get("kind") == "image" else 2
         return sorted(result, key=lambda problem: (patch_first(problem), -priority(problem)))
 
     def available(self):
@@ -304,18 +305,17 @@ class RecoveryController:
 
     def repair_method(self, block_id):
         """Which method repair_image will use next for this picture."""
-        from app.pipeline.image_recovery import delivery_patch_attempted, delivery_patch_statements
+        from app.pipeline.image_recovery import next_image_method
         pages = getattr(getattr(self, "inventory", None), "mapping", {}).get(block_id) or []
-        if (len(pages) == 1 and delivery_patch_statements(getattr(self.owner, "state", {}), pages[0], block_id)
-                and not delivery_patch_attempted(getattr(self, "state", {}), block_id)):
-            return "delivery_patch"
-        return "full"
+        if len(pages) != 1:
+            return "full"
+        return next_image_method(getattr(self.owner, "state", {}), getattr(self, "state", {}), pages[0], block_id)
 
     def image_targets(self, ir, page):
         """Only existing images with unambiguous source ownership can be patched."""
         tried = {}
         for step in self.state["steps"]:
-            if step["action"] == "repair_image" and step.get("method") != "delivery_patch":
+            if step["action"] == "repair_image" and step.get("method") not in {"delivery_patch", "targeted_edit"}:
                 tried.setdefault(step.get("block_id"), []).append(step.get("model_role", "primary"))
         roles = {"primary", "review"} if self.alternate_available() else {"primary"}
         return [b for b in self.inventory.blocks(page, ir)
@@ -405,13 +405,18 @@ class RecoveryController:
         layout_cached = bool(action == "inspect_layout" and self.layout_store.cached(page))
         if region_count is None:
             region_count = 3 if str(page) in self.state["layout_pages"] else 0
-        patch = action == "repair_image" and self.repair_method(problem.get("block_id")) == "delivery_patch"
+        method = self.repair_method(problem.get("block_id")) if action == "repair_image" else "full"
+        patch, edit = method == "delivery_patch", method == "targeted_edit"
+        geometry = geometry and not patch and not edit
         cost = tool_cost(self.owner.state, action, pictures=features["embedded_images"], layout=layout,
                          word_pictures=features["word_images"], image_read_calls=reads,
                          layout_cached=layout_cached, detail_regions=region_count, image_geometry=geometry,
-                         delivery_patch=patch)
+                         delivery_patch=patch, targeted_edit=edit)
         if patch:
             cost["method"] = "delivery_patch: keep delivered text, add the omitted relationships/lines, then audit"
+        if edit:
+            cost["method"] = ("targeted_edit: fix the exact spans every audit named, using only OCR or "
+                              "independent-reading wording, then audit")
         if geometry:
             cost["method"] = "source_axis_measurement_and_located_relationships"
         from app.pipeline.review_budget import call_seconds
@@ -457,16 +462,34 @@ class RecoveryController:
             return ir
         from app.pipeline.review_budget import call_seconds
         initial_actions = self.state["actions"]
-        for problem in self.problems(ir):
+
+        def scheduled():
+            # Breadth first: every problem gets its next method before any problem a later one,
+            # so a few pictures cannot spend the whole action allowance on their full re-reads.
+            # Each round takes an action or ends the schedule, so the action allowance bounds it.
+            first = True
+            while True:
+                actions = self.state["actions"]
+                for item in self.problems(ir):
+                    status = self.state["issues"].get(item["id"], {}).get("status", "pending")
+                    if first or status in {"pending", "unresolved"}:
+                        yield item
+                first = False
+                if self.state["actions"] == actions or not self.available():
+                    return
+        for problem in scheduled():
             if issue_ids is not None and problem["id"] not in issue_ids:
                 continue
             issue = self.state["issues"].setdefault(problem["id"], {**problem, "status": "pending"})
             if issue["status"] in {"resolved", "deferred", "applied_partial", "response_format_error"}:
                 continue
+            round_actions = self.state["actions"]
             while self.available():
                 if max_new_actions is not None and self.state["actions"] - initial_actions >= max_new_actions:
                     self.save()
                     return ir
+                if self.state["actions"] > round_actions:
+                    break  # this problem resumes with its next method in the next round
                 page_scope = "page_idx" in problem and "block_id" not in problem
                 current = self.owner.state["pages"].get(str(problem.get("page_idx")), {})
                 if page_scope and not needs_content_recovery(current):
@@ -588,9 +611,12 @@ class RecoveryController:
                         if selected_id not in {b.block_id for b in scoped_blocks}:
                             raise ValueError("Source resolution requires an in-scope block_id")
                         issue["located_block_id"] = selected_id
+                    # The method is part of the key: after a rejected patch the next method is new work.
+                    method = self.repair_method(decision.block_id) if decision.action == "repair_image" else "full"
                     key = digest([problem["id"], decision.action, decision.block_id, decision.layout, decision.model_role, sorted(decision.region_ids),
                                   decision.region, decision.scale, self.image_evidence_revision(problem.get("page_idx"), decision.block_id),
-                                  [b.model_dump(exclude={"payload": {"agentic_needs_review"}}) for b in scope], self.source_sha])
+                                  [b.model_dump(exclude={"payload": {"agentic_needs_review"}}) for b in scope], self.source_sha]
+                                 + ([method] if method != "full" else []))
                     if any(s["key"] == key for s in self.state["steps"]):
                         issue.update(status="no_progress", reason="Same tool and evidence already attempted")
                         break
@@ -644,10 +670,13 @@ class RecoveryController:
                         self.owner._protected_budget = (
                             previous_protection[0] + reserve,
                             previous_protection[1] + reserve * call_seconds(self.owner.state, "audit_page"))
-                        candidate, pages = await asyncio.wait_for(
-                            operation(ir, problem, decision, folder, skill), max(0, deadline - time.monotonic()))
-                        if (folder / "delivery-patch.json").is_file():
-                            step["method"] = "delivery_patch"
+                        try:
+                            candidate, pages = await asyncio.wait_for(
+                                operation(ir, problem, decision, folder, skill), max(0, deadline - time.monotonic()))
+                        finally:
+                            # Recorded even when the method fails, so it is never chosen again for this picture.
+                            if method != "full":
+                                step["method"] = method
                         self.record_candidate(ir, candidate, pages, folder, decision.action)
                         if decision.action == "resolve_source":
                             await self.renderer(self.owner.config, candidate, folder, self.root, self.parse_cache)

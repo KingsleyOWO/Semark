@@ -3404,10 +3404,14 @@ class PackageStage:
             text = re.sub(r"^(表格名稱：|Table name:)\s*", "", text, flags=re.IGNORECASE)
             compact = re.sub(r"\s+", "", text)
         section_hits = sum(1 for marker in ("壹", "貳", "參", "一、", "二、", "三、") if marker in text)
+        # A contents entry pairs a dot leader with a page number (「…………13」, 「....3 」). Dots
+        # alone are prose: an ellipsis, 「….等」 or a typed 「4..」 (spot check 2026-10-06: a table
+        # row and three body paragraphs were dropped from every delivered file that way).
+        leader = re.search(r"[.．…·・‧]{2,}\s*\d{1,3}(?=\s|$|[；;，,、|])", text)
         return bool(
             ("背景說明" in text and "使用說明" in text and section_hits >= 2)
-            or (section_hits >= 3 and re.search(r"\.{2,}|…{1,}|……", text))
-            or (len(compact) > 80 and re.search(r"\.{2,}|…{1,}|……", text))
+            or (section_hits >= 3 and leader)
+            or (len(compact) > 80 and leader)
             or (
                 re.match(r"^[壹貳參肆伍陸柒捌玖拾一二三四五六七八九十附]", text)
                 and re.search(r"[.．…]{2,}.*\d+$", text)

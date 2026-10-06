@@ -7,7 +7,7 @@ from pathlib import Path
 
 from app.pipeline.delivery import atomic_write_json
 
-PIPELINE_REVISION = "delivery-v20.10-targeted-image-edits-20261006.3"
+PIPELINE_REVISION = "delivery-v20.11-three-methods-per-picture-20261006.4"
 
 
 def execution_fingerprint(config: dict, source_sha: str) -> str:

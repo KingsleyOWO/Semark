@@ -11,21 +11,35 @@ from test_document_review import AuditModel, fixture, write_delivery
 from app.config import AgenticConfig, PipelineConfig
 from app.models.document_ir import BlockType
 from app.pipeline.document_review import DocumentReview, PageReview
-from app.pipeline.review_budget import document_budget, tool_cost
+from app.pipeline.review_budget import document_budget, elapsed_before_review, tool_cost
 
 
-def test_long_document_budget_scales_without_overriding_user_ceiling():
+def test_a_document_is_bounded_only_by_six_hours_including_its_earlier_stages():
+    # Decided 2026-10-06: no limit on model calls or repair actions. Each problem's planned
+    # methods (at most three, each once) decide the work; six hours per document, drafts
+    # included, caps it.
     limits = AgenticConfig()
-    short = document_budget(limits, 1)
-    long = document_budget(limits, 47)
-    assert short['max_seconds'] == 900 and short['max_model_calls'] == 24
-    assert long['max_seconds'] == 6225 and long['max_model_calls'] == 120
-    assert document_budget(limits, 1000)['max_seconds'] == 7200
+    budget = document_budget(limits, 47, elapsed_seconds=3600)
+    assert budget['policy'] == 'document_time_limit'
+    assert budget['max_seconds'] == 5 * 3600
+    assert document_budget(limits, 3, elapsed_seconds=7 * 3600)['max_seconds'] == 0
+    assert limits.max_model_calls >= 10 ** 6 and limits.max_recovery_actions >= 10 ** 6 and limits.max_actions >= 10 ** 6
+    assert limits.max_recovery_attempts_per_issue == 3
+    assert limits.max_seconds == 6 * 3600  # planning must not mutate shared profiles
+
+
+def test_a_stored_run_configuration_keeps_the_budget_it_was_created_with():
+    stored = AgenticConfig(max_model_calls=120, max_seconds=7200, max_recovery_actions=6, adaptive_budget=True)
+    budget = document_budget(stored, 47, elapsed_seconds=3600)
+    assert (budget['max_seconds'], budget['max_model_calls']) == (6225, 120)
     explicit = document_budget(AgenticConfig(max_seconds=600, max_model_calls=18), 47)
     assert explicit['max_seconds'] == 600 and explicit['max_model_calls'] == 18
-    fixed = document_budget(AgenticConfig(adaptive_budget=False), 1)
-    assert fixed['max_seconds'] == 7200
-    assert limits.max_seconds == 7200  # planning must not mutate shared profiles
+
+
+def test_time_spent_before_the_review_counts_against_the_document():
+    stats = {'parse': {'duration_seconds': 120.0}, 'enrich': {'duration_seconds': 3000.0},
+             'normalize': {}, 'package': {'duration_seconds': 30.5}}
+    assert elapsed_before_review(stats, current_stage_seconds=4.5) == 3155.0
 
 
 def test_tool_estimate_covers_both_reads_and_both_delivery_audits():
@@ -121,9 +135,9 @@ async def test_table_issue_waits_for_page_coverage_and_never_uses_fixed_legacy_r
     assert 'repair' not in tasks
     assert report['recovery']['steps'][0]['status'] == 'applied'
     assert report['summary']['verified_pages'] == 2
-    assert report['budget']['hard_max_seconds'] == 7200
+    assert report['budget']['hard_max_seconds'] == 6 * 3600  # one six-hour limit per document since 2026-10-06
     assert report['timing']['recovery_plan']['calls'] == 1
-    assert owner.config.agentic.max_seconds == 7200
+    assert owner.config.agentic.max_seconds == 6 * 3600
 
 
 @pytest.mark.asyncio

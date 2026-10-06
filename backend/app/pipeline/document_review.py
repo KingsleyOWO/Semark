@@ -825,7 +825,8 @@ class DocumentReview(AgenticRepair):
             self._save()
         return ir
 
-    async def run(self, ir, run_path, parse_cache_path=None, source_path=None, rebuild=None, progress=None):
+    async def run(self, ir, run_path, parse_cache_path=None, source_path=None, rebuild=None, progress=None,
+                  elapsed_seconds=0.0):
         from app.pipeline.table_structure import materialize_table_structures
 
         if self.config.agentic.mode == "apply":
@@ -895,7 +896,7 @@ class DocumentReview(AgenticRepair):
             # source inventory down to only the pages the parser happened to keep.
             inventory.pages = sorted(set(inventory.pages) | {int(p) for p in self.state["pages"]})
         from app.pipeline.review_budget import document_budget, timing_summary
-        budget = document_budget(self.config.agentic, len(inventory.pages))
+        budget = document_budget(self.config.agentic, len(inventory.pages), elapsed_seconds=elapsed_seconds)
         self.limits.max_model_calls = budget["max_model_calls"]
         self.limits.max_seconds = budget["max_seconds"]
         self.state["budget"] = budget

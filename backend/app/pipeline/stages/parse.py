@@ -7,10 +7,15 @@ import json
 import os
 import shutil
 import signal
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import fitz
+from PIL import Image, ImageChops
+
+from app.adapters.metafile import drawable_word_copy
 from app.adapters.mineru import MinerUAdapter, MinerUResult
 from app.adapters.spreadsheet import parse_spreadsheet
 from app.adapters.word import WordParseResult, parse_word_document
@@ -26,10 +31,14 @@ from app.supported_files import (
     WORD_NATIVE_EXTENSIONS,
 )
 
-WORD_PARSER_VERSION = "native_docx=python-docx;merged_cells=v2;image_types=v2;pdf_fallback=v1;content_controls=v1;table_images=v1;word_provenance=v1;caption_context=v2;table_headers=display_context_v2;auto_numbering=v1;text_boxes=v1"
+WORD_PARSER_VERSION = "native_docx=python-docx;merged_cells=v2;image_types=v2;pdf_fallback=v1;content_controls=v1;table_images=v1;word_provenance=v1;caption_context=v2;table_headers=display_context_v2;auto_numbering=v1;text_boxes=v1;metafile_pictures=v1"
 PARSE_REPORT_FILENAME = "parse_report.json"
 OFFICE_CONVERSION_TIMEOUT_SECONDS = 300
 OFFICE_CLEANUP_TIMEOUT_SECONDS = 5
+# A drawn Word metafile is exported as LibreOffice draws it: 288 dpi keeps a small
+# logo's letters, and an A4 page still stays under nine megapixels before trimming.
+METAFILE_ZOOM = 4
+METAFILE_MARGIN = 16
 
 
 @dataclass
@@ -264,6 +273,9 @@ class ParseStage:
         """Parse DOCX with native Word structure instead of PDF conversion."""
         try:
             result = parse_word_document(source_path, temp_output)
+            if result.success and result.content_list_path:
+                result.stats["metafiles_rendered"] = await render_word_metafiles(
+                    result.content_list_path, result.markdown_path)
         except Exception as exc:
             result = WordParseResult(
                 success=False, output_dir=temp_output,
@@ -358,6 +370,13 @@ class ParseStage:
         profile_dir.mkdir(parents=True, exist_ok=True)
         pdf_path = output_dir / f"{source_path.stem}.pdf"
         pdf_path.unlink(missing_ok=True)
+        # LibreOffice draws an EMF+ only picture blank; it converts a copy holding the bitmap.
+        converted = source_path
+        if source_path.suffix.lower() == ".docx":
+            try:
+                converted = drawable_word_copy(source_path, output_dir / "drawable") or source_path
+            except (zipfile.BadZipFile, OSError):
+                converted = source_path
 
         try:
             # Use an isolated LibreOffice profile so parallel conversions do not
@@ -370,7 +389,7 @@ class ParseStage:
                 f"-env:UserInstallation={profile_dir.resolve().as_uri()}",
                 "--convert-to", "pdf",
                 "--outdir", str(output_dir),
-                str(source_path),
+                str(converted),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 start_new_session=True,
@@ -421,3 +440,59 @@ class ParseStage:
     def _needs_conversion(self, source_path: Path) -> bool:
         """Check if file needs conversion to PDF."""
         return source_path.suffix.lower() in CONVERT_TO_PDF_EXTENSIONS
+
+
+async def _render_metafile(path: Path) -> Path | None:
+    """PNG of what LibreOffice draws for a metafile, without the page around it; None if it draws nothing."""
+    folder = path.parent / (path.stem + "-render")
+    try:
+        pdf, error = await ParseStage._convert_office_to_pdf(path, folder)
+        if error or pdf is None:
+            return None
+        with fitz.open(pdf) as document:
+            if len(document) != 1:
+                return None
+            pixmap = document[0].get_pixmap(matrix=fitz.Matrix(METAFILE_ZOOM, METAFILE_ZOOM))
+        image = Image.frombytes("RGB", (pixmap.width, pixmap.height), pixmap.samples)
+        # LibreOffice places the drawing on a white page; keep what differs from it.
+        box = ImageChops.difference(image, Image.new("RGB", image.size, "white")).point(
+            lambda v: 255 if v > 8 else 0).getbbox()
+        if box is None:
+            return None
+        target = path.with_suffix(".png")
+        image.crop((max(0, box[0] - METAFILE_MARGIN), max(0, box[1] - METAFILE_MARGIN),
+                    min(image.width, box[2] + METAFILE_MARGIN), min(image.height, box[3] + METAFILE_MARGIN))).save(target)
+        return target
+    except Exception:
+        return None
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+
+
+async def render_word_metafiles(content_list_path: Path, markdown_path: Path | None) -> int:
+    """Export each WMF or drawn EMF picture as LibreOffice draws it; the vision model cannot load a metafile.
+
+    The picture keeps its Word identity (rel_id, image_sha256); only the exported file
+    changes. A metafile LibreOffice draws nothing for is left as it was.
+    """
+    items = json.loads(content_list_path.read_text(encoding="utf-8"))
+    rendered: dict[str, str | None] = {}
+    for item in items:
+        source = item.get("img_path") if item.get("type") == "image" else None
+        if not source or Path(source).suffix.lower() not in {".wmf", ".emf"}:
+            continue
+        if source not in rendered:
+            png = await _render_metafile(content_list_path.parent / source)
+            rendered[source] = str(Path(source).with_suffix(".png")) if png else None
+        if rendered[source]:
+            item["img_path"] = rendered[source]
+            item.setdefault("metadata", {})["rendered_from"] = Path(source).suffix.lower().lstrip(".")
+    done = {source: png for source, png in rendered.items() if png}
+    if done:
+        content_list_path.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
+        if markdown_path and markdown_path.is_file():
+            text = markdown_path.read_text(encoding="utf-8")
+            for source, png in done.items():
+                text = text.replace(f"]({source})", f"]({png})")
+            markdown_path.write_text(text, encoding="utf-8")
+    return len(done)

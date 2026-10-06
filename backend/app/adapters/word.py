@@ -20,6 +20,8 @@ from docx.oxml.ns import qn
 from docx.table import Table, _Cell
 from docx.text.paragraph import Paragraph
 
+from app.adapters.metafile import metafile_bitmap
+
 
 @dataclass
 class WordParseResult:
@@ -36,6 +38,7 @@ class _ImageExport:
     rel_id: str
     relative_path: str
     filename: str
+    sha256: str  # of the Word part, which review and recovery look the picture up by
 
 
 def parse_word_document(input_path: Path, output_dir: Path) -> WordParseResult:
@@ -86,7 +89,7 @@ def _parse_word_document(input_path: Path, output_dir: Path) -> WordParseResult:
             "type": "image", "img_path": image.relative_path,
             "img_caption": [caption], "img_footnote": [], "page_idx": 0, "bbox": [0, 0, 0, 0],
             "metadata": {"source": "native_docx", "block_index": block_idx, "rel_id": rel_id,
-                         "image_sha256": hashlib.sha256((output_root / image.relative_path).read_bytes()).hexdigest(),
+                         "image_sha256": image.sha256,
                          **location},
         })
         markdown_lines.extend([f"![{caption}]({image.relative_path})", ""])
@@ -532,14 +535,20 @@ def _export_image(
 
     images_dir = output_root / "images"
     images_dir.mkdir(parents=True, exist_ok=True)
-    filename = f"docx_img{image_count:04d}{suffix}"
+    # A metafile that only holds a pasted bitmap is exported as that bitmap, which every reader opens.
+    bitmap = metafile_bitmap(image_part.blob) if suffix == ".emf" else None
+    filename = f"docx_img{image_count:04d}{'.png' if bitmap else suffix}"
     destination = images_dir / filename
-    destination.write_bytes(image_part.blob)
+    if bitmap:
+        bitmap.save(destination, "PNG")
+    else:
+        destination.write_bytes(image_part.blob)
 
     export = _ImageExport(
         rel_id=rel_id,
         relative_path=f"images/{filename}",
         filename=filename,
+        sha256=hashlib.sha256(image_part.blob).hexdigest(),
     )
     exported_images[rel_id] = export
     return export

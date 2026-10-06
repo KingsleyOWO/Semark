@@ -1,12 +1,12 @@
 """Conservative Word page candidates from source text, order and original pixels."""
 
 import hashlib
-import io
 import math
 
 import fitz
 from PIL import Image, ImageChops, ImageOps, ImageStat
 
+from app.adapters.metafile import open_picture
 from app.models.document_ir import BlockType
 from app.pipeline.agentic_evidence import match_word_pages
 from app.pipeline.content_coverage import normalized_text, plain_text
@@ -40,7 +40,7 @@ def word_block_pages(block, texts):
 
 
 def _image_data(blob):
-    with Image.open(io.BytesIO(blob)) as image:
+    with open_picture(blob) as image:
         if image.width * image.height > 20_000_000:
             return None
         rgba = ImageOps.exif_transpose(image).convert("RGBA")
@@ -103,7 +103,7 @@ def word_image_matches(blocks, source, pdf_path, *, evidence_dir=None):
                 # PNG normalizes format/EXIF without reducing the original resolution.
                 name = "word-image-" + meta["image_sha256"] + ".png"
                 path = evidence_dir / name
-                with Image.open(io.BytesIO(blob)) as original:
+                with open_picture(blob) as original:
                     ImageOps.exif_transpose(original).convert("RGBA").save(path)
                 evidence[block.block_id] = name
     result, decoded, painted = {}, {}, []

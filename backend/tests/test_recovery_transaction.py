@@ -86,16 +86,19 @@ async def test_crashed_uncommitted_publication_rolls_back_before_recovery_resume
 
 
 @pytest.mark.asyncio
-async def test_rebuild_different_from_isolated_audit_is_rolled_back(tmp_path):
-    ir, owner, runner = await setup(tmp_path)
+async def test_rebuild_different_from_isolated_audit_is_rolled_back_and_review_goes_on(tmp_path):
+    # Spot check v20.11 aborted the whole review here; only the candidate is rejected now.
+    ir, owner, runner = await setup(tmp_path, config=cfg(max_recovery_actions=1))
     original_output = (tmp_path / 'outputs/documents/main.md').read_bytes()
     async def inconsistent(candidate):
         (tmp_path / 'outputs/documents/main.md').write_text('Different content never audited')
     runner.rebuild = inconsistent
-    with pytest.raises(RecoveryCommitError):
-        await runner.run(ir)
+    result = await runner.run(ir)
+    assert result is ir
     assert (tmp_path / 'outputs/documents/main.md').read_bytes() == original_output
-    assert 'accepted' not in runner.state
+    assert 'accepted' not in runner.state and 'pending_commit' not in runner.state
+    step = runner.state['steps'][0]
+    assert step['status'] == 'rejected' and 'rebuilt_delivery_differs_from_verified_candidate' in step['result']
 
 
 @pytest.mark.asyncio

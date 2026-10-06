@@ -6,7 +6,9 @@ invented 「橡皮」, page 66 drafted as 06, a 「最佳賣家」 gloss). A ful
 text-heavy picture failed while merging its evidence. Here the model only names
 exact quotes to change; the system applies an edit when it deletes description
 wording, or brings in wording PaddleOCR or the blind second reading contain. A
-transcription line is never deleted and changes only into a line OCR reads. The
+transcription line is never deleted and changes only into a line OCR reads, and no
+edit turns description wording OCR reads into wording it does not (spot check
+v20.10 B: 光 was deleted from the card name 「晴空光年」 on a misreading). The
 same per-image and page audits then decide.
 """
 import json
@@ -79,6 +81,19 @@ def _new_wording(old, new):
     return new[start:end]
 
 
+OCR_CONTEXT = 3  # characters each side of an edit: enough to hold a short CJK name such as 「晴空光年」
+
+
+def _breaks_ocr_wording(text, changed, start, quote, replacement, ocr):
+    """The edit turns wording PaddleOCR reads into wording it does not (光 deleted from 「晴空光年」)."""
+    ops = [op for op in SequenceMatcher(None, quote, replacement, autojunk=False).get_opcodes() if op[0] != "equal"]
+    if not ops:
+        return False
+    before = text[max(0, start + ops[0][1] - OCR_CONTEXT):start + ops[-1][2] + OCR_CONTEXT]
+    after = changed[max(0, start + ops[0][3] - OCR_CONTEXT):start + ops[-1][4] + OCR_CONTEXT]
+    return bool(normalized_text(before)) and appears_in(before, ocr) and not appears_in(after, ocr)
+
+
 def apply_edits(delivered, edits, *, transcription, ocr_lines, reading):
     """Apply the edits the rules allow, in order; return (text, statements, applied, rejected)."""
     ocr = "\n".join(ocr_lines or [])
@@ -119,6 +134,10 @@ def apply_edits(delivered, edits, *, transcription, ocr_lines, reading):
                 continue
         elif normalized_text(wording := _new_wording(edit.quote, replacement)) and not appears_in(wording, evidence):
             refuse(edit, "new wording is in neither PaddleOCR nor the independent reading")
+            continue
+        elif ocr and _breaks_ocr_wording(text, changed, start, edit.quote, replacement, ocr):
+            # The second reading can be the one that is wrong; OCR's wording is never edited away.
+            refuse(edit, "would change description wording PaddleOCR reads")
             continue
         text = changed
         applied.append(edit.model_dump())

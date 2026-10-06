@@ -198,3 +198,16 @@ async def test_every_picture_gets_its_first_method_before_any_picture_its_second
 
     assert [(s["block_id"], s.get("method")) for s in runner.state["steps"]] == [
         ("first", "targeted_edit"), ("second", "targeted_edit")]
+
+
+def test_a_description_edit_never_breaks_wording_ocr_reads():
+    # Spot check B: the review model misread the card name 「晴空光年」 as 「晴空年」, and an
+    # edit deleted 「光」 from the description, which the deletion rule allowed. OCR read 光年.
+    delivered = "卡片1角色名為「露米光年」，品牌角色為天真者。\n露米光年"
+    edit = ImageEdit.model_validate({"op": "replace", "quote": "「露米光年」", "replacement": "「露米年」",
+                                     "reason": "Audit reads 露米年."})
+    text, _, applied, rejected = apply_edits(delivered, [edit], transcription={"露米光年"},
+                                             ocr_lines=["露米光年"], reading=_reading("露米年"))
+
+    assert text == delivered and not applied
+    assert "OCR" in rejected[0]["refused"]

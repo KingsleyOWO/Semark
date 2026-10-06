@@ -1,17 +1,16 @@
 """Original PDF/Word materials for bounded reading, without guessing page mappings."""
 import hashlib
-import io
 import re
 import zipfile
 
 import fitz
-from PIL import Image
 
+from app.adapters.metafile import open_picture
 from app.pipeline.delivery import atomic_write_json
 
 
 def _pixels(blob):
-    with Image.open(io.BytesIO(blob)) as image:
+    with open_picture(blob) as image:
         if image.width * image.height > 20_000_000:
             return None
         return (image.size, hashlib.sha256(image.convert('RGB').tobytes()).hexdigest())
@@ -97,7 +96,7 @@ def native_materials(inventory, page, folder):
         if 'blob' in material:
             blob = material.pop('blob')
             image_path = folder / (material['id'] + '.png')
-            with Image.open(io.BytesIO(blob)) as image:
+            with open_picture(blob) as image:
                 image.convert('RGB').save(image_path)
             material['image'] = image_path
             material['sha256'] = hashlib.sha256(image_path.read_bytes()).hexdigest()

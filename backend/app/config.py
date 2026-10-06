@@ -228,7 +228,7 @@ class AgenticConfig(BaseModel):
     adaptive_budget: bool = True
     max_output_tokens: int = Field(default=4096, ge=256, le=4096)
     recovery_enabled: bool = True
-    max_recovery_actions: int = Field(default=12, ge=0, le=30)
+    max_recovery_actions: int = Field(default=6, ge=0, le=30)
     max_recovery_attempts_per_issue: int = Field(default=3, ge=1, le=4)
     recovery_reserve_calls: int = Field(default=12, ge=0, le=40)
     recovery_reserve_seconds: float = Field(default=600.0, ge=0, le=1800)

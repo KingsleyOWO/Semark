@@ -368,6 +368,28 @@ async def test_commit_failure_aborts_and_resume_keeps_previous_publication(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_a_rebuild_that_differs_from_the_verified_candidate_rejects_only_that_candidate(tmp_path):
+    # Spot check v20.11: a located source block's candidate passed review, but the live rebuild
+    # did not reproduce it. The previous publication was restored, yet the whole review aborted.
+    ir, owner, runner = await setup(tmp_path, RecoveryModel(), cfg(max_recovery_actions=1))
+    published = (tmp_path / "outputs/documents/main.md").read_text()
+
+    async def drifting_rebuild(candidate):
+        drifted = candidate.model_copy(deep=True)
+        drifted.blocks[0].payload["text"] = "Rebuilt differently."
+        write_delivery(tmp_path, drifted)
+    runner.rebuild = drifting_rebuild
+
+    result = await runner.run(ir)
+
+    step = runner.state["steps"][0]
+    assert result is ir and step["status"] == "rejected"
+    assert "rebuilt_delivery_differs_from_verified_candidate" in step["result"]
+    assert (tmp_path / "outputs/documents/main.md").read_text() == published
+    assert "pending_commit" not in runner.state and "accepted" not in runner.state
+
+
+@pytest.mark.asyncio
 async def test_tool_timeout_is_charged_and_stops_further_work(tmp_path, monkeypatch):
     config = cfg()
     config.agentic.max_seconds = 0.03

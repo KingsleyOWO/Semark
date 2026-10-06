@@ -5,6 +5,7 @@ Stages: Ingest → Parse → Normalize → Enrich → Package → Chunk
 """
 
 import asyncio
+import time
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -19,6 +20,7 @@ from app.models.entities import Run, RunStatus, StageName, StageStatus
 from app.pipeline.delivery import atomic_write_json
 from app.pipeline.document_review import DocumentReview
 from app.pipeline.final_delivery import finalize_delivery
+from app.pipeline.review_budget import elapsed_before_review
 from app.pipeline.revisions import (
     begin_revision,
     execution_fingerprint,
@@ -94,6 +96,8 @@ class PipelineContext:
     # Stats
     stage_stats: dict[str, dict[str, Any]] = field(default_factory=dict)
     cache_hits: dict[str, bool] = field(default_factory=dict)
+    # When the running stage began; stage durations count against the document's time limit.
+    stage_started: float = 0.0
 
 
 @dataclass
@@ -292,10 +296,13 @@ class PipelineOrchestrator:
 
             try:
                 # Execute stage
+                ctx.stage_started = time.monotonic()
                 stats = await stage_func(
                     ctx=ctx,
                     use_cache=run.use_cache and not force,
                 )
+                if isinstance(stats, dict):
+                    stats["duration_seconds"] = round(time.monotonic() - ctx.stage_started, 1)
 
                 ctx.stage_stats[stage_name.value] = stats
                 if ctx.root_path:
@@ -530,13 +537,19 @@ class PipelineOrchestrator:
 
         ctx.document_ir, review = await DocumentReview(ctx.config).run(
             ctx.document_ir, ctx.run_path, parse_cache_path=ctx.parse_cache_path,
-            rebuild=rebuild, progress=review_progress,
+            rebuild=rebuild, progress=review_progress, elapsed_seconds=self._elapsed_before_review(ctx),
         )
         save_document_ir(ctx.document_ir, ctx.run_path)
         result.stats["agentic"] = {"review": review["summary"], "usage": review["usage"],
                                    "budget": review.get("budget", {}), "timing": review.get("timing", {})}
         result.stats["delivery"] = finalize_delivery(ctx.document_ir, ctx.run_path, ctx.config)
         return result.stats
+
+    @staticmethod
+    def _elapsed_before_review(ctx: PipelineContext) -> float:
+        """Seconds the document spent before its review, so all stages share one time limit."""
+        current = time.monotonic() - ctx.stage_started if ctx.stage_started else 0.0
+        return elapsed_before_review(ctx.stage_stats, current)
 
     async def cancel(self, run_id: str) -> bool:
         """Cancel a running pipeline."""

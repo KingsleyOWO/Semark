@@ -7,22 +7,33 @@ from app.pipeline.recovery_models import MAX_REGION_CONTEXT_READS
 TIME_SCALED_ACTIONS = 6
 
 
-def document_budget(limits, pages):
-    """User limits are hard ceilings, including for existing run configurations."""
+def elapsed_before_review(stage_stats, current_stage_seconds=0.0):
+    """Seconds this document already spent before its review: earlier stages plus the current one so far."""
+    earlier = sum(float((stats or {}).get("duration_seconds") or 0) for name, stats in stage_stats.items()
+                  if name != "chunk")
+    return round(earlier + current_stage_seconds, 1)
+
+
+def document_budget(limits, pages, *, elapsed_seconds=0.0):
+    """User limits are hard ceilings, including for existing run configurations.
+
+    New runs have one limit, time per document (six hours, earlier stages included);
+    a stored run created with page-scaled budgets keeps them.
+    """
     calls, seconds = limits.max_model_calls, limits.max_seconds
-    if limits.adaptive_budget:
-        # Allow both page audit passes plus actual complete-tool work. The old
-        # fixed 600s/12-call margin could not admit a cold image repair at all.
-        actions = min(pages, limits.max_recovery_actions) if limits.recovery_enabled else 0
-        recovery = tool_cost({}, "read_regions")
-        calls = min(calls, max(24, pages * 2 + max(12, actions * (recovery["model_calls"] + 1))))
-        # Time scales with at most six full repairs: extra actions are mostly 4-call
-        # delivery patches, and allowing more of them must not lengthen the run.
-        timed = min(actions, TIME_SCALED_ACTIONS)
-        seconds = min(seconds, max(900, pages * 75 + max(600, timed * (
-            recovery["seconds"] + call_seconds({}, "recovery_plan")))))
-    return {"policy": "adaptive" if limits.adaptive_budget else "fixed", "source_pages": pages,
-            "max_model_calls": calls, "max_seconds": seconds,
+    if not limits.adaptive_budget:
+        return {"policy": "document_time_limit", "source_pages": pages, "max_model_calls": calls,
+                "max_seconds": max(0.0, seconds - elapsed_seconds), "elapsed_before_review_seconds": elapsed_seconds,
+                "hard_max_model_calls": calls, "hard_max_seconds": seconds}
+    # Page-scaled budget of a run stored before 2026-10-06. Allow both page audit passes
+    # plus actual complete-tool work; time scales with at most six full repairs.
+    actions = min(pages, limits.max_recovery_actions) if limits.recovery_enabled else 0
+    recovery = tool_cost({}, "read_regions")
+    calls = min(calls, max(24, pages * 2 + max(12, actions * (recovery["model_calls"] + 1))))
+    timed = min(actions, TIME_SCALED_ACTIONS)
+    seconds = min(seconds, max(900, pages * 75 + max(600, timed * (
+        recovery["seconds"] + call_seconds({}, "recovery_plan")))))
+    return {"policy": "adaptive", "source_pages": pages, "max_model_calls": calls, "max_seconds": seconds,
             "hard_max_model_calls": limits.max_model_calls, "hard_max_seconds": limits.max_seconds}
 
 

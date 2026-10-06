@@ -218,19 +218,25 @@ class PackageConfig(BaseModel):
     chunk_overlap_tokens: int = 50
 
 
+# Counts of model calls and repair actions are not limited by default (decided 2026-10-06):
+# each problem's planned methods bound the work, and the document's time limit caps it.
+NO_COUNT_LIMIT = 1_000_000
+DOCUMENT_TIME_LIMIT_SECONDS = 6 * 3600
+
+
 class AgenticConfig(BaseModel):
-    """Source review is on for new runs; repairs stay bounded and verified."""
+    """Source review is on for new runs; each problem tries its planned methods within six hours per document."""
     mode: Literal["off", "shadow", "apply"] = "apply"
-    max_actions: int = Field(default=6, ge=0, le=30)
+    max_actions: int = Field(default=NO_COUNT_LIMIT, ge=0)
     max_attempts_per_block: int = Field(default=2, ge=1, le=3)
-    max_model_calls: int = Field(default=120, ge=0, le=240)
-    max_seconds: float = Field(default=7200, gt=0, le=7200)
-    adaptive_budget: bool = True
+    max_model_calls: int = Field(default=NO_COUNT_LIMIT, ge=0)
+    # The whole document, parse and drafts included; the review gets what earlier stages left.
+    max_seconds: float = Field(default=DOCUMENT_TIME_LIMIT_SECONDS, gt=0, le=DOCUMENT_TIME_LIMIT_SECONDS)
+    # Page-scaled call/time budgets of runs created before 2026-10-06; new runs use the time limit only.
+    adaptive_budget: bool = False
     max_output_tokens: int = Field(default=4096, ge=256, le=4096)
     recovery_enabled: bool = True
-    # A safety ceiling only: each problem tries at most max_recovery_attempts_per_issue
-    # different methods, and the document's time and call budget decides how many run.
-    max_recovery_actions: int = Field(default=30, ge=0, le=30)
+    max_recovery_actions: int = Field(default=NO_COUNT_LIMIT, ge=0)
     max_recovery_attempts_per_issue: int = Field(default=3, ge=1, le=4)
     recovery_reserve_calls: int = Field(default=12, ge=0, le=40)
     recovery_reserve_seconds: float = Field(default=600.0, ge=0, le=1800)

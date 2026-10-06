@@ -119,6 +119,9 @@ async def test_contract_repair_cannot_exceed_shared_model_budget(tmp_path):
 
 class ImageModel(RecoveryModel):
     async def query(self, task, payload, image, schema):
+        if task == 'propose_image_edits':
+            self.tasks.append(task)
+            return {'edits': [], 'observation': 'No span can be fixed with independent wording.'}, 10
         if task == 'revise_image_regions':
             self.tasks.append(task)
             return {'regions': [{'block_id': t['block_id'], 'region_kind': 'uncertain',
@@ -155,7 +158,8 @@ class ImageModel(RecoveryModel):
 @pytest.mark.asyncio
 async def test_image_only_recovery_and_real_delivery_retain_scene_and_exclude_wrong_sign(tmp_path):
     model = ImageModel()
-    ir, owner, runner = await setup(tmp_path, model, cfg(max_recovery_actions=1).model_copy(update={"agentic": cfg(max_recovery_actions=1).agentic.model_copy(update={"max_seconds": 2000})}))
+    # A targeted edit with nothing it may change is rejected first; the full re-read comes next.
+    ir, owner, runner = await setup(tmp_path, model, cfg(max_recovery_actions=2).model_copy(update={"agentic": cfg(max_recovery_actions=2).agentic.model_copy(update={"max_seconds": 3000})}))
     picture = tmp_path / 'picture.png'
     Image.new('RGB', (200, 140), 'green').save(picture)
     image_block = Block(block_id='picture', type=BlockType.IMAGE, page_idx=0, reading_order=1,
@@ -188,10 +192,11 @@ async def test_image_only_recovery_and_real_delivery_retain_scene_and_exclude_wr
     result = await runner.run(ir)
     assert result is not ir
     assert result.get_block('unrelated').payload == unrelated.payload
-    assert runner.state['steps'][0]['action'] == 'repair_image'
+    assert [(s['action'], s.get('method'), s['status']) for s in runner.state['steps']] == [
+        ('repair_image', 'targeted_edit', 'rejected'), ('repair_image', None, 'applied')]
     assert runner.state['issues']['image:picture']['status'] == 'applied_partial'
     from app.pipeline.review_sources import digest
-    folder = runner.folder / runner.state['steps'][0]['key'][:16]
+    folder = runner.folder / runner.state['steps'][1]['key'][:16]
     provenance = json.loads((folder / 'candidate-provenance.json').read_text())
     assert provenance['status'] == 'candidate_source_checked'
     for change in provenance['changes']:

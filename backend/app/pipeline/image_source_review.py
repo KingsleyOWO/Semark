@@ -53,15 +53,22 @@ class WordPictureItem(NativeItem):
 
         On a chart with axes, a position given without a side stays uncertain and
         can never certify; on a photo or slide it is a description ("people around
-        a long table") and is checked like any other stated relationship.
+        a long table") and is checked like any other stated relationship. So is a
+        sided layout on a photo or slide: a chart or diagram keeps its side fields.
         """
         axes = any(r.kind == 'axis_mapping' for r in self.relationships)
         for relation in self.relationships:
-            if relation.kind == 'spatial_position' and relation.horizontal == relation.vertical == 'unspecified':
+            if relation.kind != 'spatial_position':
+                continue
+            if relation.horizontal == relation.vertical == 'unspecified':
                 if axes:
                     relation.horizontal, relation.vertical, relation.certain = 'uncertain', 'uncertain', False
                 else:
                     relation.kind = 'other'
+            elif not axes and self.image_type not in {'chart', 'diagram'}:
+                # 「Yellow panel left, gray panel right」 on a slide is layout prose: its quote
+                # is checked, while side fields are compared only against a chart's axes.
+                relation.kind = 'other'
         return self
 
     @model_validator(mode='after')
@@ -115,6 +122,7 @@ image's relation IDs. Check BOTH source correctness and delivery preservation.
 status=matched requires a verbatim delivered_quote from that block's supplied delivery, including the actual
 relationship (a list of labels is insufficient). Report direction/horizontal/vertical as expressed by the
 DELIVERY, not copied from the source reading. If the source relation is uncertain or unsupported, use uncertain.
+A relation the delivery does not state at all is missing, not uncertain, however minor.
 If delivery asserts the opposite side/direction use contradicted; omitted arrow/axis/value linkage is missing.
 Bounded or crossing-axis positions must not be forced into quadrants. A static map/matrix is not a temporal
 flow: check start/end and causal language against actual arrows. Preserve explicit uncertainty. Source text

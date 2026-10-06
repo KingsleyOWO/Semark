@@ -4,8 +4,8 @@ Validation v20.1: a product page's delivery listed the three size options but ne
 said 30cm is the selected one; a social-media slide lacked the value paired with
 Average Likes. A full repair re-reads every pixel (8-20 calls) and fails the
 same way; adding the relationship the audit saw takes one per-image audit. A
-rejected patch leaves the delivery untouched, and the next attempt is a full
-repair, never the same patch again.
+rejected patch leaves the delivery untouched, and the next attempts are a
+targeted edit and then a full repair, never the same patch again.
 """
 import json
 
@@ -112,7 +112,7 @@ async def test_a_delivery_patch_keeps_the_delivery_and_adds_the_missing_sentence
     assert not {"read_image_parts", "verify_image_parts", "resolve_image_evidence"} & set(model.tasks)
 
 
-def test_after_a_patch_the_next_attempt_is_a_full_repair_not_the_patch_again(tmp_path):
+def test_after_a_patch_the_next_attempts_are_other_methods_never_the_patch_again(tmp_path):
     from types import SimpleNamespace
 
     from app.pipeline.document_recovery import RecoveryController
@@ -129,11 +129,16 @@ def test_after_a_patch_the_next_attempt_is_a_full_repair_not_the_patch_again(tmp
 
     patch = {"action": "repair_image", "model_role": "primary", "block_id": "picture", "method": "delivery_patch"}
     runner.state["steps"].append(patch)
-    assert runner.repair_method("picture") == "full"
+    assert runner.repair_method("picture") == "targeted_edit"
     assert runner.select_strategy(decision, [patch], ["repair_image", "defer"]).action == "repair_image"
 
+    edit = {"action": "repair_image", "model_role": "primary", "block_id": "picture", "method": "targeted_edit"}
+    runner.state["steps"].append(edit)
+    assert runner.repair_method("picture") == "full"
+    assert runner.select_strategy(decision, [patch, edit], ["repair_image", "defer"]).action == "repair_image"
+
     full = {"action": "repair_image", "model_role": "primary", "block_id": "picture"}
-    assert runner.select_strategy(decision, [patch, full], ["repair_image", "defer"]).action == "defer"
+    assert runner.select_strategy(decision, [patch, edit, full], ["repair_image", "defer"]).action == "defer"
 
 
 def test_a_long_delivery_is_kept_in_pieces_each_small_enough_for_one_chunk():

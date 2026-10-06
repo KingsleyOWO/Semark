@@ -34,8 +34,9 @@ OCR_VOTE_POLICY = (
     "read the original picture wherever the blind reading and the delivery disagree. verdict=delivery means OCR "
     "reads what the delivery says; ocr_reads is what it read. Source lettering is delivered as printed, including "
     "the author's typos and variant spellings: never 'correct' it, and do not fail a block for a spelling OCR "
-    "confirms. OCR is evidence, not certification: still check every other part of the picture against the pixels.")
-REVIEW_VERSION = "document-review-20261005.3-relationships-in-document-language"
+    "confirms. verdict=delivery settles that line as delivered, even where your own reading of it differs. "
+    "OCR is evidence, not certification: still check every other part of the picture against the pixels.")
+REVIEW_VERSION = "document-review-20261006.1-slide-layout-and-ocr-settled-lines"
 SCHEDULER_VERSION = "tool-scheduler-20260930.1-complete-tool-budget"
 
 

@@ -104,3 +104,46 @@ def test_repeated_transcription_lines_survive_into_picture_rag_text():
 
     assert lines.count("CODE") == 2 and lines.count("100%") == 2
     assert lines[lines.index("#777777") - 1] == "CODE"
+
+
+def test_a_title_cut_from_the_description_is_not_delivered_before_it():
+    # Validation v20.6: every picture's RAG text opened with its description cut at 100
+    # characters, then the whole description; the audit failed the patch for duplicated sentences.
+    caption = ("此為晴諾米品牌指南第 06 頁，主題為「Application Collection (Design 01)」，以一張文具與周邊用品的"
+               "實物擺拍照片，呈現晴諾米拼圖工作室視覺識別系統之應用設計組合。畫面以黃色、灰色與木色為主調。")
+    stage = PackageStage()
+    semantic = stage._render_visual_semantic_content(caption[:100], {
+        "semantic_caption": caption, "facts": ["頁面編號為 06，頁尾標示晴諾米品牌指南。"], "all_text": ["06"]})
+
+    text = stage._figure_retrieval_text(caption[:100], caption, semantic, [])
+
+    assert len(caption) > 100 and caption in text
+    assert text.count(caption[:40]) == 1
+
+
+def test_a_title_of_its_own_still_leads_the_picture_text():
+    caption = "此圖為品牌識別系統的色彩規範說明，以左右兩欄並列呈現兩種標準色。"
+    stage = PackageStage()
+
+    assert stage._figure_retrieval_text("圖 3 色彩規範", caption, "左欄為黃色", []).splitlines()[:2] == [
+        "圖 3 色彩規範", caption]
+
+
+def test_a_slide_layout_side_is_a_description_checked_by_its_quote():
+    # Validation v20.6: colour slides failed 「position differs」 although the audit quoted
+    # 「左側為黃色背景，右側為灰色背景」 and matched it; it only left the side fields blank.
+    # Sides are compared field by field against a chart's axes, not on a slide.
+    reading = _reading([_relation("r0", fact="黃色面板位於左半部，灰色面板位於右半部", horizontal="left")],
+                       image_type="document")
+
+    assert reading.relationships[0].kind == "other"
+    assert relationship_issue(reading, _finding(("r0", "左側為黃色背景，右側為灰色背景")),
+                              "色彩規範：左側為黃色背景，右側為灰色背景。") == ""
+
+
+def test_a_sided_position_on_a_chart_without_listed_axes_is_still_compared():
+    reading = _reading([_relation("r0", fact="晴諾米位於右上", horizontal="right", vertical="above")],
+                       image_type="diagram")
+
+    assert reading.relationships[0].kind == "spatial_position"
+    assert "position differs" in relationship_issue(reading, _finding(("r0", "晴諾米位於右上")), "晴諾米位於右上。")

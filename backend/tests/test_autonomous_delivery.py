@@ -357,15 +357,17 @@ def _picture_fixture(tmp_path, picture_status):
 
 
 @pytest.mark.asyncio
-async def test_unverified_picture_content_reaches_rag_and_delivery_with_its_label(tmp_path):
+async def test_unverified_picture_content_reaches_rag_with_its_review_as_metadata(tmp_path):
     # 2026-10-01 policy: picture content is delivered either way; review decides the label.
+    # 2026-10-07: the label is metadata for RAG text and stays only in the reading copy.
     ir, source, model = _picture_fixture(tmp_path, 'needs_review')
     ir, _ = await DocumentReview(config(), model, model).run(ir, tmp_path, source_path=source)
     result = finalize_delivery(ir, tmp_path, config())
 
     chunks = read_chunks(tmp_path)
     picture = next(c for c in chunks if 'pic' in c['block_ids'])
-    assert '[Image content: automatic reading, not verified]\nShelves of boxed puzzles' in picture['content']
+    assert 'Shelves of boxed puzzles' in picture['content'] and 'Image content' not in picture['content']
+    assert 'Image content' not in (tmp_path / 'outputs/rag_verified.md').read_text()
     assert picture['metadata']['source_verified'] is False
     assert picture['metadata']['unverified_block_ids'] == ['pic']
     # The verified paragraph shares the chunk and stays unlabelled.
@@ -379,14 +381,16 @@ async def test_unverified_picture_content_reaches_rag_and_delivery_with_its_labe
 
 
 @pytest.mark.asyncio
-async def test_verified_picture_content_carries_the_verified_label(tmp_path):
+async def test_verified_picture_content_is_verified_in_metadata_and_labelled_for_readers(tmp_path):
     ir, source, model = _picture_fixture(tmp_path, 'verified')
     ir, _ = await DocumentReview(config(), model, model).run(ir, tmp_path, source_path=source)
     finalize_delivery(ir, tmp_path, config())
 
     picture = next(c for c in read_chunks(tmp_path) if 'pic' in c['block_ids'])
-    assert '[Image content: automatic reading, verified]\nShelves of boxed puzzles' in picture['content']
+    assert 'Image content' not in picture['content']
     assert picture['metadata']['source_verified'] is True
+    delivery = (tmp_path / 'outputs/delivery.md').read_text()
+    assert '[Image content: automatic reading, verified]\nShelves of boxed puzzles' in delivery
 
 
 @pytest.mark.asyncio
@@ -408,8 +412,7 @@ async def test_oversized_picture_is_split_on_line_boundaries_instead_of_dropped(
 
     parts = [c for c in read_chunks(tmp_path) if 'pic' in c['block_ids']]
     assert len(parts) > 1
-    label = '[Image content: automatic reading, not verified]'
-    assert all(p['content'].startswith(label) or label in p['content'] for p in parts)
+    assert all('Image content' not in p['content'] and p['metadata']['unverified_block_ids'] == ['pic'] for p in parts)
     assert all('Brand comparison table' in p['content'] for p in parts)
     delivered = '\n'.join(p['content'] for p in parts)
     assert all(row in delivered for row in rows)  # every row survives, none cut in half
@@ -417,7 +420,7 @@ async def test_oversized_picture_is_split_on_line_boundaries_instead_of_dropped(
 
 
 @pytest.mark.asyncio
-async def test_unverified_picture_under_an_unverified_heading_still_ships_labelled(tmp_path):
+async def test_unverified_picture_under_an_unverified_heading_still_ships(tmp_path):
     # A 31-page PDF held back 29 of 46 pictures: each sat under a heading its page
     # review could not verify. A heading is navigation; the picture already ships
     # labelled unverified, and the unverified heading text itself still stays out.
@@ -445,5 +448,28 @@ async def test_unverified_picture_under_an_unverified_heading_still_ships_labell
 
     chunks = read_chunks(tmp_path)
     picture = next(c for c in chunks if 'pic' in c['block_ids'])
-    assert '[Image content: automatic reading, not verified]' in picture['content']
+    assert picture['metadata']['unverified_block_ids'] == ['pic']
     assert all('heading' not in c['block_ids'] for c in chunks)
+
+
+@pytest.mark.asyncio
+async def test_documents_index_records_which_delivered_lines_are_image_readings_and_their_review(tmp_path):
+    # The documents a RAG imports keep clean text; the index tells the importer what is an
+    # automatic image reading and whether review confirmed it (decided 2026-10-07).
+    ir, source, model = _picture_fixture(tmp_path, 'needs_review')
+    outputs = tmp_path / 'outputs'
+    (outputs / 'documents/fig0000.md').write_text('# Shelves of boxed puzzles in a shop\n\nShelves of boxed puzzles in a shop')
+    (outputs / 'documents_index.json').write_text(json.dumps([
+        {'document_id': 'main', 'kind': 'main', 'file': 'documents/main.md'},
+        {'document_id': 'fig0000', 'kind': 'figure_asset', 'file': 'documents/fig0000.md'}]))
+    ir, _ = await DocumentReview(config(), model, model).run(ir, tmp_path, source_path=source)
+    finalize_delivery(ir, tmp_path, config())
+
+    index = {d['document_id']: d for d in json.loads((outputs / 'documents_index.json').read_text())}
+    assert index['fig0000']['content_origin'] == 'image_reading'
+    assert index['fig0000']['review_status'] == 'unverified'
+    assert index['main']['image_reading_spans'] == [
+        {'block_id': 'pic', 'review_status': 'unverified', 'start_line': 3, 'end_line': 3}]
+    assert 'review_status' not in index['main']
+    for name in ('main.md', 'fig0000.md'):
+        assert 'Image content' not in (outputs / 'documents' / name).read_text()

@@ -1162,10 +1162,16 @@ class VLMAdapter:
 
             # Image 1: Main crop (primary subject)
             if image_path is not None:
-                # Sending an undersized crop kills the model runner mid-request;
+                enlarged = self._enlarged_figure_png(image_path) if kind in FIGURE_KINDS else None
+                if not (self.config.api_mode == VLMApiMode.OLLAMA
+                        or self.config.image_mode != VLMImageMode.STATIC_URL):
+                    enlarged = None
+                # Sending an undersized image kills the model runner mid-request;
                 # describing the block without it would only invite a made-up
-                # caption, so the enrichment is dropped instead.
-                undersized = self._undersized_image_reason(image_path)
+                # caption, so the enrichment is dropped instead. Screen what is
+                # sent: enlarged, a 184x26 logo's lettering is legible (spot
+                # check 2026-10-07: one PDF's 41 logos were skipped unread).
+                undersized = self._undersized_image_reason(io.BytesIO(enlarged) if enlarged else image_path)
                 if undersized:
                     return EnrichmentOutput(
                         success=False,
@@ -1173,9 +1179,7 @@ class VLMAdapter:
                         error=f"Skipped: {undersized}",
                         duration_seconds=time.time() - start_time,
                     )
-                enlarged = self._enlarged_figure_png(image_path) if kind in FIGURE_KINDS else None
-                if enlarged is not None and (self.config.api_mode == VLMApiMode.OLLAMA
-                                             or self.config.image_mode != VLMImageMode.STATIC_URL):
+                if enlarged is not None:
                     image_url = "data:image/png;base64," + base64.b64encode(enlarged).decode("ascii")
                 else:
                     image_url = self._build_image_url(image_path, doc_id, run_id)
@@ -1313,7 +1317,7 @@ class VLMAdapter:
                 duration_seconds=time.time() - start_time,
             )
 
-    def _image_dimensions(self, image_path: Path) -> tuple[int, int] | None:
+    def _image_dimensions(self, image_path: Path | io.BytesIO) -> tuple[int, int] | None:
         """Read (width, height), or None when the file cannot be identified."""
         try:
             with Image.open(image_path) as image:
@@ -1321,7 +1325,7 @@ class VLMAdapter:
         except (OSError, ValueError):
             return None
 
-    def _undersized_image_reason(self, image_path: Path) -> str | None:
+    def _undersized_image_reason(self, image_path: Path | io.BytesIO) -> str | None:
         """Reason this image must not be sent, or None when it is safe.
 
         Unreadable files return None on purpose: we only divert what we can

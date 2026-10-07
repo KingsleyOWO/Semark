@@ -450,7 +450,9 @@ class NormalizeStage:
 
             # Tag the running heads/feet MinerU typed as ordinary text, so the
             # delivery surfaces can drop them the same way they drop the
-            # furniture MinerU does label.
+            # furniture MinerU does label — once the one-off lines MinerU
+            # mislabelled as furniture are back in the body.
+            blocks = self._release_one_off_furniture(blocks)
             blocks = self._tag_layout_furniture(blocks, page_count=len(page_indices))
 
             # Now that the running heads are identified, use them to repair the
@@ -670,6 +672,7 @@ class NormalizeStage:
             }
             if item_type in PAGE_FURNITURE_TYPES:
                 payload["origin"] = "page_furniture"
+                payload["layout_type"] = item_type
             return payload
         elif block_type == BlockType.IMAGE:
             if item_type == "chart":
@@ -1031,6 +1034,30 @@ class NormalizeStage:
         if len(bbox) < 4:
             return False
         return bbox[3] <= self.FURNITURE_TOP_BAND or bbox[1] >= self.FURNITURE_BOTTOM_BAND
+
+    def _release_one_off_furniture(self, blocks: list[Block]) -> list[Block]:
+        """Return to the body a line MinerU typed header/footer that no other page prints.
+
+        MinerU types by position within whatever it takes for the page, so on a
+        page of slide thumbnails every slide's title bar and caption strip comes
+        back as header/footer. Spot check 2026-10-07: one PDF page's brand
+        slogan, product claims, product lines and product names were dropped as
+        furniture. Running heads recur and page numbers stay furniture; at worst
+        a cover logo's lettering reaches the delivery once.
+        """
+        pages_by_text: dict[str, set[int]] = {}
+        for block in blocks:
+            if block.type == BlockType.TEXT:
+                compact = re.sub(r"\s+", "", str(block.payload.get("text") or ""))
+                pages_by_text.setdefault(compact, set()).add(block.page_idx)
+        for block in blocks:
+            if not is_page_furniture(block) or block.payload.get("layout_type") in (None, "page_number"):
+                continue
+            compact = re.sub(r"\s+", "", str(block.payload.get("text") or ""))
+            if (compact and not _PAGE_NUMBER_RE.fullmatch(compact)
+                    and len(pages_by_text[compact]) < self.FURNITURE_MIN_PAGES):
+                del block.payload["origin"]
+        return blocks
 
     def _tag_layout_furniture(self, blocks: list[Block], page_count: int) -> list[Block]:
         """Tag running heads/feet and page numbers MinerU typed as plain text.

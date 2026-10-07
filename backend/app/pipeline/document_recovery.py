@@ -175,6 +175,10 @@ class RebuildMismatch(ValueError):
     """The live rebuild did not reproduce the verified candidate; nothing of it was published."""
 
 
+class InvalidPlan(ValueError):
+    """The planner chose a tool or target outside this issue's scope; it is told why and plans again."""
+
+
 class RecoveryCommitError(RuntimeError):
     """Abort the run without publishing a partly rebuilt accepted candidate."""
 
@@ -595,15 +599,18 @@ class RecoveryController:
                                 self.state["layout_pages"].get(str(problem["page_idx"])))[0]
                             selected = region.get("word_block_id")
                             if not selected or decision.block_id not in {None, selected}:
-                                raise ValueError("Selected layout region has no matching source image block")
+                                raise InvalidPlan("Selected layout region has no matching source image block")
                             decision.block_id = selected
                         decision.block_id = problem.get("block_id") or decision.block_id
                         permitted = {b.block_id for b in image_targets} if page_scope else {problem.get("block_id")}
                         if decision.block_id not in permitted:
-                            raise ValueError("Image repair requires an in-scope mapped image target")
+                            raise InvalidPlan(
+                                f"Image repair requires an in-scope mapped image target: {decision.block_id} is not "
+                                f"one of {sorted(p for p in permitted if p)}. A picture missing from image_targets has "
+                                "used both full re-reads; choose a listed target or another tool.")
                     decision = self.select_strategy(decision, recent, allowed)
                     if decision.action not in allowed:
-                        raise ValueError("Tool is not allowed for this issue")
+                        raise InvalidPlan(f"Tool {decision.action} is not allowed for this issue; choose one of {allowed}")
                     if decision.action == "defer":
                         issue.update(status="deferred", reason=decision.reason)
                         break
@@ -613,7 +620,7 @@ class RecoveryController:
                     if decision.action == "resolve_source":
                         selected_id = problem.get("block_id") or decision.block_id
                         if selected_id not in {b.block_id for b in scoped_blocks}:
-                            raise ValueError("Source resolution requires an in-scope block_id")
+                            raise InvalidPlan("Source resolution requires an in-scope block_id from source_candidates")
                         issue["located_block_id"] = selected_id
                     # The method is part of the key: after a rejected patch the next method is new work.
                     method = self.repair_method(decision.block_id) if decision.action == "repair_image" else "full"
@@ -814,6 +821,17 @@ class RecoveryController:
                 except BudgetExhausted:
                     issue["status"] = "budget_exhausted"
                     break
+                except InvalidPlan as exc:
+                    # Spot check 2026-10-07: nine page issues ended here after one plan named a picture that had
+                    # used both re-reads. The rejection is the next plan's evidence and counts as an attempt.
+                    self.state["steps"].append({
+                        "key": digest([problem["id"], "invalid_plan", len(self.state["steps"])]),
+                        "issue_id": problem["id"], "action": "invalid_plan", "planned_action": decision.action,
+                        "block_id": decision.block_id, "page_idx": problem.get("page_idx"),
+                        "status": "rejected", "result": str(exc)[:600]})
+                    issue["status"] = "unresolved"
+                    self.save()
+                    continue
                 except Exception as exc:
                     issue.update(status="planner_failed", reason=(type(exc).__name__ + ": " + str(exc))[:600])
                     break

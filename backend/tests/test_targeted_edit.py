@@ -167,8 +167,11 @@ async def test_after_a_rejected_patch_a_targeted_edit_fixes_what_the_audit_named
 
     result = await runner.run(ir)
 
-    steps = [(s.get("method"), s["status"]) for s in runner.state["steps"]]
+    steps = [(s.get("method"), s["status"]) for s in runner.state["steps"] if s["issue_id"] == "image:picture"]
     assert steps == [("delivery_patch", "rejected"), ("targeted_edit", "applied")]
+    # This fixture's page plan names no picture; it is rejected with feedback until the attempt limit.
+    page_steps = [s for s in runner.state["steps"] if s["issue_id"] == "page:0"]
+    assert [s["action"] for s in page_steps] == ["invalid_plan"] * owner.limits.max_recovery_attempts_per_issue
     assert any("橡皮" in issue for issue in model.proposals[0]["known_issues"])
     delivered = "\n".join(b.payload["text"] for b in result.blocks if b.payload.get("agentic_image_origin") == "picture")
     assert "橡皮" not in delivered and "圖片關係：" + FACT in delivered

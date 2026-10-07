@@ -255,7 +255,7 @@ class DeliveryExcerpts:
         for path in delivered_documents(outputs):
             file_owner = document_owners.get(path.name)
             owner, index = None, 0
-            for line in path.read_text().splitlines(keepends=True):
+            for number, line in enumerate(path.read_text().splitlines(keepends=True), 1):
                 if not line.strip():
                     owner = None
                     continue
@@ -264,7 +264,7 @@ class DeliveryExcerpts:
                     owner = marker[1]
                     continue
                 self.paragraphs.append({
-                    "file": str(path.relative_to(run_path)), "paragraph": index,
+                    "file": str(path.relative_to(run_path)), "paragraph": index, "line": number,
                     "text": line, "normalized": normalized_text(plain_text(line)),
                     "block_ids": [owner or file_owner] if owner or file_owner else [],
                     "binding": "source_marker" if owner else "asset_document" if file_owner else "unmatched",
@@ -379,7 +379,8 @@ class DeliveryExcerpts:
     def for_blocks(self, blocks, renderer):
         self._bind(blocks, renderer)
         block_ids = {b.block_id for b in blocks}
-        documents = [{k: v for k, v in paragraph.items() if k != "normalized"}
+        # The file line number only locates spans for the documents index; the audit never sees it.
+        documents = [{k: v for k, v in paragraph.items() if k not in {"normalized", "line"}}
                      for paragraph in self.paragraphs if block_ids.intersection(paragraph["block_ids"])]
         chunks = [{"chunk_id": c.get("chunk_id"), "content": c.get("content", ""),
                    "block_ids": c.get("block_ids", [])}

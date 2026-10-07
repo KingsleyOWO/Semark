@@ -1,4 +1,5 @@
 """Terminal automatic delivery with explicit gaps and a source-verified RAG subset."""
+from pathlib import Path
 from urllib.parse import quote
 
 from app.models.document_ir import BlockType
@@ -9,7 +10,10 @@ from app.pipeline.review_policy import dependency_closed_subset, reviewed_block_
 # Picture content is delivered whether or not the source review could confirm
 # it (policy chosen 2026-10-01: enlarged figures now read correctly, while the
 # same model as verifier passed 3 of 18 usable Validation figures). The review
-# decides which label the content carries, never whether it ships.
+# decides which label the content carries, never whether it ships. The label is
+# written only in the reading copy (delivery.md); text a RAG imports stays clean
+# and carries the review as metadata (decided 2026-10-07: a 「未核對」 line inside
+# retrieved text reads oddly).
 IMAGE_LABELS = {
     "zh-TW": {"verified": "〔圖片內容：自動辨識，已核對〕", "unverified": "〔圖片內容：自動辨識，未核對〕"},
     "en": {"verified": "[Image content: automatic reading, verified]",
@@ -21,24 +25,6 @@ _UNVERIFIED_PICTURE_REASONS = {"content_or_context_unverified", "source_not_mapp
 
 def is_picture_content(block):
     return block.type == BlockType.IMAGE or bool(block.payload.get("agentic_image_origin"))
-
-
-def _label_pictures(content, pictures):
-    """Put each picture's label on the line before its text, in block order.
-
-    A picture whose text cannot be located (a rebuilt split part) is labelled
-    at the top, so no picture content ships unlabelled.
-    """
-    cursor = 0
-    for anchor, label in pictures:
-        position = content.find(anchor, cursor) if anchor else -1
-        if position < 0:
-            content = label + "\n" + content
-            cursor += len(label) + 1
-            continue
-        content = content[:position] + label + "\n" + content[position:]
-        cursor = position + len(label) + 1 + len(anchor)
-    return content
 
 
 class DeliveredBlockEvidence:
@@ -182,9 +168,6 @@ def build_automatic_delivery(ir, run_path, config, review_summary, ledger, upstr
                       for bid in retained - rag_eligible}
     from app.pipeline.semantic.language import resolve_semantic_output_language
     labels = IMAGE_LABELS[resolve_semantic_output_language(config.package.semantic_output_language.value, ir)]
-    anchors = {bid: next((line for line in scrub_transcribed_privacy(
-                   renderer._blocks_to_text([ir.get_block(bid)])).splitlines() if line.strip()), "")
-               for bid in pictures & rag_eligible}
     export_reasons.update({bid: "rechunk_content_not_verified" for bid in absent})
     if config.package.generate_chunks:
         for group in groups:
@@ -229,9 +212,6 @@ def build_automatic_delivery(ir, run_path, config, review_summary, ledger, upstr
                             export_reasons.update({bid: "complete_context_exceeds_chunk_limit" for bid in targets})
                             continue
                     for part, _ in parts:
-                        part.content = _label_pictures(part.content, [
-                            (anchors.get(bid, ""), labels["verified" if bid in eligible else "unverified"])
-                            for bid in part.block_ids if bid in pictures])
                         if any(c.block_ids == part.block_ids and c.content == part.content for c in chunks):
                             continue
                         _scrub_chunk_metadata(part.metadata)
@@ -308,7 +288,61 @@ def build_automatic_delivery(ir, run_path, config, review_summary, ledger, upstr
                                                   if b.block_id in unverified_pictures else None)
                                   if b.block_id in pictures else None}
                                  for b in ir.blocks if not rendered[b.block_id][1]]}, ensure_ascii=False, indent=2)
+    index_image_readings(ir, run_path, renderer, pictures, eligible,
+                         [b for b in ir.blocks if not rendered[b.block_id][1]])
     return summary
+
+
+def index_image_readings(ir, run_path, renderer, pictures, eligible, delivered_blocks):
+    """Mark in documents_index.json what is an automatic image reading and whether review confirmed it.
+
+    A picture's own document gets content_origin and review_status. Any other document lists
+    image_reading_spans: file line ranges whose lines bind to exactly one picture block, so a RAG
+    importer can attach the review to chunks without a label in the text. The index is not part
+    of the delivery digest, so reviewed records stay valid.
+    """
+    from app.pipeline.final_delivery import read_json, read_jsonl
+    from app.pipeline.review_sources import DeliveryExcerpts
+
+    outputs = run_path / "outputs"
+    index = read_json(outputs / "documents_index.json", None)
+    if not isinstance(index, list):
+        return
+    origin = {bid: ir.get_block(bid).payload.get("agentic_image_origin") or bid for bid in pictures}
+
+    def review(ids):
+        confirmed = [bid in eligible for bid in ids]
+        return "verified" if all(confirmed) else "partially_verified" if any(confirmed) else "unverified"
+    assets = {row.get("asset_id"): row.get("block_id") for row in read_jsonl(outputs / "assets_index.jsonl")}
+    excerpts = DeliveryExcerpts(run_path, delivered_blocks)
+    excerpts._bind(delivered_blocks, renderer)
+    exact = {"source_marker", "asset_document", "source_text", "contained_source_text"}
+    for entry in index:
+        entry.pop("image_reading_spans", None)
+        picture = assets.get(entry.get("document_id"))
+        if picture in origin.values():
+            entry.update(content_origin="image_reading",
+                         review_status=review([bid for bid, root in origin.items() if root == picture]))
+            continue
+        name = "documents/" + Path(str(entry.get("file") or "")).name
+        spans = []
+        for paragraph in excerpts.paragraphs:
+            owners = paragraph["block_ids"]
+            if paragraph["file"] != "outputs/" + name:
+                continue
+            if paragraph["binding"] not in exact or len(owners) != 1 or owners[0] not in origin:
+                spans.append(None)  # any other line ends a span
+                continue
+            status = "verified" if owners[0] in eligible else "unverified"
+            last = spans[-1] if spans else None
+            if last and last["block_id"] == origin[owners[0]] and last["review_status"] == status:
+                last["end_line"] = paragraph["line"]
+            else:
+                spans.append({"block_id": origin[owners[0]], "review_status": status,
+                              "start_line": paragraph["line"], "end_line": paragraph["line"]})
+        if spans := [span for span in spans if span]:
+            entry["image_reading_spans"] = spans
+    atomic_write_json(outputs / "documents_index.json", index, ensure_ascii=False, indent=2)
 
 
 def split_verified_table(renderer, ir, chunk, targets, max_tokens):
@@ -479,8 +513,7 @@ def split_picture_lines(renderer, ir, chunk, targets, max_tokens, asset_records)
     context = [scrub_transcribed_privacy(renderer._blocks_to_text([ir.get_block(bid)]))
                for bid in chunk.block_ids if bid != block.block_id]
     header = "\n\n".join(t for t in [*context, title] if t)
-    # Room for the label line _label_pictures adds to every part.
-    budget = max_tokens - estimate_tokens(header) - 32
+    budget = max_tokens - estimate_tokens(header)
     if budget <= 0 or any(estimate_tokens(line) > budget for line in body):
         return []
     groups, current = [], []

@@ -334,6 +334,20 @@ class RecoveryController:
                      and len(b.bbox_norm) == 4 and b.bbox_norm[0] < b.bbox_norm[2]
                      and b.bbox_norm[1] < b.bbox_norm[3])]
 
+    def unaccepted_pictures(self, ir, record):
+        """Pictures the page's last review did not accept; a re-read picture is reviewed as its parts."""
+        pictures = set()
+        for finding in record.get("review", {}).get("blocks", []):
+            if finding.get("status") == "verified" and finding.get("context_complete", True):
+                continue
+            block = ir.get_block(finding.get("block_id"))
+            if block is None:
+                continue
+            origin = block.payload.get("agentic_image_origin")
+            if origin or block.type == BlockType.IMAGE:
+                pictures.add(origin or block.block_id)
+        return pictures
+
     def reconcile_image_findings(self, ir, page, record):
         """A later source audit can invalidate an earlier scoped success."""
         findings = {item["block_id"]: item for item in record.get("review", {}).get("blocks", [])}
@@ -525,6 +539,10 @@ class RecoveryController:
                         issue["status"] = "superseded"
                         break
                     image_targets = self.image_targets(ir, problem["page_idx"]) if page_scope else []
+                    unaccepted = self.unaccepted_pictures(ir, current) if page_scope else set()
+                    if unaccepted:
+                        # Re-reading a picture the review accepted cannot fix the page.
+                        image_targets = [b for b in image_targets if b.block_id in unaccepted]
                     if image_targets:
                         allowed[0:0] = ["ocr_image", "repair_image"]
                     allowed = [a for a in allowed if a != "ocr_image" or sum(
@@ -606,8 +624,9 @@ class RecoveryController:
                         if decision.block_id not in permitted:
                             raise InvalidPlan(
                                 f"Image repair requires an in-scope mapped image target: {decision.block_id} is not "
-                                f"one of {sorted(p for p in permitted if p)}. A picture missing from image_targets has "
-                                "used both full re-reads; choose a listed target or another tool.")
+                                f"one of {sorted(p for p in permitted if p)}. A picture missing from image_targets was "
+                                "accepted by the page review or has used both full re-reads; choose a listed target "
+                                "or another tool.")
                     decision = self.select_strategy(decision, recent, allowed)
                     if decision.action not in allowed:
                         raise InvalidPlan(f"Tool {decision.action} is not allowed for this issue; choose one of {allowed}")

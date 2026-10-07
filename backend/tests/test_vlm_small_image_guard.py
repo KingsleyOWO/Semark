@@ -19,7 +19,9 @@ passes through; the three producers (YOLO crops, MinerU image files, page
 renders) cannot each be trusted to check.
 """
 
+import base64
 import importlib.util
+import io
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -98,10 +100,36 @@ class EnrichSkipsUndersizedImagesTest(unittest.IsolatedAsyncioTestCase):
             adapter = VLMAdapter()
             adapter.client = _ExplodingClient()
 
-            result = await adapter._enrich(image_path=path, kind="figure_caption")
+            result = await adapter._enrich(image_path=path, kind="table_summary")
 
             self.assertFalse(result.success)
             self.assertIn("34x31", result.error or "")
+
+    async def test_a_figure_is_screened_at_the_size_it_is_sent(self):
+        """Spot check 2026-10-07: a PDF's wall of client logos had 41 crops such as
+        184x26 skipped unread, though they are enlarged before sending."""
+        sink: dict = {}
+        with TemporaryDirectory() as tmp:
+            logo = _write_image(Path(tmp), "logo.png", (184, 26))
+            adapter = VLMAdapter()
+            adapter.client = _capturing_client(sink)
+
+            await adapter._enrich(image_path=logo, kind="figure_description")
+
+            [part] = _image_parts(sink)
+            sent = Image.open(io.BytesIO(base64.b64decode(part["image_url"]["url"].split(",", 1)[1])))
+            self.assertGreaterEqual(min(sent.size), VLM_MIN_IMAGE_SIDE)
+
+    async def test_a_figure_still_too_small_after_enlarging_is_skipped(self):
+        with TemporaryDirectory() as tmp:
+            sliver = _write_image(Path(tmp), "rule.png", (400, 4))
+            adapter = VLMAdapter()
+            adapter.client = _ExplodingClient()
+
+            result = await adapter._enrich(image_path=sliver, kind="figure_description")
+
+            self.assertFalse(result.success)
+            self.assertIn("2400x24", result.error or "")
 
     async def test_undersized_page_thumbnail_is_dropped_but_the_crop_still_goes(self):
         """The thumbnail is optional context — losing it must not cost us the

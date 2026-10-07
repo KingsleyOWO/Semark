@@ -85,7 +85,7 @@ def build_automatic_delivery(ir, run_path, config, review_summary, ledger, upstr
     rendered = {b.block_id: (text, reason) for b, text, reason in expected_blocks(ir, outputs)}
     valid = (review_summary.get("evidence_valid", False) and review_summary.get("inventory_complete")
              and config.agentic.mode != "off" and not upstream_veto)
-    eligible, reasons, dependencies, navigation = set(), {}, {}, {}
+    eligible, reasons, dependencies, recorded = set(), {}, {}, {}
     heading_stack = []
     for block in ir.blocks:
         bid = block.block_id
@@ -99,7 +99,6 @@ def build_automatic_delivery(ir, run_path, config, review_summary, ledger, upstr
             heading_stack.append((level, bid))
         else:
             dependencies[bid] = {h[1] for h in heading_stack}
-        navigation[bid] = set(dependencies[bid])
         record = records.get(bid, {})
         source_records = [pages.get(index, {}) for index in record.get("source_pages", [])]
         findings = [next((v for v in p.get("review", {}).get("blocks", []) if v["block_id"] == bid), {})
@@ -108,8 +107,9 @@ def build_automatic_delivery(ir, run_path, config, review_summary, ledger, upstr
             # Navigation is optional for explicitly self-contained content; units/qualifiers
             # identified by the verifier remain hard dependencies below.
             dependencies[bid] = set()
-        dependencies[bid].update(record.get("depends_on_block_ids", []))
-        dependencies[bid].update(block.payload.get("agentic_depends_on_block_ids", []))
+        recorded[bid] = (set(record.get("depends_on_block_ids", []))
+                         | set(block.payload.get("agentic_depends_on_block_ids", [])))
+        dependencies[bid].update(recorded[bid])
         source_pages = record.get("source_pages", [])
         good = bool(valid and source_pages and not block.payload.get("agentic_gap"))
         for index in source_pages:
@@ -129,11 +129,10 @@ def build_automatic_delivery(ir, run_path, config, review_summary, ledger, upstr
     unverified_pictures = {bid for bid in pictures if reasons.get(bid) in _UNVERIFIED_PICTURE_REASONS} if valid else set()
     # Dependants cannot survive missing required context, including chains. Navigation alone is not required:
     # a picture already shipping labelled unverified does not need its section heading verified (a 31-page
-    # PDF held back 29 of 46 pictures that way). Units, qualifiers and other recorded dependencies still bind it.
-    closure = {bid: deps - navigation.get(bid, set()) if bid in unverified_pictures
-               and not (set(records.get(bid, {}).get("depends_on_block_ids", []))
-                        | set(ir.get_block(bid).payload.get("agentic_depends_on_block_ids", []))) & navigation.get(bid, set())
-               else deps for bid, deps in dependencies.items()}
+    # PDF held back 29 of 46 pictures that way). Units, qualifiers and other recorded dependencies still bind it,
+    # a recorded heading included, but not the headings above that one (spot check 2026-10-07: 7 pictures citing
+    # their own verified section title were held back by an unverified cover title).
+    closure = {bid: recorded[bid] if bid in unverified_pictures else deps for bid, deps in dependencies.items()}
     retained = dependency_closed_subset(eligible | unverified_pictures, closure)
     reasons.update({bid: "required_context_unverified" for bid in eligible - retained})
     unverified_pictures &= retained

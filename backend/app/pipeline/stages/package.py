@@ -4119,6 +4119,8 @@ class PackageStage:
         caption = str(result.get("semantic_caption") or "")
         if caption:
             cleaned = _LATIN_TERM_RE.sub(keep, caption)
+            # A dropped gloss leaves its brackets behind: 「商標局（USPTO）」 -> 「商標局（）」.
+            cleaned = re.sub(r"[（(][ \t]*[)）]", "", cleaned)
             cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
             cleaned = re.sub(r" +(?=[，。、；：）」！？])", "", cleaned)
             result["semantic_caption"] = cleaned.strip()

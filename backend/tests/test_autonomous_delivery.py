@@ -453,6 +453,48 @@ async def test_unverified_picture_under_an_unverified_heading_still_ships(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_picture_citing_its_section_title_is_not_held_back_by_the_cover_title(tmp_path):
+    # Spot check 2026-10-07: five logos under a verified 「商標演進史」-style section title
+    # recorded that title as context; the review left the cover title above it
+    # unconfirmed, and the whole heading chain then held the logos back.
+    blocks = [Block(block_id='cover', type=BlockType.TEXT, page_idx=0, reading_order=0,
+                    payload={'text': 'Example Annual Report', 'text_level': 1}),
+              Block(block_id='section', type=BlockType.TEXT, page_idx=0, reading_order=1,
+                    payload={'text': 'Logo history', 'text_level': 2}),
+              Block(block_id='pic', type=BlockType.IMAGE, page_idx=0, reading_order=2,
+                    payload={'img_path': 'pic.png', 'caption': ''})]
+    ir, source = fixture(tmp_path, blocks=blocks)
+    outputs = tmp_path / 'outputs'
+    (outputs / 'assets_index.jsonl').write_text(json.dumps(
+        {'asset_id': 'fig0000', 'block_id': 'pic', 'retrieval_text': 'A green sailing ship logo, 1982'}))
+    (outputs / 'documents/main.md').write_text(
+        '# Example Annual Report\n\n## Logo history\n\nA green sailing ship logo, 1982')
+    (outputs / 'chunks.jsonl').write_text('\n'.join(json.dumps(c) for c in [
+        {'chunk_id': 'c0', 'block_ids': ['cover'], 'page_indices': [0], 'content': '# Example Annual Report'},
+        {'chunk_id': 'c1', 'block_ids': ['section'], 'page_indices': [0], 'content': '## Logo history'},
+        {'chunk_id': 'c2', 'block_ids': ['pic'], 'page_indices': [0], 'content': 'A green sailing ship logo, 1982'}]))
+
+    def review(_, value):
+        by_id = {b['block_id']: b for b in value['blocks']}
+        by_id['cover'].update(context_complete=False)
+        by_id['section'].update(context_complete=True)
+        by_id['pic'].update(context_complete=False, depends_on_block_ids=['section'])
+        value.update(source_complete=False, issues=['Cover title context unconfirmed.'])
+        return value
+    model = AuditModel(review)
+    ir, _ = await DocumentReview(config(), model, model).run(ir, tmp_path, source_path=source)
+    finalize_delivery(ir, tmp_path, config())
+
+    chunks = read_chunks(tmp_path)
+    picture = next(c for c in chunks if 'pic' in c['block_ids'])
+    assert 'section' in picture['block_ids'] and 'Logo history' in picture['content']
+    assert picture['metadata']['unverified_block_ids'] == ['pic']
+    assert all('cover' not in c['block_ids'] for c in chunks)
+    assert '[Image content: automatic reading, not verified]\nA green sailing ship logo, 1982' in (
+        outputs / 'delivery.md').read_text()
+
+
+@pytest.mark.asyncio
 async def test_documents_index_records_which_delivered_lines_are_image_readings_and_their_review(tmp_path):
     # The documents a RAG imports keep clean text; the index tells the importer what is an
     # automatic image reading and whether review confirmed it (decided 2026-10-07).

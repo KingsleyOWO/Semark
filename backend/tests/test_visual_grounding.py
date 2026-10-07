@@ -98,6 +98,15 @@ def test_ungrounded_latin_brand_stripped_from_caption_and_keywords():
     assert "拖放操作" in grounded["keywords"]
 
 
+def test_dropped_latin_gloss_takes_its_brackets_along():
+    output = {"semantic_caption": "中為示範專利局（XPTO）專利證書，下方有弧形筆觸（swoosh）裝飾。"}
+    grounding = PackageStage._visual_grounding_tokens_from_texts(["示範專利局 Example Patent Office"])
+
+    caption = PackageStage._ground_visual_output_terms(output, grounding)["semantic_caption"]
+
+    assert caption == "中為示範專利局專利證書，下方有弧形筆觸裝飾。", caption
+
+
 def test_grounding_leaves_english_corpus_untouched():
     # Grounding is a zh-corpus guard: an English corpus caption is legitimate
     # English prose, and token-dropping would mangle it.

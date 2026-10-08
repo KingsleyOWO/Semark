@@ -515,3 +515,72 @@ async def test_documents_index_records_which_delivered_lines_are_image_readings_
     assert 'review_status' not in index['main']
     for name in ('main.md', 'fig0000.md'):
         assert 'Image content' not in (outputs / 'documents' / name).read_text()
+
+
+def _split_picture_fixture(tmp_path, picture_status, all_text):
+    """A picture delivered as its own document, as packaging writes it."""
+    ir, source, model = _picture_fixture(tmp_path, picture_status)
+    outputs = tmp_path / 'outputs'
+    description = 'A paper sachet of herbal ointment on a white background'
+    retrieval = '\n'.join([description, 'The sachet is printed in green.', *all_text, 'ointment'])
+    (outputs / 'assets_index.jsonl').write_text(json.dumps({
+        'type': 'figure_asset', 'asset_id': 'fig0000', 'block_id': 'pic', 'title': description,
+        'retrieval_text': retrieval, 'facts': ['The sachet is printed in green.'],
+        'keywords': ['ointment'], 'all_text': all_text}))
+    (outputs / 'documents/main.md').write_text('Source page 1: Revenue 100, cost 80.')
+    (outputs / 'documents/fig0000.md').write_text(f'# {description}\n\n{retrieval}\n')
+    (outputs / 'documents_index.json').write_text(json.dumps([
+        {'document_id': 'main', 'kind': 'main', 'title': 'Report', 'file': str(outputs / 'documents/main.md')},
+        {'document_id': 'fig0000', 'kind': 'figure_asset', 'title': description,
+         'file': str(outputs / 'documents/fig0000.md')}]))
+    (outputs / 'chunks.jsonl').write_text('\n'.join(json.dumps(c) for c in [
+        {'chunk_id': 'c0', 'block_ids': ['b0'], 'page_indices': [0], 'content': 'Source page 1: Revenue 100, cost 80.'},
+        {'chunk_id': 'c1', 'block_ids': ['pic'], 'page_indices': [0], 'content': retrieval}]))
+    return ir, source, model
+
+
+@pytest.mark.asyncio
+async def test_unverified_picture_keeps_only_the_text_read_off_it(tmp_path):
+    # 2026-10-08, the user's choice: of ten unverified pictures sampled, one sachet was
+    # described as a sake bottle. Without review, the description, facts and keywords go.
+    ir, source, model = _split_picture_fixture(tmp_path, 'needs_review', ['Herbal Balm', '60g'])
+    ir, _ = await DocumentReview(config(), model, model).run(ir, tmp_path, source_path=source)
+    finalize_delivery(ir, tmp_path, config())
+    outputs = tmp_path / 'outputs'
+
+    assert (outputs / 'documents/fig0000.md').read_text() == '# Picture, page 1\n\nHerbal Balm\n60g\n'
+    index = json.loads((outputs / 'documents_index.json').read_text())
+    figure = next(e for e in index if e['document_id'] == 'fig0000')
+    assert figure['title'] == 'Picture, page 1' and figure['review_status'] == 'unverified'
+    picture = next(c for c in read_chunks(tmp_path) if 'pic' in c['block_ids'])
+    assert 'Herbal Balm\n60g' in picture['content'] and 'sachet' not in picture['content']
+    assert 'ointment' not in picture['content']
+    delivery = (outputs / 'delivery.md').read_text()
+    assert 'sachet' not in delivery and 'Herbal Balm' in delivery
+    report = json.loads((outputs / 'processing_report.json').read_text())
+    assert next(b for b in report['blocks'] if b['block_id'] == 'pic')['delivered_content'] == 'text_read_from_image'
+    assert checked_automatic_artifact(tmp_path, 'rag_chunks.jsonl')
+
+
+@pytest.mark.asyncio
+async def test_unverified_picture_with_nothing_read_leaves_no_document(tmp_path):
+    ir, source, model = _split_picture_fixture(tmp_path, 'needs_review', [])
+    ir, _ = await DocumentReview(config(), model, model).run(ir, tmp_path, source_path=source)
+    finalize_delivery(ir, tmp_path, config())
+    outputs = tmp_path / 'outputs'
+
+    assert not (outputs / 'documents/fig0000.md').exists()
+    assert [e['document_id'] for e in json.loads((outputs / 'documents_index.json').read_text())] == ['main']
+    assert all('pic' not in c['block_ids'] for c in read_chunks(tmp_path))
+    assert 'sachet' not in (outputs / 'delivery.md').read_text()
+
+
+@pytest.mark.asyncio
+async def test_verified_picture_keeps_its_description(tmp_path):
+    ir, source, model = _split_picture_fixture(tmp_path, 'verified', ['Herbal Balm'])
+    ir, _ = await DocumentReview(config(), model, model).run(ir, tmp_path, source_path=source)
+    finalize_delivery(ir, tmp_path, config())
+
+    assert 'A paper sachet of herbal ointment' in (tmp_path / 'outputs/documents/fig0000.md').read_text()
+    picture = next(c for c in read_chunks(tmp_path) if 'pic' in c['block_ids'])
+    assert 'A paper sachet of herbal ointment' in picture['content']

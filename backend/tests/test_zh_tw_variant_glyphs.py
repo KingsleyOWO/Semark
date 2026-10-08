@@ -328,3 +328,13 @@ def test_table_bodies_and_captions_get_the_variant_fix():
     assert converted["table_body"] == "<table><tr><td>淨零</td><td>說明</td></tr></table>"
     assert converted["table_caption"] == ["表1 淨零轉型路徑"]
     assert converted["table_footnote"] == ["資料來源：本研究整理，詳如說明。"]
+
+
+def test_zhou_stays_as_written_in_titles_and_dates():
+    """2026-10-08: s2tw turned the magazine titles 商業周刊/今周刊 into 「週刊」 and
+    70周年 into 70週年 whenever the same text carried a simplified glyph."""
+    from app.pipeline.zh_text import to_taiwan_traditional
+
+    assert to_taiwan_traditional("商业周刊封面，警卫室") == "商業周刊封面，警衛室"
+    assert to_taiwan_traditional("今周刊报道") == "今周刊報道"
+    assert to_taiwan_traditional("歡慶70週年，警卫室") == "歡慶70週年，警衛室"

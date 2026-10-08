@@ -185,7 +185,7 @@ async def test_exported_fallback_figure_title_does_not_shift_when_earlier_image_
     _, before = await package._export_assets(ir, tmp_path / 'first-assets', cache)
     ir.blocks.pop(0)
     _, after = await package._export_assets(ir, tmp_path / 'second-assets', cache)
-    assert before['photo-b'].title == after['photo-b'].title == 'Figure semantics'
+    assert before['photo-b'].title == after['photo-b'].title == '圖表語意'
     assert before['photo-b'].retrieval_text == after['photo-b'].retrieval_text
     assert before['photo-b'].asset_id == after['photo-b'].asset_id
     assert before['photo-b'].asset_path == after['photo-b'].asset_path

@@ -111,6 +111,8 @@ _ZH_TW_VARIANT_PAIRS = (
     ("幹", "干"),
     ("瞭", "了"),
     ("閤", "合"),
+    # 2026-10-08: 商業周刊/今周刊 are titles and 周年 is standard zh-TW; s2tw made them 週.
+    ("週", "周"),
 )
 _ZH_TW_VARIANT_CHARS = frozenset(source for _, source in _ZH_TW_VARIANT_PAIRS)
 

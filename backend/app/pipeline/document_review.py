@@ -36,7 +36,7 @@ OCR_VOTE_POLICY = (
     "the author's typos and variant spellings: never 'correct' it, and do not fail a block for a spelling OCR "
     "confirms. verdict=delivery settles that line as delivered, even where your own reading of it differs. "
     "OCR is evidence, not certification: still check every other part of the picture against the pixels.")
-REVIEW_VERSION = "document-review-20261006.1-slide-layout-and-ocr-settled-lines"
+REVIEW_VERSION = "document-review-20261008.1-dense-pages-in-parts"
 SCHEDULER_VERSION = "tool-scheduler-20260930.1-complete-tool-budget"
 
 
@@ -58,6 +58,101 @@ class PageReview(BaseModel):
     observation: str = Field(min_length=1, max_length=1000)
     issues: list[str] = Field(max_length=30)
     declared_gaps_only: bool = False
+
+
+# Largest request, in characters of its JSON, the review model is given at once.
+REGION_PAYLOAD_LIMIT = 65000
+LAYOUT_PAYLOAD_LIMIT = 42000
+# A band is halved no further than this (page height is 1000).
+MIN_REGION_HEIGHT = 30
+LAYOUT_PART_NOTE = ("The delivered boundaries are split into consecutive parts, each checked on its own; this part "
+                    "starts with the last boundary of the previous part. Judge the order within this part only: "
+                    "boundaries before or after it are in the other parts, not missing.")
+
+
+def merge_part_reviews(reviews):
+    """A band checked in several crops passes only if every crop passed."""
+    if len(reviews) == 1:
+        return reviews[0]
+    return PageReview(blocks=[b for r in reviews for b in r.blocks],
+                      source_complete=all(r.source_complete for r in reviews),
+                      reading_order_correct=all(r.reading_order_correct for r in reviews),
+                      observation=" | ".join(r.observation for r in reviews)[:1000],
+                      issues=[i for r in reviews for i in r.issues][:30])
+
+
+def layout_parts(page, boundaries, cores, limit=LAYOUT_PAYLOAD_LIMIT):
+    """The global-order check as consecutive slices of the delivered boundaries, each one request.
+
+    Order holds when every adjacent pair is in order, so each slice repeats the previous
+    slice's last boundary and every pair is still judged in some request. 2026-10-08: five
+    image-dense pages were never checked, their boundaries 55-109k characters long.
+    """
+    def payload(items, part=None):
+        result = {"page_idx": page,
+                  "document_boundaries": [item for kind, item in items if kind == "document"],
+                  "chunk_boundaries": [item for kind, item in items if kind == "chunk"],
+                  "region_cores": cores}
+        return {**result, "boundary_part": part} if part else result
+
+    if len(str(payload(boundaries))) <= limit:
+        return [payload(boundaries)]
+    slices, current = [], []
+    for item in boundaries:
+        if len(current) > (1 if slices else 0) and len(str(payload(current + [item], LAYOUT_PART_NOTE))) > limit:
+            slices.append(current)
+            current = current[-1:]
+        current.append(item)
+    slices.append(current)
+    return [payload(items, {"part": number, "of": len(slices), "note": LAYOUT_PART_NOTE})
+            for number, items in enumerate(slices, 1)]
+
+
+def reading_parts(payload, limit=None):
+    """A Word page whose pictures' independent readings overflow one request, judged in parts.
+
+    Each part carries the readings of some pictures and answers for their blocks only;
+    every other block stays as context and the whole page and delivery stay in view, so
+    completeness and order are still judged on the entire page. Blocks no picture owns
+    are answered in the first part. None when one picture's part alone overflows.
+    2026-10-08: a Word page of 8 blocks was left unreviewed this way.
+    """
+    limit = limit or REGION_PAYLOAD_LIMIT
+    readings, scopes = payload.get("independent_image_readings") or {}, payload.get("image_reading_scopes") or {}
+    if not readings:
+        return None
+    votes = payload.get("independent_ocr_votes") or {}
+    owned = {bid for ids in scopes.values() for bid in ids}
+    free = [bid for bid in payload["required_block_ids"] if bid not in owned]
+    base = {key: value for key, value in payload.items()
+            if key not in {"independent_image_readings", "image_reading_scopes", "independent_ocr_votes"}}
+
+    def part(origins, first):
+        ids = set(free if first else []) | {bid for origin in origins for bid in scopes.get(origin, [])}
+        required = [bid for bid in payload["required_block_ids"] if bid in ids]
+        result = {**base, "required_block_ids": required,
+                  "blocks": [b for b in payload["blocks"] if b["block_id"] in ids],
+                  "context_blocks": payload.get("context_blocks", []) + [
+                      {"block_id": b["block_id"], "untrusted_extracted_text": b.get("untrusted_extracted_text", "")}
+                      for b in payload["blocks"] if b["block_id"] not in ids],
+                  "independent_image_readings": {o: readings[o] for o in origins},
+                  "image_reading_scopes": {o: scopes[o] for o in origins if o in scopes},
+                  "response_scope": "The pictures' independent readings come in several parts. Return block "
+                                    "reviews only for required_block_ids; all other blocks are context. Still "
+                                    "check ENTIRE page completeness/order."}
+        if part_votes := {bid: vote for bid, vote in votes.items() if bid in ids}:
+            result["independent_ocr_votes"] = part_votes
+        return result
+
+    groups, current = [], []
+    for origin in readings:
+        if current and len(str(part(current + [origin], not groups))) > limit:
+            groups.append(current)
+            current = []
+        current.append(origin)
+    groups.append(current)
+    parts = [part(origins, index == 0) for index, origins in enumerate(groups)]
+    return None if any(len(str(p)) > limit for p in parts) else parts
 
 
 def target_block_reviews(review, required_ids, context_ids=()):
@@ -621,10 +716,18 @@ class DocumentReview(AgenticRepair):
                     # "correcting" printed typos; it judges with OCR's reading in hand.
                     payload["independent_ocr_votes"] = votes
                     payload["ocr_vote_policy"] = OCR_VOTE_POLICY
-                if len(str(payload)) > 65000:
-                    self._record(record, "not_reviewed", "page_exceeds_image_relationship_context_limit")
-                    return record
-            review = await self._audit_page_contract(payload, images)
+            parts = reading_parts(payload) if len(str(payload)) > REGION_PAYLOAD_LIMIT else [payload]
+            if not parts:
+                self._record(record, "not_reviewed", "page_exceeds_image_relationship_context_limit")
+                return record
+            reviews = [await self._audit_page_contract(part, images) for part in parts]
+            review = reviews[0] if len(reviews) == 1 else PageReview(
+                blocks=[b for result in reviews for b in result.blocks],
+                source_complete=all(result.source_complete for result in reviews),
+                reading_order_correct=all(result.reading_order_correct for result in reviews),
+                declared_gaps_only=all(result.declared_gaps_only for result in reviews),
+                issues=list(dict.fromkeys(issue for result in reviews for issue in result.issues))[:30],
+                observation=" | ".join(result.observation for result in reviews)[:1000])
             review = target_block_reviews(review, [b.block_id for b in blocks],
                                           [b["block_id"] for b in context_blocks])
             record["image_only_issues"] = (review.source_complete and review.reading_order_correct
@@ -684,7 +787,7 @@ class DocumentReview(AgenticRepair):
 
 
     async def _inspect_segments(self, page, ir, inventory, run_path, record, blocks):
-        from app.pipeline.document_recovery import crop_region, regions
+        from app.pipeline.document_recovery import regions
         from app.pipeline.stages.chunk import ChunkStage
 
         renderer = ChunkStage(self.config)
@@ -695,55 +798,33 @@ class DocumentReview(AgenticRepair):
         observations = {}
         try:
             for index, core in enumerate(cores):
-                selected = []
-                for block in blocks:
-                    box = block.payload.get("agentic_source_region") or block.bbox_norm
-                    if len(box) != 4 or box[2] <= box[0] or box[3] <= box[1]:
-                        raise ValueError("region_source_coordinates_unavailable")
-                    if box[0] < core[2] and box[2] > core[0] and box[1] < core[3] and box[3] > core[1]:
-                        selected.append(block)
-                docs, chunks = excerpts.for_blocks(selected, renderer)
-                payload = {
-                    "page_idx": page, "target_region": core,
-                    "required_block_ids": [b.block_id for b in selected],
-                    "blocks": [{"block_id": b.block_id, "untrusted_extracted_text": renderer._block_to_text(b)}
-                               for b in selected],
-                    "delivered_documents": docs, "delivered_chunks": chunks,
-                    "chunks_required": self.config.package.generate_chunks,
-                    "policy": "Verify only content inside the core region; repeated overlap is context, not duplicated content.",
-                }
-                if len(selected) > 45 or len(str(payload)) > 65000:
-                    raise ValueError("region_exceeds_review_context_limit")
-                image, crop = crop_region(inventory, page, core, inventory.directory / f"segments-{page}", index)
-                payload["crop_bbox"] = crop
-                review = PageReview.model_validate(await self._call("audit_page", payload, image, PageReview))
-                ids = [b.block_id for b in review.blocks]
-                if len(ids) != len(set(ids)) or set(ids) != {b.block_id for b in selected}:
-                    raise ValueError("Region review omitted/duplicated/invented IDs")
-                record["images"].append({"path": str(image.relative_to(run_path)),
-                                         "sha256": hashlib.sha256(image.read_bytes()).hexdigest(),
-                                         "label": f"Core region {core}"})
-                record["regions"].append({"core": core, "review": review.model_dump()})
-                for item in review.blocks:
-                    observations.setdefault(item.block_id, []).append(item)
+                parts = await self._review_region(page, core, str(index), blocks, excerpts, renderer,
+                                                  inventory, run_path, record)
+                region = {"core": core, "review": merge_part_reviews([review for _, review in parts]).model_dump()}
+                if len(parts) > 1:
+                    region["parts"] = [{"core": part, "review": review.model_dump()} for part, review in parts]
+                record["regions"].append(region)
+                for _, review in parts:
+                    for item in review.blocks:
+                        observations.setdefault(item.block_id, []).append(item)
                 self._save()
             if set(observations) != {b.block_id for b in blocks}:
                 raise ValueError("Segments failed to cover all source blocks")
             from app.pipeline.recovery_models import LayoutVerification
             actual_docs, actual_chunks = excerpts.for_blocks(blocks, renderer)
-            layout_payload = {
-                "page_idx": page,
-                "document_boundaries": [{**d, "text": d["text"][:220] + " … " + d["text"][-120:]}
-                                        for d in actual_docs],
-                "chunk_boundaries": [{**c, "content": c["content"][:220] + " … " + c["content"][-120:]}
-                                     for c in actual_chunks],
-                "region_cores": cores,
-            }
-            if len(str(layout_payload)) > 42000:
-                raise ValueError("layout_review_context_limit")
-            layout = LayoutVerification.model_validate(await self._call(
-                "verify_layout", layout_payload, inventory.image(page), LayoutVerification))
+            boundaries = ([("document", {**d, "text": d["text"][:220] + " … " + d["text"][-120:]}) for d in actual_docs]
+                          + [("chunk", {**c, "content": c["content"][:220] + " … " + c["content"][-120:]})
+                             for c in actual_chunks])
+            layouts = [LayoutVerification.model_validate(await self._call(
+                "verify_layout", payload, inventory.image(page), LayoutVerification))
+                for payload in layout_parts(page, boundaries, cores)]
+            layout = layouts[0] if len(layouts) == 1 else LayoutVerification(
+                reading_order_correct=all(part.reading_order_correct for part in layouts),
+                observation=" | ".join(part.observation for part in layouts)[:1000],
+                issues=[issue for part in layouts for issue in part.issues][:10])
             record["layout_review"] = layout.model_dump()
+            if len(layouts) > 1:
+                record["layout_review"]["parts"] = len(layouts)
             combined = {
                 "blocks": [{"block_id": bid,
                             "status": "verified" if all(v.status == "verified" for v in values) else "needs_review",
@@ -764,6 +845,50 @@ class DocumentReview(AgenticRepair):
         except Exception as exc:
             self._record(record, "not_reviewed", "region_review_failed: " + str(exc)[:400])
         return record
+
+    async def _review_region(self, page, core, name, blocks, excerpts, renderer, inventory, run_path, record):
+        """Audit one source band; a band too large for one request is halved until each half fits.
+
+        Each half is its own crop, so the model still sees everything printed there and can
+        report content the parser missed, which a list of blocks split across requests could not.
+        """
+        from app.pipeline.document_recovery import crop_region
+
+        selected = []
+        for block in blocks:
+            box = block.payload.get("agentic_source_region") or block.bbox_norm
+            if len(box) != 4 or box[2] <= box[0] or box[3] <= box[1]:
+                raise ValueError("region_source_coordinates_unavailable")
+            if box[0] < core[2] and box[2] > core[0] and box[1] < core[3] and box[3] > core[1]:
+                selected.append(block)
+        docs, chunks = excerpts.for_blocks(selected, renderer)
+        payload = {
+            "page_idx": page, "target_region": core,
+            "required_block_ids": [b.block_id for b in selected],
+            "blocks": [{"block_id": b.block_id, "untrusted_extracted_text": renderer._block_to_text(b)}
+                       for b in selected],
+            "delivered_documents": docs, "delivered_chunks": chunks,
+            "chunks_required": self.config.package.generate_chunks,
+            "policy": "Verify only content inside the core region; repeated overlap is context, not duplicated content.",
+        }
+        if len(selected) > 45 or len(str(payload)) > REGION_PAYLOAD_LIMIT:
+            if core[3] - core[1] < 2 * MIN_REGION_HEIGHT:
+                raise ValueError("region_exceeds_review_context_limit")
+            middle = (core[1] + core[3]) // 2
+            return [*await self._review_region(page, [core[0], core[1], core[2], middle], name + "a", blocks,
+                                               excerpts, renderer, inventory, run_path, record),
+                    *await self._review_region(page, [core[0], middle, core[2], core[3]], name + "b", blocks,
+                                               excerpts, renderer, inventory, run_path, record)]
+        image, crop = crop_region(inventory, page, core, inventory.directory / f"segments-{page}", name)
+        payload["crop_bbox"] = crop
+        review = PageReview.model_validate(await self._call("audit_page", payload, image, PageReview))
+        ids = [b.block_id for b in review.blocks]
+        if len(ids) != len(set(ids)) or set(ids) != {b.block_id for b in selected}:
+            raise ValueError("Region review omitted/duplicated/invented IDs")
+        record["images"].append({"path": str(image.relative_to(run_path)),
+                                 "sha256": hashlib.sha256(image.read_bytes()).hexdigest(),
+                                 "label": f"Core region {core}"})
+        return [(core, review)]
 
     async def _repair(self, block, issue, ir, run_path, cache, source_path, rebuild, inventory):
         block_id = block.block_id

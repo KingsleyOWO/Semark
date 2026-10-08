@@ -259,3 +259,25 @@ def test_single_char_ocr_does_not_rescue_icon():
         "all_text": ["X"],
     }
     assert PackageStage._is_low_value_icon_output(icon) is True
+
+
+def test_a_latin_logo_read_in_cyrillic_lookalikes_is_written_in_latin():
+    """2026-10-08: the logo O'CCA was delivered as 「О'ССА」, said to be Cyrillic, in
+    five pictures of one report; a search for OCCA found none of them."""
+    output = {
+        "semantic_caption": "此圖為品牌標誌，由四個不同顏色的西里爾字母「Осса」組成。",
+        "facts": ["首字母「О」為紅色，第一個「С」為橙色。"],
+        "all_text": ["О'ССА"],
+        "keywords": ["Осса", "品牌標誌"],
+    }
+    grounded = PackageStage._ground_visual_output_terms(output, {"o'cca", "logo"})
+
+    assert grounded["all_text"] == ["O'CCA"]
+    assert grounded["semantic_caption"] == "此圖為品牌標誌，由四個不同顏色的字母「Occa」組成。"
+    assert grounded["facts"] == ["首字母「O」為紅色，第一個「C」為橙色。"]
+    assert "Occa" in grounded["keywords"]
+
+
+def test_cyrillic_the_document_does_not_print_in_latin_is_left_alone():
+    output = {"all_text": ["Москва", "ТОР"], "semantic_caption": "俄文招牌。"}
+    assert PackageStage._ground_visual_output_terms(output, {"o'cca"}) == output

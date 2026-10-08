@@ -804,3 +804,79 @@ async def test_one_failed_part_fails_the_dense_page(tmp_path):
 
     assert report["pages"][0]["status"] == "needs_review"
     assert "Rows 30 and 31 swapped." in report["pages"][0]["review"]["issues"]
+
+
+@pytest.mark.asyncio
+async def test_a_thin_strip_still_too_dense_is_split_left_and_right(tmp_path):
+    """2026-10-08: a logo wall put ~120 logos within one band; halving top/bottom alone
+    reached the thinnest strip with the request still too large."""
+    from app.pipeline.review_sources import validate_review_coverage
+
+    class Layout(AuditModel):
+        async def query(self, task, payload, image, schema):
+            if task == "verify_layout":
+                self.calls.append((task, payload, image))
+                return {"reading_order_correct": True, "observation": "Order matches source.", "issues": []}, 10
+            return await super().query(task, payload, image, schema)
+
+    # Sixty logos side by side, each as tall as the strip they sit in.
+    blocks = [Block(block_id=f"logo{i}", type=BlockType.TEXT, page_idx=0, reading_order=i,
+                    bbox_norm=[i * 16, 5, i * 16 + 15, 45], payload={"text": f"Brand {i}"}) for i in range(60)]
+    ir, source = fixture(tmp_path, blocks=blocks)
+    model = Layout()
+    _, report = await DocumentReview(cfg(), model, model).run(ir, tmp_path, source_path=source)
+
+    page = report["pages"][0]
+    assert page["status"] == "verified", page.get("reason")
+    cores = [part["core"] for part in page["regions"][0]["parts"]]
+    assert any(core[0] > 0 or core[2] < 1000 for core in cores)
+    audits = [payload for task, payload, _ in model.calls if task == "audit_page"]
+    assert all(len(payload["required_block_ids"]) <= 45 for payload in audits)
+    assert validate_review_coverage(ir, tmp_path, cfg())["complete"]
+
+
+@pytest.mark.asyncio
+async def test_a_crop_whose_answer_is_cut_off_is_reviewed_in_halves(tmp_path):
+    """2026-10-08: on the logo wall a crop of ~40 logos fit the request, but the review of
+    all of them overran the model's answer length (output_truncated)."""
+
+    class ShortAnswers(AuditModel):
+        async def query(self, task, payload, image, schema):
+            if task == "verify_layout":
+                self.calls.append((task, payload, image))
+                return {"reading_order_correct": True, "observation": "Order matches source.", "issues": []}, 10
+            if len(payload["required_block_ids"]) > 20:
+                self.calls.append((task, payload, image))
+                raise ValueError("output_truncated: response exceeded the configured token limit")
+            return await super().query(task, payload, image, schema)
+
+    blocks = [Block(block_id=f"logo{i}", type=BlockType.TEXT, page_idx=0, reading_order=i,
+                    bbox_norm=[(i % 10) * 100, 10 + (i // 10) * 38, (i % 10) * 100 + 90, 40 + (i // 10) * 38],
+                    payload={"text": f"Brand {i}"}) for i in range(60)]
+    ir, source = fixture(tmp_path, blocks=blocks)
+    model = ShortAnswers()
+    _, report = await DocumentReview(cfg(), model, model).run(ir, tmp_path, source_path=source)
+
+    page = report["pages"][0]
+    assert page["status"] == "verified", page.get("reason")
+    assert any(task == "audit_page" and len(payload["required_block_ids"]) > 20 for task, payload, _ in model.calls)
+    assert len(page["regions"][0]["parts"]) > 2
+
+
+def test_a_picture_document_is_one_boundary_in_the_order_check():
+    from app.pipeline.document_review import layout_boundaries
+
+    documents = [{"file": "outputs/documents/main.md", "paragraph": 7, "text": "Clients", "block_ids": ["h"], "binding": "source_text"},
+                 *[{"file": "outputs/documents/fig-a.md", "paragraph": i, "text": f"Logo A line {i}",
+                    "block_ids": ["a"], "binding": "asset_document"} for i in range(5)],
+                 {"file": "outputs/documents/fig-b.md", "paragraph": 0, "text": "Logo B", "block_ids": ["b"], "binding": "asset_document"},
+                 {"file": "outputs/documents/main.md", "paragraph": 8, "text": "Row 1", "block_ids": ["t"], "binding": "source_text"},
+                 {"file": "outputs/documents/main.md", "paragraph": 9, "text": "Row 2", "block_ids": ["t"], "binding": "source_text"}]
+    boundaries = layout_boundaries(documents, [{"chunk_id": "c0", "content": "Clients Logo A", "block_ids": ["h", "a"]}])
+
+    texts = [item.get("text", item.get("content")) for _, item in boundaries]
+    assert [kind for kind, _ in boundaries] == ["document"] * 5 + ["chunk"]
+    assert texts[1].startswith("Logo A line 0") and texts[1].endswith("Logo A line 4")
+    assert boundaries[1][1]["paragraph"] == 0 and boundaries[1][1]["last_paragraph"] == 4
+    # Lines of the main document keep their own boundaries: rows stay in sequence.
+    assert texts[3:5] == ["Row 1 … Row 1", "Row 2 … Row 2"]

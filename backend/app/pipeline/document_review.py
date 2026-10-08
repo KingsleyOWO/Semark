@@ -63,11 +63,36 @@ class PageReview(BaseModel):
 # Largest request, in characters of its JSON, the review model is given at once.
 REGION_PAYLOAD_LIMIT = 65000
 LAYOUT_PAYLOAD_LIMIT = 42000
-# A band is halved no further than this (page height is 1000).
+# A band is halved no further than this, in either direction (page side is 1000).
 MIN_REGION_HEIGHT = 30
 LAYOUT_PART_NOTE = ("The delivered boundaries are split into consecutive parts, each checked on its own; this part "
-                    "starts with the last boundary of the previous part. Judge the order within this part only: "
-                    "boundaries before or after it are in the other parts, not missing.")
+                    "starts with the last boundary of the previous part. Judge only the order of the boundaries "
+                    "shown here. Page content absent from this part is in the other parts: never report it as "
+                    "missing, and never report a gap in paragraph numbers.")
+
+
+def layout_boundaries(documents, chunks):
+    """The delivered boundaries the global-order check sees, as (kind, boundary).
+
+    A picture's own document is one unit of the page order; the order of its lines is
+    the picture's, already checked crop by crop, so it is one boundary from its first
+    line to its last. On a logo wall this halves the list, and fewer parts leave the
+    model fewer chances to call another part's content missing.
+    """
+    def cut(text):
+        return text[:220] + " … " + text[-120:]
+
+    folded, heads = [], {}
+    for item in documents:
+        last = folded[-1][1] if folded else None
+        if item["binding"] == "asset_document" and last and last["file"] == item["file"] \
+                and last["binding"] == "asset_document":
+            last.update(text=heads[id(last)] + " … " + item["text"][-120:], last_paragraph=item["paragraph"])
+            continue
+        boundary = {**item, "text": cut(item["text"])}
+        heads[id(boundary)] = item["text"][:220]
+        folded.append(("document", boundary))
+    return folded + [("chunk", {**c, "content": cut(c["content"])}) for c in chunks]
 
 
 def merge_part_reviews(reviews):
@@ -812,9 +837,7 @@ class DocumentReview(AgenticRepair):
                 raise ValueError("Segments failed to cover all source blocks")
             from app.pipeline.recovery_models import LayoutVerification
             actual_docs, actual_chunks = excerpts.for_blocks(blocks, renderer)
-            boundaries = ([("document", {**d, "text": d["text"][:220] + " … " + d["text"][-120:]}) for d in actual_docs]
-                          + [("chunk", {**c, "content": c["content"][:220] + " … " + c["content"][-120:]})
-                             for c in actual_chunks])
+            boundaries = layout_boundaries(actual_docs, actual_chunks)
             layouts = [LayoutVerification.model_validate(await self._call(
                 "verify_layout", payload, inventory.image(page), LayoutVerification))
                 for payload in layout_parts(page, boundaries, cores)]
@@ -871,17 +894,39 @@ class DocumentReview(AgenticRepair):
             "chunks_required": self.config.package.generate_chunks,
             "policy": "Verify only content inside the core region; repeated overlap is context, not duplicated content.",
         }
-        if len(selected) > 45 or len(str(payload)) > REGION_PAYLOAD_LIMIT:
-            if core[3] - core[1] < 2 * MIN_REGION_HEIGHT:
-                raise ValueError("region_exceeds_review_context_limit")
+        # Halve top/bottom; a strip already thin is halved left/right (a logo wall: 120
+        # logos within a quarter of one page, 2026-10-08).
+        if core[3] - core[1] >= 2 * MIN_REGION_HEIGHT:
             middle = (core[1] + core[3]) // 2
-            return [*await self._review_region(page, [core[0], core[1], core[2], middle], name + "a", blocks,
+            halves = ([core[0], core[1], core[2], middle], [core[0], middle, core[2], core[3]])
+        elif core[2] - core[0] >= 2 * MIN_REGION_HEIGHT:
+            middle = (core[0] + core[2]) // 2
+            halves = ([core[0], core[1], middle, core[3]], [middle, core[1], core[2], core[3]])
+        else:
+            halves = None
+
+        async def in_halves():
+            return [*await self._review_region(page, halves[0], name + "a", blocks,
                                                excerpts, renderer, inventory, run_path, record),
-                    *await self._review_region(page, [core[0], middle, core[2], core[3]], name + "b", blocks,
+                    *await self._review_region(page, halves[1], name + "b", blocks,
                                                excerpts, renderer, inventory, run_path, record)]
+
+        if len(selected) > 45 or len(str(payload)) > REGION_PAYLOAD_LIMIT:
+            if not halves:
+                raise ValueError("region_exceeds_review_context_limit")
+            return await in_halves()
         image, crop = crop_region(inventory, page, core, inventory.directory / f"segments-{page}", name)
         payload["crop_bbox"] = crop
-        review = PageReview.model_validate(await self._call("audit_page", payload, image, PageReview))
+        try:
+            review = PageReview.model_validate(await self._call("audit_page", payload, image, PageReview))
+        except BudgetExhausted:
+            raise
+        except Exception as exc:
+            # A request that fits can still need a longer answer than the model may give
+            # (40 logos, one observation each): fewer blocks per crop.
+            if not str(exc).startswith("output_truncated") or not halves or len(selected) < 2:
+                raise
+            return await in_halves()
         ids = [b.block_id for b in review.blocks]
         if len(ids) != len(set(ids)) or set(ids) != {b.block_id for b in selected}:
             raise ValueError("Region review omitted/duplicated/invented IDs")

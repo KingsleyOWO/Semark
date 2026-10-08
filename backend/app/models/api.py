@@ -38,6 +38,8 @@ class RunCreateRequest(BaseModel):
     config_overrides: dict[str, Any] | None = None
     use_cache: bool = True
     force_stages: list[StageName] | None = None
+    # Another server with the same model, e.g. a second machine sharing a batch.
+    vlm_base_url: str | None = None
 
 
 class RunResponse(BaseModel):

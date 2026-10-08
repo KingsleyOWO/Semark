@@ -162,6 +162,13 @@ def _apply_runtime_settings(
     merged_config["review_vlm"]["use_json_schema"] = review_vlm_settings.get("use_json_schema", True)
 
 
+def _send_model_calls_to(merged_config: dict[str, Any], base_url: str) -> None:
+    """Point a run at another server with the same model; a reviewer set up on its own server stays there."""
+    if merged_config["review_vlm"]["base_url"] == merged_config["vlm"]["base_url"]:
+        merged_config["review_vlm"]["base_url"] = base_url
+    merged_config["vlm"]["base_url"] = base_url
+
+
 async def _cancel_running_stages(db: Database, run_id: str) -> None:
     """Mark any in-flight stages canceled when a run is canceled externally."""
     stage_repo = RunStageRepository(db)
@@ -320,6 +327,8 @@ async def create_run(
     vlm_settings = await get_vlm_config(db)
     review_vlm_settings = await get_review_vlm_config(db)
     _apply_runtime_settings(merged_config, mineru_settings, vlm_settings, review_vlm_settings)
+    if request.vlm_base_url:
+        _send_model_calls_to(merged_config, request.vlm_base_url)
 
     config_hash = compute_config_hash(merged_config)
 

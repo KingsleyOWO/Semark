@@ -141,6 +141,9 @@ def build_automatic_delivery(ir, run_path, config, review_summary, ledger, upstr
     renderer = ChunkStage(config)
     renderer._asset_text = renderer._load_asset_retrieval_text(outputs)
     asset_records = {item.get("block_id"): item for item in read_jsonl(outputs / "assets_index.jsonl")}
+    from app.pipeline.semantic.language import resolve_semantic_output_language
+    language = resolve_semantic_output_language(config.package.semantic_output_language.value, ir)
+    read_only = keep_only_read_text(ir, outputs, unverified_pictures, asset_records, language)
     non_informative = {b.block_id for b in ir.blocks if b.block_id in retained
                        and b.payload.get("agentic_information_status") == "non_informative"}
     rag_eligible = dependency_closed_subset(retained - non_informative, closure)
@@ -152,6 +155,11 @@ def build_automatic_delivery(ir, run_path, config, review_summary, ledger, upstr
               if not evidence.covers(bid, scrub_transcribed_privacy(
                   renderer._blocks_to_text([ir.get_block(bid)])))}
     rag_eligible = dependency_closed_subset(rag_eligible - absent, closure)
+    # From here on an unverified picture is the text read off it, and nothing when none was read.
+    for bid, text in read_only.items():
+        renderer._asset_text[bid] = text
+    nothing_read = {bid for bid, text in read_only.items() if not text}
+    rag_eligible = dependency_closed_subset(rag_eligible - nothing_read, closure)
     # Gaps delimit chunk groups: overlap may never bridge an excluded region.
     groups, current = [], []
     for block in ir.blocks:
@@ -165,9 +173,9 @@ def build_automatic_delivery(ir, run_path, config, review_summary, ledger, upstr
     chunks = []
     export_reasons = {bid: "non_informative_image" if bid in non_informative else "required_context_not_retrievable"
                       for bid in retained - rag_eligible}
-    from app.pipeline.semantic.language import resolve_semantic_output_language
-    labels = IMAGE_LABELS[resolve_semantic_output_language(config.package.semantic_output_language.value, ir)]
+    labels = IMAGE_LABELS[language]
     export_reasons.update({bid: "rechunk_content_not_verified" for bid in absent})
+    export_reasons.update({bid: "unverified_picture_without_read_text" for bid in nothing_read})
     if config.package.generate_chunks:
         for group in groups:
             # Supply only verified heading/dependency blocks; never borrow unreviewed metadata.
@@ -235,7 +243,8 @@ def build_automatic_delivery(ir, run_path, config, review_summary, ledger, upstr
         if bid in eligible:
             reading_copy.append(labels["verified"] + "\n" + text if bid in pictures else text)
         elif bid in unverified_pictures:
-            reading_copy.append(labels["unverified"] + "\n" + text)
+            text = read_only.get(bid, text)
+            reading_copy.append(labels["unverified"] + ("\n" + text if text else ""))
             gaps.append({"block_id": bid, "source_pages": records.get(bid, {}).get("source_pages", []),
                          "reason": reasons.get(bid, "not_verified"), "marker": labels["unverified"],
                          "included": True, "evidence": [], "detail": {}})
@@ -285,11 +294,56 @@ def build_automatic_delivery(ir, run_path, config, review_summary, ledger, upstr
                                   "source_pages": records.get(b.block_id, {}).get("source_pages", []),
                                   "image_label": ("verified" if b.block_id in eligible else "unverified"
                                                   if b.block_id in unverified_pictures else None)
-                                  if b.block_id in pictures else None}
+                                  if b.block_id in pictures else None,
+                                  **({"delivered_content": "text_read_from_image"} if b.block_id in read_only else {})}
                                  for b in ir.blocks if not rendered[b.block_id][1]]}, ensure_ascii=False, indent=2)
     index_image_readings(ir, run_path, renderer, pictures, eligible,
                          [b for b in ir.blocks if not rendered[b.block_id][1]])
     return summary
+
+
+def keep_only_read_text(ir, outputs, pictures, asset_records, language):
+    """An unverified picture keeps only the text read off it (the user's choice, 2026-10-08).
+
+    The model's description, facts and keywords of a picture review could not confirm
+    are dropped from its document: in a sample of ten such pictures one was described
+    as something else entirely. What stays is the source caption, if the parser found
+    one, and the lines read off the picture. A picture with neither leaves no document;
+    its image file stays in assets/. Returns block_id -> the remaining text.
+    """
+    from app.models.document_ir import image_content_caption
+    from app.pipeline.final_delivery import read_json
+    from app.pipeline.stages.package import PackageStage
+
+    index = read_json(outputs / "documents_index.json", None)
+    entries = {entry.get("document_id"): entry for entry in index} if isinstance(index, list) else {}
+    remaining, dropped = {}, set()
+    for bid in sorted(pictures):
+        block, record = ir.get_block(bid), asset_records.get(bid)
+        path = outputs / "documents" / f"{(record or {}).get('asset_id')}.md"
+        if block.type != BlockType.IMAGE or not record or record.get("type") != "figure_asset" or not path.is_file():
+            continue
+        caption = scrub_transcribed_privacy(image_content_caption(block.payload).strip())
+        lines = []
+        for line in PackageStage._strip_watermark_lines([str(v).strip() for v in record.get("all_text") or []]):
+            if line and line not in lines:
+                lines.append(scrub_transcribed_privacy(line))
+        text = "\n".join(([caption] if caption else []) + lines)
+        remaining[bid] = text
+        title = caption or (f"Picture, page {block.page_idx + 1}" if language == "en" else f"第 {block.page_idx + 1} 頁圖片")
+        asset_records[bid] = {**record, "title": title, "facts": [], "retrieval_text": text}
+        if not text:
+            path.unlink()
+            dropped.add(record["asset_id"])
+            continue
+        atomic_write_text(path, f"# {title}\n\n" + "\n".join(lines or [caption]) + "\n")
+        if record["asset_id"] in entries:
+            entries[record["asset_id"]]["title"] = title
+    if isinstance(index, list) and remaining:
+        atomic_write_json(outputs / "documents_index.json",
+                          [entry for entry in index if entry.get("document_id") not in dropped],
+                          ensure_ascii=False, indent=2)
+    return remaining
 
 
 def index_image_readings(ir, run_path, renderer, pictures, eligible, delivered_blocks):

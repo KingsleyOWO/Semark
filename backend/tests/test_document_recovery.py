@@ -745,3 +745,62 @@ async def test_candidate_audit_keeps_word_original_picture_checks(tmp_path):
     assert evidence.read_bytes() == original.read_bytes()
     record = json.loads((folder / 'validation-page-0.json').read_text())
     assert record['review']['blocks'][0]['status'] == 'needs_review'
+
+
+@pytest.mark.asyncio
+async def test_dense_band_and_long_order_check_are_reviewed_in_parts(tmp_path):
+    """2026-10-08: seven image-dense pages in four reports were never reviewed: a band had
+    over 45 blocks, or the order check's delivered boundaries ran 55-109k characters."""
+    from app.pipeline.document_review import LAYOUT_PAYLOAD_LIMIT
+    from app.pipeline.review_sources import validate_review_coverage
+
+    class PartsModel(AuditModel):
+        async def query(self, task, payload, image, schema):
+            if task == "verify_layout":
+                self.calls.append((task, payload, image))
+                return {"reading_order_correct": True, "observation": "Order matches source.", "issues": []}, 10
+            return await super().query(task, payload, image, schema)
+
+    # Sixty long paragraphs, all in the top quarter of the page.
+    blocks = [Block(block_id=f"b{i}", type=BlockType.TEXT, page_idx=0, reading_order=i,
+                    bbox_norm=[0, i * 4, 1000, i * 4 + 3],
+                    payload={"text": f"Source row {i}: " + " ".join(f"item{i}-{j}" for j in range(60))})
+              for i in range(60)]
+    ir, source = fixture(tmp_path, blocks=blocks)
+    model = PartsModel()
+    _, report = await DocumentReview(cfg(), model, model).run(ir, tmp_path, source_path=source)
+
+    page = report["pages"][0]
+    assert page["status"] == "verified", page.get("reason")
+    assert [r["core"] for r in page["regions"]] == [[0, 0, 1000, 250], [0, 250, 1000, 500],
+                                                    [0, 500, 1000, 750], [0, 750, 1000, 1000]]
+    assert [p["core"] for p in page["regions"][0]["parts"]] == [[0, 0, 1000, 125], [0, 125, 1000, 250]]
+    layouts = [payload for task, payload, _ in model.calls if task == "verify_layout"]
+    assert len(layouts) > 1 and page["layout_review"]["parts"] == len(layouts)
+    assert all(len(str(payload)) <= LAYOUT_PAYLOAD_LIMIT for payload in layouts)
+    for before, after in zip(layouts, layouts[1:]):
+        last = (before["document_boundaries"] + before["chunk_boundaries"])[-1]
+        assert (after["document_boundaries"] + after["chunk_boundaries"])[0] == last
+    assert validate_review_coverage(ir, tmp_path, cfg())["complete"]
+
+
+@pytest.mark.asyncio
+async def test_one_failed_part_fails_the_dense_page(tmp_path):
+    class OneWrongPart(AuditModel):
+        async def query(self, task, payload, image, schema):
+            self.calls.append((task, payload, image))
+            if task == "verify_layout":
+                wrong = payload.get("boundary_part", {}).get("part") == 2
+                return {"reading_order_correct": not wrong, "observation": "Checked the supplied boundaries.",
+                        "issues": ["Rows 30 and 31 swapped."] if wrong else []}, 10
+            return await super().query(task, payload, image, schema)
+
+    blocks = [Block(block_id=f"b{i}", type=BlockType.TEXT, page_idx=0, reading_order=i,
+                    bbox_norm=[0, i * 4, 1000, i * 4 + 3],
+                    payload={"text": f"Source row {i}: " + " ".join(f"item{i}-{j}" for j in range(60))})
+              for i in range(60)]
+    ir, source = fixture(tmp_path, blocks=blocks)
+    _, report = await DocumentReview(cfg(), OneWrongPart(), OneWrongPart()).run(ir, tmp_path, source_path=source)
+
+    assert report["pages"][0]["status"] == "needs_review"
+    assert "Rows 30 and 31 swapped." in report["pages"][0]["review"]["issues"]

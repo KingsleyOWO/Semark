@@ -118,6 +118,12 @@ def _render_vlm_value(value: Any) -> str:
 # screenshots captioned as "Synology", a term appearing nowhere in the
 # document text or any figure's OCR).
 _LATIN_TERM_RE = re.compile(r"[A-Za-z][A-Za-z0-9'&._-]{2,}")
+# Cyrillic and Greek letters shaped like Latin ones. The local model read the logo
+# O'CCA as 「О'ССА」 and called it Cyrillic, so a search for OCCA missed the picture.
+_LATIN_LOOKALIKES = str.maketrans("АВЕКМНОРСТХаеорсухіјѕΑΒΕΗΙΚΜΝΟΡΤΧΥΖ",
+                                  "ABEKMHOPCTXaeopcyxijsABEHIKMNOPTXYZ")
+_NON_LATIN_LETTER_RE = re.compile(r"[\u0370-\u03ff\u0400-\u04ff]")
+_LOOKALIKE_TERM_RE = re.compile(r"[A-Za-z\u0370-\u03ff\u0400-\u04ff][A-Za-z0-9'’&._\-\u0370-\u03ff\u0400-\u04ff]*")
 
 # A figure label printed in the document body ("圖3 …", "Figure 2 …"). 10% of
 # figures carry a parser caption and a further 8% can borrow such a label from
@@ -337,6 +343,9 @@ class AssetEntry:
     structured_content: str | None = None
     facts: list[str] = field(default_factory=list)
     keywords: list[str] = field(default_factory=list)
+    # Text read off the picture. Its own document must carry it: without it the
+    # figure counted as missing and was appended whole to main.md again.
+    all_text: list[str] = field(default_factory=list)
     # VLM image classification (screenshot/photo/flowchart/...). Downstream
     # renders must not re-derive this from " > " heuristics: UI screenshots
     # carry navigation paths that are menus, not workflows.
@@ -375,6 +384,8 @@ class AssetEntry:
             result["facts"] = self.facts
         if self.keywords:
             result["keywords"] = self.keywords
+        if self.all_text:
+            result["all_text"] = self.all_text
         if self.image_type:
             result["image_type"] = self.image_type
         if self.decorative:
@@ -4109,11 +4120,19 @@ class PackageStage:
         mangled, and with no grounding corpus there is no evidence to act on.
         """
 
+        if grounding_tokens:
+            output = cls._latinize_lookalike_terms(output, grounding_tokens)
         if semantic_output_language == "en" or not grounding_tokens:
             return output
 
+        # Punctuation aside: the document's O'CCA grounds a caption's 「Occa」.
+        squeezed = {re.sub(r"[^0-9a-z]", "", token) for token in grounding_tokens}
+
+        def grounded(term: str) -> bool:
+            return term.lower() in grounding_tokens or re.sub(r"[^0-9a-z]", "", term.lower()) in squeezed
+
         def keep(term: "re.Match[str]") -> str:
-            return term.group(0) if term.group(0).lower() in grounding_tokens else ""
+            return term.group(0) if grounded(term.group(0)) else ""
 
         result = dict(output or {})
         caption = str(result.get("semantic_caption") or "")
@@ -4129,11 +4148,44 @@ class PackageStage:
             result["keywords"] = [
                 keyword
                 for keyword in keywords
-                if all(
-                    term.lower() in grounding_tokens
-                    for term in _LATIN_TERM_RE.findall(str(keyword))
-                )
+                if all(grounded(term) for term in _LATIN_TERM_RE.findall(str(keyword)))
             ]
+        return result
+
+    @staticmethod
+    def _latinize_lookalike_terms(output: dict[str, Any], grounding_tokens: set[str]) -> dict[str, Any]:
+        """Write a word the model read in Cyrillic/Greek look-alikes in Latin when the
+        document prints that Latin word; the rest of that picture's reading follows."""
+
+        words = {re.sub(r"[^0-9a-z]", "", token) for token in grounding_tokens}
+        fields = ("semantic_caption", "structured_content", "facts", "all_text", "keywords")
+
+        def latin(term: str) -> str | None:
+            mapped = term.translate(_LATIN_LOOKALIKES)
+            return None if _NON_LATIN_LETTER_RE.search(mapped) else mapped
+
+        def strings(value: Any) -> list[str]:
+            return [value] if isinstance(value, str) else [str(v) for v in value] if isinstance(value, list) else []
+
+        grounded = any(
+            _NON_LATIN_LETTER_RE.search(term) and (mapped := latin(term))
+            and len(key := re.sub(r"[^0-9a-z]", "", mapped.lower())) >= 3 and key in words
+            for field in fields for text in strings((output or {}).get(field))
+            for term in _LOOKALIKE_TERM_RE.findall(text))
+        if not grounded:
+            return output
+
+        def fix(text: str) -> str:
+            text = _LOOKALIKE_TERM_RE.sub(lambda m: latin(m.group(0)) or m.group(0), text)
+            return re.sub(r"西里爾字母|斯拉夫字母|(?i:cyrillic )", lambda m: "" if m.group(0)[0] in "cC" else "字母", text)
+
+        result = dict(output)
+        for field in fields:
+            value = result.get(field)
+            if isinstance(value, str):
+                result[field] = fix(value)
+            elif isinstance(value, list):
+                result[field] = [fix(v) if isinstance(v, str) else v for v in value]
         return result
 
     def _augment_visual_output_from_page_text(
@@ -4389,6 +4441,9 @@ class PackageStage:
         if len(sentence) > _VISUAL_CONTAINER_TITLE_MAX_LEN:
             window = sentence[:_VISUAL_CONTAINER_TITLE_MAX_LEN]
             cut = max(window.rfind(mark) for mark in "，,、：:；;（(")
+            if cut < 8:
+                # Latin script: end on a word, not in the middle of one.
+                cut = window.rfind(" ") if sentence[len(window):len(window) + 1] not in ("", " ") else len(window)
             sentence = window[:cut] if cut >= 8 else window
         return sentence.rstrip("，,、：:；;（(「『【[〔 ").strip()
 
@@ -4476,6 +4531,8 @@ class PackageStage:
         """The RAG text of a figure. A title cut from the description does not stand in for it."""
         from app.pipeline.content_coverage import normalized_text
 
+        # A generic label names nothing; it is not searchable text of the figure.
+        title = "" if title in _GENERIC_VISUAL_TITLES else title
         parts = [title]
         if caption and normalized_text(caption) not in normalized_text(f"{title}\n{semantic}"):
             # The full description replaces its own opening words; a repeated half
@@ -4483,7 +4540,9 @@ class PackageStage:
             parts = [caption] if normalized_text(title) in normalized_text(caption) else [title, caption]
         parts.append(semantic)
         if keywords:
-            parts.extend(self._strip_watermark_lines(list(keywords)))
+            # Rendered like the figure document's own keyword line (zh-TW glyphs), or
+            # a simplified keyword made the figure look missing from its document.
+            parts.extend(self._strip_watermark_lines(split_vlm_lines(keywords)))
         return "\n".join(part for part in parts if part).strip()
 
     def _render_visual_semantic_content(
@@ -4815,6 +4874,7 @@ class PackageStage:
                 "semantic_caption": asset.semantic_caption or "",
                 "facts": asset.facts,
                 "keywords": asset.keywords,
+                "all_text": asset.all_text,
             }
         )
         retrieval_all_text = self._extract_visual_text_lines_from_retrieval_text(asset.retrieval_text, language)
@@ -4852,10 +4912,21 @@ class PackageStage:
         if visual_caption and not visual_caption.lstrip().startswith("{"):
             zh_count = sum(1 for ch in visual_caption if "一" <= ch <= "鿿")
             ascii_count = sum(1 for ch in visual_caption if ch.isascii() and ch.isalpha())
-            should_append_caption = language == "en" or (zh_count >= 4 and zh_count >= ascii_count)
+            # A figure's retrieval text carries its description in any script; the
+            # figure document must too, or the description is lost from documents/.
+            should_append_caption = (language == "en" or asset.type == "figure_asset"
+                                     or (zh_count >= 4 and zh_count >= ascii_count))
             if should_append_caption and visual_caption not in body:
-                body_parts.append(visual_caption)
+                # A figure's description leads, as in its retrieval text; in another
+                # order the delivery check counted it missing and main.md repeated it.
+                body_parts.insert(0 if asset.type == "figure_asset" else len(body_parts), visual_caption)
                 body = "\n\n".join(body_parts).strip()
+        keywords = self._strip_watermark_lines(split_vlm_lines(asset.keywords)) if asset.type == "figure_asset" else []
+        if keywords and render_vlm_text(asset.retrieval_text) not in body_parts:
+            # The search terms its retrieval text carries. Without them the figure
+            # counted as missing and was appended whole to main.md again.
+            body_parts.append((", " if language == "en" else "、").join(keywords))
+            body = "\n\n".join(body_parts).strip()
         body = self._remove_duplicate_title_lines(body, title, source_title)
         return "\n".join(part for part in parts if part).strip() + "\n\n" + body + "\n"
 
@@ -5059,7 +5130,7 @@ class PackageStage:
                         caption = image_content_caption(block.payload)
                         # An export counter is not a source figure number. Recovery
                         # may replace an earlier image; keep later captions stable.
-                        title = caption[:100] if caption else "Figure semantics"
+                        title = caption[:100]
 
                         # Integrate VLM enrichment for figures. Coerce first so malformed
                         # JSON-like captions do not leak into split documents.
@@ -5079,13 +5150,22 @@ class PackageStage:
                         facts = enrichment_output.get("facts", [])
                         keywords = enrichment_output.get("keywords", [])
                         needs_review = enrichment.get("quality", {}).get("needs_review", False)
-                        if title.startswith("Figure ") and (structured_content or enrichment_output.get("all_text")):
+                        all_text = split_vlm_lines(enrichment_output.get("all_text", []), unique=False)
+                        if (not title or title.startswith("Figure ")) and (structured_content or semantic_caption or all_text):
                             title = self._infer_visual_asset_title(
                                 structured_content,
                                 semantic_caption,
                                 title,
-                                all_text=enrichment_output.get("all_text"),
+                                all_text=all_text,
                             )
+                        if not title:
+                            # A description in mostly Latin script (a test report's cover)
+                            # still names the figure better than a generic label.
+                            title = self._shorten_visual_caption(semantic_caption)
+                        if not title:
+                            # Nothing the figure shows names it. The English placeholder
+                            # used to head zh-TW deliveries (43 times in 8 documents).
+                            title = "Figure semantics" if semantic_output_language == "en" else "圖表語意"
 
                         # Build enhanced retrieval text without leaking raw English captions.
                         semantic_retrieval = self._render_visual_semantic_content(
@@ -5109,6 +5189,7 @@ class PackageStage:
                             structured_content=structured_content,
                             facts=facts,
                             keywords=keywords,
+                            all_text=all_text,
                             needs_review=needs_review,
                             image_type=str(enrichment_output.get("image_type") or ""),
                             decorative=self._is_low_value_icon_output(enrichment_output),

@@ -7,7 +7,7 @@ from pydantic import ValidationError
 from test_document_review import AuditModel, config, fixture, write_delivery
 
 from app.models.document_ir import BlockType
-from app.pipeline.document_review import BlockReview, DocumentReview
+from app.pipeline.document_review import BlockReview, DocumentReview, PageReview
 from app.pipeline.final_delivery import finalize_delivery
 from app.pipeline.image_source_review import (
     ImageSourceRelation,
@@ -176,6 +176,10 @@ async def test_large_blind_evidence_cannot_bypass_post_read_context_bound(tmp_pa
     # Bound schema-valid source content can still exceed a full-page context when
     # many images share a page. No page audit may run after the added payload overflows.
     original = DocumentReview._word_picture_readings
+    # Even one picture's part overflows (here: a lowered limit); otherwise the
+    # readings are judged in parts (next test).
+    from app.pipeline import document_review
+    monkeypatch.setattr(document_review, 'REGION_PAYLOAD_LIMIT', 12000)
     async def large(self, blocks, inventory):
         return {b.block_id: reading(text='字' * 10000, image_type='document', relationships=[])
                 for b in blocks}
@@ -314,3 +318,67 @@ async def test_photo_without_relationships_keeps_existing_native_page_route(tmp_
         image_type='photo', relationships=[], text='People sit around a table.', kind='visual_summary').model_dump()}
     for tool in ['read_source', 'read_regions', 'reparse_pdf']:
         assert runner.tool_constraints({'page_idx': 0}, ir.blocks)[tool]['available']
+
+
+def test_word_page_readings_overflowing_one_request_are_judged_in_parts():
+    """2026-10-08: a Word page of 8 blocks went unreviewed once its pictures' independent
+    readings pushed the request past the limit."""
+    from app.pipeline.document_review import reading_parts
+
+    readings = {f"pic{i}": {"kind": "transcription", "text": f"Printed line {i} " * 300, "complete": True}
+                for i in range(3)}
+    payload = {
+        "required_block_ids": ["intro", "pic0", "pic0-r1", "pic1", "pic2"],
+        "blocks": [{"block_id": bid, "untrusted_extracted_text": bid} for bid in
+                   ["intro", "pic0", "pic0-r1", "pic1", "pic2"]],
+        "context_blocks": [{"block_id": "prev", "untrusted_extracted_text": "Previous page."}],
+        "delivered_documents": [], "delivered_chunks": [],
+        "independent_image_readings": readings,
+        "image_reading_scopes": {"pic0": ["pic0", "pic0-r1"], "pic1": ["pic1"], "pic2": ["pic2"]},
+        "independent_ocr_votes": {"pic1": {"verdict": "delivery"}},
+    }
+    limit = len(str(payload)) * 2 // 3
+
+    parts = reading_parts(payload, limit)
+
+    assert len(parts) > 1 and all(len(str(part)) <= limit for part in parts)
+    required = [bid for part in parts for bid in part["required_block_ids"]]
+    assert sorted(required) == sorted(payload["required_block_ids"])
+    assert "intro" in parts[0]["required_block_ids"]
+    for part in parts:
+        owned = {bid for ids in part["image_reading_scopes"].values() for bid in ids}
+        assert owned <= set(part["required_block_ids"])
+        assert set(part["independent_image_readings"]) == set(part["image_reading_scopes"])
+        assert set(part.get("independent_ocr_votes", {})) <= set(part["required_block_ids"])
+        # Everything else on the page stays in view as context.
+        context = {b["block_id"] for b in part["context_blocks"]}
+        assert context == {"prev"} | (set(payload["required_block_ids"]) - set(part["required_block_ids"]))
+    assert reading_parts(payload, len(str(readings["pic0"]))) is None
+
+
+@pytest.mark.asyncio
+async def test_many_picture_readings_on_one_word_page_are_audited_in_parts(tmp_path, monkeypatch):
+    from app.models.document_ir import Block
+    from app.pipeline.document_review import REGION_PAYLOAD_LIMIT
+
+    ir, source = fixture(tmp_path)
+    ir.blocks = [Block(block_id=f'b{i}', type=BlockType.IMAGE, page_idx=0, reading_order=i,
+                       payload={'caption': f'Figure {i}'}) for i in range(7)]
+    write_delivery(tmp_path, ir)
+    owner = DocumentReview(config(recovery_enabled=False), AuditModel(), AuditModel())
+    async def large(self, blocks, inventory):
+        return {b.block_id: reading(text='字' * 10000, image_type='document', relationships=[])
+                for b in blocks}
+    monkeypatch.setattr(DocumentReview, '_word_picture_readings', large)
+    sizes, scopes = [], []
+    async def audit(payload, images, depth=0):
+        sizes.append(len(str(payload)))
+        scopes.append(payload['required_block_ids'])
+        return PageReview(blocks=[{'block_id': bid, 'status': 'verified', 'observation': 'Matches.'}
+                                  for bid in payload['required_block_ids']],
+                          source_complete=True, reading_order_correct=True, observation='Page checked.', issues=[])
+    owner._audit_page_contract = audit
+    _, report = await owner.run(ir, tmp_path, source_path=source)
+    assert report['pages'][0]['reason'] != 'page_exceeds_image_relationship_context_limit'
+    assert len(sizes) > 1 and max(sizes) <= REGION_PAYLOAD_LIMIT
+    assert sorted(bid for scope in scopes for bid in scope) == [f'b{i}' for i in range(7)]

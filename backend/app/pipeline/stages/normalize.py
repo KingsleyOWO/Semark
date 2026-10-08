@@ -12,6 +12,7 @@ import difflib
 import json
 import re
 import shutil
+import unicodedata
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -178,6 +179,17 @@ def _normalize_for_coverage(text: str) -> str:
     return re.sub(r"[\s\\]+", "", str(text or ""))
 
 
+def _line_lookup_form(text: str) -> str:
+    """Letters and digits only: one printed line looked up in a parser's text.
+
+    MinerU's table cells drop or move the punctuation at a wrapped line's
+    edge (「，媽媽自己組團…」 is stored without its leading comma) and turn the
+    printed 「７歲」 into 「7歲」, which a whole paragraph absorbs but a single
+    line does not.
+    """
+    return re.sub(r"[\W_]+", "", unicodedata.normalize("NFKC", str(text or "")))
+
+
 def _coverage_texts(block: Block) -> tuple[str, str, str]:
     """A block's text as stored, with tags stripped, and its annotations.
 
@@ -286,6 +298,16 @@ def is_promotional_insert(block: Block) -> bool:
     return block.payload.get("origin") == "promotional_insert"
 
 
+def is_merged_table_remnant(block: Block) -> bool:
+    """A table MinerU found but left with neither body nor image.
+
+    On a table that runs over many pages MinerU merges the continuation into
+    the table on the first page and leaves this empty box behind; the box
+    still spans the page, but its text sits pages back — or nowhere.
+    """
+    return block.payload.get("origin") == "table_missing_body_and_image"
+
+
 def is_non_content(block: Block) -> bool:
     """True for every block the delivery surfaces drop as non-authored matter.
 
@@ -320,6 +342,7 @@ class NormalizeStage:
 
     # Text supplement settings
     TEXT_SUPPLEMENT_MIN_LENGTH = 4  # Minimum text length to consider
+    TABLE_LINE_LOOKUP_MIN_CHARS = 6  # a table line shorter than this only extends a missing run
     TEXT_SUPPLEMENT_COVERAGE_THRESHOLD = 0.3  # Min coverage to consider "covered"
 
     # How far a supplement may look for the block that already carries it.
@@ -876,6 +899,19 @@ class NormalizeStage:
 
         supplemented: list[Block] = []
         next_block_idx = len(blocks)  # For generating new block IDs
+        # A merged table keeps its rows on the page it starts on, often far
+        # beyond the coverage radius; the remnant boxes it leaves on the later
+        # pages hold nothing. MinerU drops the text at each page break of such
+        # a merge (spot check 2026-10-08: a 164-page PDF of interview tables
+        # lost 63 lines that way, and the empty box hid them from this pass).
+        # The text a merge loses sits inside table boxes whose paragraphs are
+        # otherwise present, so a paragraph-level fuzzy match passes it; on the
+        # pages of a merge each line is looked up in every table instead.
+        remnant_pages = {block.page_idx for block in blocks if is_merged_table_remnant(block)}
+        merge_pages = remnant_pages | {page - 1 for page in remnant_pages}
+        tables = [block for block in blocks if block.type == BlockType.TABLE] if merge_pages else []
+        table_texts = [_line_lookup_form(_coverage_texts(block)[1]) for block in tables]
+        table_coverage = [tuple(_normalize_for_coverage(part) for part in _coverage_texts(block)) for block in tables]
 
         try:
             for page_idx in range(len(doc)):
@@ -886,6 +922,22 @@ class NormalizeStage:
                 page_height = float(page.rect.height)
                 if page_width <= 0 or page_height <= 0:
                     continue
+
+                # Convert PyMuPDF point coords to MinerU's 0-1000 space so
+                # sorting, coverage geometry and enrich crops share one
+                # coordinate system
+                def to_norm(box: Sequence[float]) -> list[int]:
+                    return [
+                        max(0, min(1000, int(box[0] * 1000 / page_width))),
+                        max(0, min(1000, int(box[1] * 1000 / page_height))),
+                        max(0, min(1000, int(box[2] * 1000 / page_width))),
+                        max(0, min(1000, int(box[3] * 1000 / page_height))),
+                    ]
+
+                line_lookup = table_texts + [
+                    _line_lookup_form(_coverage_texts(block)[0]) for block in blocks
+                    if abs(block.page_idx - page_idx) <= self.COVERAGE_PAGE_RADIUS and block.type != BlockType.TABLE
+                ] if page_idx in merge_pages else []
 
                 # Extract text blocks from PDF, rebuilding paragraphs from the
                 # per-line entries the extractor returns.
@@ -902,39 +954,41 @@ class NormalizeStage:
                     if len(text.strip()) < self.TEXT_SUPPLEMENT_MIN_LENGTH:
                         continue
 
-                    # Convert PyMuPDF point coords to MinerU's 0-1000 space so
-                    # sorting, coverage geometry and enrich crops share one
-                    # coordinate system
-                    bbox_norm = [
-                        max(0, min(1000, int(bbox[0] * 1000 / page_width))),
-                        max(0, min(1000, int(bbox[1] * 1000 / page_height))),
-                        max(0, min(1000, int(bbox[2] * 1000 / page_width))),
-                        max(0, min(1000, int(bbox[3] * 1000 / page_height))),
-                    ]
-
-                    # Skip if already covered by existing blocks (text or geometry)
-                    if self._is_covered_by_blocks(bbox_norm, text, blocks, page_idx):
+                    bbox_norm = to_norm(bbox)
+                    if page_idx in merge_pages and any(
+                        (block.type == BlockType.TABLE or is_merged_table_remnant(block))
+                        and _bbox_containment(bbox_norm, block.bbox_norm or []) >= self.COVERAGE_CONTAINMENT
+                        for block in page_blocks
+                    ):
+                        # A long run differing from a table only by OCR slips
+                        # (「雨品牌」) is still that table's text.
+                        pieces = [(run_text, to_norm(run_box)) for run_text, run_box
+                                  in self._lines_missing_from_tables(pdf_block["lines"], line_lookup)
+                                  if not any(self._table_covers_fragment(_normalize_for_coverage(run_text), *texts)
+                                             for texts in table_coverage)]
+                    # Skip if already covered by existing blocks (text or geometry),
+                    # or if the text appears inside a TABLE block (avoid
+                    # extracting table content as text)
+                    elif (self._is_covered_by_blocks(bbox_norm, text, blocks, page_idx)
+                          or self._is_inside_table_content(text, page_blocks)):
                         continue
+                    else:
+                        pieces = [(text.strip(), bbox_norm)]
 
-                    # Skip if text appears inside a TABLE block (avoid extracting table content as text)
-                    if self._is_inside_table_content(text, page_blocks):
-                        continue
-
-                    # Create supplemented block
-                    block = Block(
-                        block_id=f"s{next_block_idx:06d}",  # "s" prefix for supplement
-                        type=BlockType.TEXT,
-                        page_idx=page_idx,
-                        bbox_norm=bbox_norm,
-                        reading_order=next_block_idx,
-                        payload={
-                            "text": text.strip(),
-                            "text_level": 0,
-                            "origin": "pymupdf_supplement",
-                        },
-                    )
-                    supplemented.append(block)
-                    next_block_idx += 1
+                    for piece, piece_bbox in pieces:
+                        supplemented.append(Block(
+                            block_id=f"s{next_block_idx:06d}",  # "s" prefix for supplement
+                            type=BlockType.TEXT,
+                            page_idx=page_idx,
+                            bbox_norm=piece_bbox,
+                            reading_order=next_block_idx,
+                            payload={
+                                "text": piece.strip(),
+                                "text_level": 0,
+                                "origin": "pymupdf_supplement",
+                            },
+                        ))
+                        next_block_idx += 1
 
         finally:
             doc.close()
@@ -948,6 +1002,39 @@ class NormalizeStage:
             return all_blocks, len(supplemented)
 
         return blocks, 0
+
+    def _lines_missing_from_tables(
+        self, lines: list[dict[str, Any]], texts: list[str]
+    ) -> list[tuple[str, list[float]]]:
+        """Text and box of each run of consecutive lines none of ``texts`` carries.
+
+        A line too short to look up on its own (「問。」) only extends a run.
+        """
+        runs: list[list[dict[str, Any]]] = []
+        current: list[dict[str, Any]] = []
+        for line in lines:
+            compact = _line_lookup_form(line["text"])
+            if len(compact) < self.TABLE_LINE_LOOKUP_MIN_CHARS:
+                if current:
+                    current.append(line)
+                continue
+            if any(compact in text for text in texts):
+                if current:
+                    runs.append(current)
+                current = []
+            else:
+                current.append(line)
+        if current:
+            runs.append(current)
+        joined = []
+        for run in runs:
+            text = run[0]["text"]
+            for line in run[1:]:
+                text = _join_text_lines(text, line["text"])
+            boxes = [line["bbox"] for line in run]
+            joined.append((text, [min(b[0] for b in boxes), min(b[1] for b in boxes),
+                                  max(b[2] for b in boxes), max(b[3] for b in boxes)]))
+        return joined
 
     def _merge_supplements_in_order(
         self,
@@ -1586,6 +1673,7 @@ class NormalizeStage:
                 previous["text"] = _join_text_lines(
                     previous["text"].strip(), str(candidate["text"]).strip()
                 )
+                previous["lines"].append({"text": str(candidate["text"]).strip(), "bbox": box})
                 previous["bbox"] = [
                     min(previous["bbox"][0], box[0]),
                     min(previous["bbox"][1], box[1]),
@@ -1593,7 +1681,8 @@ class NormalizeStage:
                     max(previous["bbox"][3], box[3]),
                 ]
                 continue
-            merged.append({"text": str(candidate["text"]).strip(), "bbox": box})
+            text = str(candidate["text"]).strip()
+            merged.append({"text": text, "bbox": box, "lines": [{"text": text, "bbox": box}]})
         return merged
 
     def _in_page_margin(self, bbox: Sequence[float], page_height: float | None) -> bool:

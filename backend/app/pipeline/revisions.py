@@ -7,7 +7,7 @@ from pathlib import Path
 
 from app.pipeline.delivery import atomic_write_json
 
-PIPELINE_REVISION = "delivery-v20.18-picture-recorded-context-20261008.1"
+PIPELINE_REVISION = "delivery-v20.19-merged-table-page-breaks-20261008.1"
 
 
 def execution_fingerprint(config: dict, source_sha: str) -> str:

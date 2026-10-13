@@ -154,3 +154,50 @@ def picture_content_confirmed(page, block_id, names, delivered):
                for line in str(reading.get("text") or "").splitlines()):
             return False
     return True
+
+
+def picture_problems(review, picture_ids, *, new_wording=(), unattributed=True):
+    """The hard remarks a review makes about picture blocks; empty when nothing is wrong in them.
+
+    A part not verified counts with its own observation unless that is soft, and so does a
+    page remark naming one of the parts or naming no block. With ``new_wording``, the
+    wording a local edit brought in, only remarks quoting it count: faults the edit did not
+    touch stay as they were and cannot undo its fix (decided 2026-10-13: a repair passed
+    only when its audit found nothing at all, and 582 of 1110 rejections were audits
+    naming older faults or a relationship left unstated). ``unattributed=False`` leaves
+    out page remarks naming no block, for a page whose other content they may concern.
+    """
+    from app.pipeline.content_coverage import normalized_text
+
+    findings = {f.get("block_id"): f for f in review.get("blocks", [])}
+    ids = set(picture_ids)
+    missing = [f"{bid}: no finding" for bid in sorted(ids) if bid not in findings]
+    remarks = [findings[bid].get("observation") or bid for bid in sorted(ids & findings.keys())
+               if findings[bid].get("status") != "verified"
+               and not soft_review_remark(findings[bid].get("observation", ""))]
+    for issue in review.get("issues") or []:
+        named = set(_BLOCK_ID.findall(issue))
+        if (named & ids or not named and unattributed) and not soft_review_remark(issue):
+            remarks.append(issue)
+    if new_wording:
+        wording = [w for w in (normalized_text(w) for w in new_wording) if len(w) >= 2]
+        remarks = [r for r in remarks if any(w in normalized_text(r) for w in wording)]
+    return missing + remarks
+
+
+def page_review_problems(review, picture_ids):
+    """What still fails in a page review once soft picture remarks are set aside.
+
+    Every block that is not a picture must be verified, as before; a picture fails only
+    on a hard remark. A source-completeness flag with no hard remark behind it is the
+    one the relationship check sets and is not a problem by itself.
+    """
+    if not review:
+        return ["no review"]
+    pictures = {f.get("block_id") for f in review.get("blocks", [])} & set(picture_ids)
+    problems = [] if review.get("reading_order_correct") else ["reading order"]
+    problems += [f.get("observation") or f.get("block_id") for f in review.get("blocks", [])
+                 if f.get("block_id") not in pictures and f.get("status") != "verified"]
+    problems += [i for i in review.get("issues") or []
+                 if set(_BLOCK_ID.findall(i)) - pictures and not soft_review_remark(i)]
+    return problems + picture_problems(review, pictures)

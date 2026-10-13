@@ -12,6 +12,7 @@ v20.10 B: 光 was deleted from the card name 「晴空光年」 on a misreading)
 same per-image and page audits then decide.
 """
 import json
+import re
 from difflib import SequenceMatcher
 from typing import Literal
 
@@ -171,3 +172,58 @@ def known_issues(owner_state, recovery_state, page, block_id):
             for feedback in step.get("validation_feedback") or []:
                 issues += feedback.get("issues", []) + [b.get("observation", "") for b in feedback.get("blocks", [])]
     return list(dict.fromkeys(str(i)[:300] for i in issues if str(i).strip()))[:20]
+
+
+# A remark that spells out a correction: 「Talvin」 should be 「Tolvin」, 誤植為「側窗圓弧」，來源為「側前圓弧」.
+_CORRECTION = re.compile(r"should (?:be|read)|instead of|rather than|delivered as|\bnot\b.{0,40}\bas delivered|"
+                         r"incorrect|misread|mis-?spel|typo|應為|應是|應作|誤植|誤寫|誤讀|讀作|讀為|寫成|讀成|錯寫|而非|有誤",
+                         re.I)
+_QUOTED = re.compile(r"「([^「」\n]{1,80})」|『([^『』\n]{1,80})』|“([^“”\n]{1,80})”|‘([^‘’\n]{1,80})’|"
+                     r"\"([^\"\n]{1,80})\"|'([^'\n]{1,80})'")
+# A wrong span shorter than this is replaced only where it occurs once (「tt」 in 「其中「tt」為藍色」).
+REPEATED_SPAN_CHARS = 4
+
+
+def spelled_out_corrections(remarks):
+    """The (a, b) quote pairs of hard remarks that mark a correction; which one is right is for evidence to say."""
+    from app.pipeline.review_policy import soft_review_remark
+
+    pairs = []
+    for remark in remarks:
+        if soft_review_remark(remark) or not _CORRECTION.search(remark):
+            continue
+        quoted = list(dict.fromkeys(next(g for g in m.groups() if g is not None).strip()
+                                    for m in _QUOTED.finditer(remark)))
+        if len(quoted) == 2 and all(normalized_text(q) for q in quoted):
+            pairs.append(tuple(quoted))
+    return pairs
+
+
+def review_corrections(remarks, delivered, ocr_lines):
+    """Replacements a review spelled out and PaddleOCR confirms, as {wrong: right}.
+
+    The user's rule (2026-10-13): when the review names the correct wording and text
+    recognition agrees, change the wording directly instead of re-reading the picture.
+    Only a hard remark marking a correction and quoting exactly two strings counts, and
+    which of the two is wrong is left to evidence rather than the remark's grammar: the
+    wrong one is delivered and OCR does not read it, the right one OCR reads. Spot check
+    of the 2026-10-08 batch: the blind reading and OCR alone agreed on a wrong character
+    in a company's name, so a remark is required.
+    """
+    ocr = "\n".join(ocr_lines or [])
+    found = {}
+    for pair in spelled_out_corrections(remarks) if ocr else []:
+        for wrong, right in (pair, pair[::-1]):
+            occurrences = delivered.count(wrong)
+            if (occurrences and (occurrences == 1 or len(normalized_text(wrong)) >= REPEATED_SPAN_CHARS)
+                    and not appears_in(wrong, ocr) and appears_in(right, ocr)
+                    and SequenceMatcher(None, _folded(wrong), _folded(right)).ratio() >= 0.5):
+                found.setdefault(wrong, set()).add(right)
+    return {wrong: rights.pop() for wrong, rights in found.items() if len(rights) == 1}
+
+
+def apply_corrections(text, corrections):
+    """Every occurrence of each wrong span replaced, longest span first so none is cut inside another."""
+    for wrong in sorted(corrections, key=len, reverse=True):
+        text = text.replace(wrong, corrections[wrong])
+    return text

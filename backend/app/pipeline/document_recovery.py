@@ -21,7 +21,13 @@ from app.pipeline.recovery_models import (
     RecoveryDecision,
     SourceMatch,
 )
-from app.pipeline.review_policy import partial_review_accepted
+from app.pipeline.review_policy import (
+    page_review_problems,
+    partial_review_accepted,
+    picture_content_confirmed,
+    picture_problems,
+    soft_review_remark,
+)
 from app.pipeline.review_sources import (
     SourceInventory,
     content_blocks,
@@ -29,7 +35,7 @@ from app.pipeline.review_sources import (
     needs_content_recovery,
 )
 
-RECOVERY_VERSION = "document-tools-v13-image-geometry"
+RECOVERY_VERSION = "document-tools-v14-effective-repairs"
 SKILLS = Path(__file__).with_name("recovery_skills")
 TOOL_DESCRIPTIONS = {
     "ocr_image": "First observe the original image at scale=1; if disputed, use a crop around returned line bbox at scale=2/4 instead of magnifying the whole image. Observe lettering on ONE mapped image using PaddleOCR; optional original-image 0..1000 region and scale 1/2/4. Returns source-bound line IDs, coordinates and scores. No content is published. Then repair_image can resolve conflicts against the original image.",
@@ -216,18 +222,46 @@ class RecoveryController:
         self.owner._save()
         atomic_write_json(self.root / "outputs/recovery_report.json", self.state, ensure_ascii=False, indent=2)
 
+    def picture_texts(self, ir):
+        """Each picture block's delivered text: a figure's retrieval text, a recovered part's own text."""
+        from app.pipeline.autonomous_delivery import is_picture_content
+
+        assets = {row.get("block_id"): row.get("retrieval_text") or ""
+                  for row in read_jsonl(self.root / "outputs/assets_index.jsonl")}
+        return {b.block_id: assets.get(b.block_id, "") if b.type == BlockType.IMAGE else b.get_text()
+                for b in ir.blocks if is_picture_content(b)}
+
+    def settled_pictures(self, ir, page, record, texts=None):
+        """Pictures of a page whose review found nothing wrong in their wording; repair has nothing to fix there.
+
+        Decided 2026-10-13: 647 relationship issues were queued and 9 resolved; a remark that
+        a relationship is not spelled out, or that print is illegible, is not repaired.
+        """
+        texts = self.picture_texts(ir) if texts is None else texts
+        settled = set()
+        for block in self.inventory.blocks(page, ir):
+            if block.block_id in texts:
+                names = {block.block_id, block.payload.get("agentic_image_origin") or block.block_id}
+                if picture_content_confirmed(record, block.block_id, names, texts[block.block_id]):
+                    settled.add(block.block_id)
+        return settled
+
     def problems(self, ir):
         result = []
+        texts = self.picture_texts(ir)
         for page in self.inventory.pages:
             record = self.owner.state["pages"].get(str(page), {})
             reason = record.get("reason", "")
+            settled = self.settled_pictures(ir, page, record, texts) if record.get("review") else set()
             for finding in record.get("image_issues", []):
                 block = ir.get_block(finding["block_id"])
-                if block and block.type == BlockType.IMAGE:
+                if block and block.type == BlockType.IMAGE and block.block_id not in settled:
                     result.append({"id": "image:" + block.block_id, "block_id": block.block_id,
                                    "page_idx": page, "kind": "image", "failure_kind": finding["failure_kind"],
                                    "issues": [finding["detail"]]})
-            if needs_content_recovery(record) and not record.get("image_only_issues"):
+            pictures = {b.block_id for b in self.inventory.blocks(page, ir) if b.block_id in texts}
+            if (needs_content_recovery(record) and not record.get("image_only_issues")
+                    and (not record.get("review") or page_review_problems(record["review"], pictures))):
                 result.append({"id": f"page:{page}", "page_idx": page,
                                "reason": reason, "issues": record.get("review", {}).get("issues", [])[:5]})
         for block in content_blocks(ir):
@@ -242,7 +276,7 @@ class RecoveryController:
         # A picture a cheap verbatim patch or targeted edit can fix goes first: a full
         # re-read costs 8-20 calls and can use up the budget before any patch runs.
         def patch_first(problem):
-            cheap = {"delivery_patch": 0, "targeted_edit": 1}
+            cheap = {"review_correction": 0, "delivery_patch": 0, "targeted_edit": 1}
             return cheap.get(self.repair_method(problem["block_id"]), 2) if problem.get("kind") == "image" else 2
         return sorted(result, key=lambda problem: (patch_first(problem), -priority(problem)))
 
@@ -335,10 +369,11 @@ class RecoveryController:
                      and b.bbox_norm[1] < b.bbox_norm[3])]
 
     def unaccepted_pictures(self, ir, record):
-        """Pictures the page's last review did not accept; a re-read picture is reviewed as its parts."""
+        """Pictures the page's last review found wrong; a re-read picture is reviewed as its parts."""
         pictures = set()
+        settled = self.settled_pictures(ir, record.get("page_idx"), record) if "page_idx" in record else set()
         for finding in record.get("review", {}).get("blocks", []):
-            if finding.get("status") == "verified" and finding.get("context_complete", True):
+            if finding.get("status") == "verified" or finding.get("block_id") in settled:
                 continue
             block = ir.get_block(finding.get("block_id"))
             if block is None:
@@ -349,14 +384,18 @@ class RecoveryController:
         return pictures
 
     def reconcile_image_findings(self, ir, page, record):
-        """A later source audit can invalidate an earlier scoped success."""
+        """A later source audit can invalidate an earlier scoped success.
+
+        An improvement was kept knowing older faults remain, so only a success is reopened.
+        """
         findings = {item["block_id"]: item for item in record.get("review", {}).get("blocks", [])}
         for block in ir.blocks:
             origin = block.payload.get("agentic_image_origin")
             issue = self.state["issues"].get("image:" + origin) if origin else None
             finding = findings.get(block.block_id)
             if (issue and issue.get("page_idx") == page and finding and not block.payload.get("agentic_gap")
-                    and (finding.get("status") != "verified" or not finding.get("context_complete", True))):
+                    and issue.get("status") != "improved"
+                    and finding.get("status") != "verified" and not soft_review_remark(finding.get("observation", ""))):
                 issue.update(status="needs_review", reason="final_page_review_disagrees")
                 rejected = issue.setdefault("unverified_block_ids", [])
                 if block.block_id not in rejected:
@@ -429,11 +468,15 @@ class RecoveryController:
             region_count = 3 if str(page) in self.state["layout_pages"] else 0
         method = self.repair_method(problem.get("block_id")) if action == "repair_image" else "full"
         patch, edit = method == "delivery_patch", method == "targeted_edit"
-        geometry = geometry and not patch and not edit
+        correction = method == "review_correction"
+        geometry = geometry and not patch and not edit and not correction
         cost = tool_cost(self.owner.state, action, pictures=features["embedded_images"], layout=layout,
                          word_pictures=features["word_images"], image_read_calls=reads,
                          layout_cached=layout_cached, detail_regions=region_count, image_geometry=geometry,
-                         delivery_patch=patch, targeted_edit=edit)
+                         delivery_patch=patch, targeted_edit=edit, review_correction=correction)
+        if correction:
+            cost["method"] = ("review_correction: replace only wording an audit spelled out as wrong and "
+                              "PaddleOCR reads as written, then audit")
         if patch:
             cost["method"] = "delivery_patch: keep delivered text, add the omitted relationships/lines, then audit"
         if edit:
@@ -785,9 +828,15 @@ class RecoveryController:
                                       and (decision.action != "repair_image"
                                            or b.payload.get("agentic_image_origin") == decision.block_id)
                                       for b in candidate.blocks)
+                        remaining = []
+                        if decision.action == "repair_image" and self.owner.limits.mode == "apply":
+                            parts = {b.block_id for b in ir.blocks
+                                     if b.payload.get("agentic_image_origin") == decision.block_id}
+                            committed_review = self.owner.state["pages"].get(str(problem["page_idx"]), {}).get("review", {})
+                            remaining = picture_problems(committed_review, parts) if committed_review else []
                         issue["status"] = ("candidate_only" if self.owner.limits.mode == "shadow" else
                                            "located" if decision.action == "resolve_source" else
-                                           "applied_partial" if partial else "resolved")
+                                           "applied_partial" if partial else "improved" if remaining else "resolved")
                         step["result"] = {"affected_pages": pages, "source_verified": True, "source_complete": not partial and decision.action != "resolve_source",
                                           "scope": "image" if decision.action == "repair_image" else "page"}
                         if not page_scope and decision.action == "repair_image" and self.owner.limits.mode == "apply":
@@ -920,21 +969,29 @@ class RecoveryController:
                 if not review or not review.get("reading_order_correct", False):
                     raise ValueError("candidate_final_review_incomplete")
                 findings = {b["block_id"]: b for b in review.get("blocks", [])}
+                from app.pipeline.autonomous_delivery import is_picture_content
+                from app.pipeline.image_recovery import repaired_picture_problems
+                page_blocks = inventory.blocks(page, candidate)
+                pictures = {b.block_id for b in page_blocks if is_picture_content(b)}
                 previously_verified = {b["block_id"] for b in old_records.get(str(page), {}).get("review", {}).get("blocks", [])
                                        if b.get("status") == "verified" and b.get("context_complete", True)}
                 unchanged_ids = {b.block_id for b in candidate.blocks if (old := before.get_block(b.block_id))
                                  and old.model_dump(exclude={"reading_order"}) == b.model_dump(exclude={"reading_order"})}
-                required = previously_verified & unchanged_ids
-                if image_origin:
-                    required.update(b.block_id for b in inventory.blocks(page, candidate)
-                                    if b.payload.get("agentic_image_origin") == image_origin and not b.payload.get("agentic_gap"))
-                if any(findings.get(bid, {}).get("status") != "verified"
-                       or not findings[bid].get("context_complete", True) for bid in required):
+                # A picture verified before regresses only on a hard remark; other content must stay verified.
+                if any(bid not in findings or findings[bid].get("status") != "verified"
+                       and (bid not in pictures or not soft_review_remark(findings[bid].get("observation", "")))
+                       for bid in previously_verified & unchanged_ids):
                     raise ValueError("candidate_final_review_regressed_verified_content")
-                if old_records.get(str(page), {}).get("status") == "verified" and record.get("status") != "verified":
+                if image_origin and repaired_picture_problems(
+                        review, [b for b in page_blocks if b.payload.get("agentic_image_origin") == image_origin],
+                        unattributed=False):
+                    raise ValueError("candidate_final_review_found_problems_in_the_repair")
+                if (old_records.get(str(page), {}).get("status") == "verified" and record.get("status") != "verified"
+                        and page_review_problems(review, pictures)):
                     raise ValueError("candidate_final_review_regressed_verified_page")
                 if not image_origin and page in pages and record.get("status") != "verified":
-                    if not partial_review_accepted(review, record.get("declared_gap_ids", []), record.get("block_ids")):
+                    if (not partial_review_accepted(review, record.get("declared_gap_ids", []), record.get("block_ids"))
+                            and page_review_problems(review, pictures)):
                         raise ValueError("candidate_failed_final_source_or_delivery_verification")
             return {"records": copy.deepcopy(self.owner.state["pages"]), "fingerprints": new_scopes,
                     "affected_pages": sorted(changed)}
@@ -976,12 +1033,15 @@ class RecoveryController:
                 record = await self.owner._inspect(page, candidate, inventory, folder)
                 atomic_write_json(folder / f"validation-page-{page}.json", record, ensure_ascii=False, indent=2)
                 if record["status"] != "verified":
+                    from app.pipeline.autonomous_delivery import is_picture_content
                     gaps = [b for b in inventory.blocks(page, candidate) if b.payload.get("agentic_gap")]
                     review = record.get("review", {})
                     page_blocks = inventory.blocks(page, candidate)
                     readable = [b for b in page_blocks if not b.payload.get("agentic_gap")]
-                    if not (readable and partial_review_accepted(
-                            review, [b.block_id for b in gaps], [b.block_id for b in page_blocks])):
+                    if not (readable and (partial_review_accepted(
+                            review, [b.block_id for b in gaps], [b.block_id for b in page_blocks])
+                            or not page_review_problems(review, {b.block_id for b in page_blocks
+                                                                  if is_picture_content(b)}))):
                         return False
             return True
         finally:

@@ -1299,9 +1299,26 @@ def _dedupe_form_outputs_by_page(forms: list[dict[str, Any]]) -> list[dict[str, 
     return sorted(result, key=lambda item: (int(item.get("page_idx") or 0), str(item.get("block_id") or "")))
 
 
+# A native Word file has no pages: every block sits on page 0, so "the rows on the
+# table's page" are the whole document. A 40,000-character report that mentions
+# 檢核表 once and 金額/合計 anywhere then scored as one form, and the whole report
+# was delivered as a form collection. Only a file of about one form's length can be
+# judged that way.
+NATIVE_WORD_FORM_MAX_CHARS = 6000
+
+
+def is_long_native_word(document_ir: DocumentIR) -> bool:
+    # Spreadsheets also lack physical pages, but each sheet is its own page.
+    if document_ir.has_physical_pages() or str(document_ir.source.ext or "").lstrip(".").lower() not in {"doc", "docx"}:
+        return False
+    return sum(len(block.get_text()) for block in document_ir.blocks) > NATIVE_WORD_FORM_MAX_CHARS
+
+
 def _collect_form_like_table_outputs(document_ir: DocumentIR) -> list[dict[str, Any]]:
     """Create synthetic form outputs for table/spreadsheet pages that are clearly forms."""
 
+    if is_long_native_word(document_ir):
+        return []
     forms: list[dict[str, Any]] = []
     seen_pages: set[int] = set()
     for block in document_ir.blocks:
@@ -1340,6 +1357,8 @@ def _collect_form_like_text_page_outputs(
 ) -> list[dict[str, Any]]:
     """Create synthetic form outputs for PDF pages parsed as text-only form layouts."""
 
+    if is_long_native_word(document_ir):
+        return []
     forms: list[dict[str, Any]] = []
     table_pages = {block.page_idx for block in document_ir.blocks if block.type == BlockType.TABLE}
     page_indices = sorted({block.page_idx for block in document_ir.blocks if block.type == BlockType.TEXT})
@@ -1473,6 +1492,8 @@ def _form_text_signal_score(rows: list[list[str]]) -> int:
 def is_form_like_document(document_ir: DocumentIR, rows: list[list[str]] | None = None) -> bool:
     """Return true when source and parser evidence point to a fillable form."""
 
+    if rows is None and is_long_native_word(document_ir):
+        return False
     source_text = f"{Path(document_ir.source.path).stem} {Path(document_ir.source.path).name}"
     row_text = " ".join(
         " ".join(str(cell or "") for cell in row)
@@ -1482,7 +1503,8 @@ def is_form_like_document(document_ir: DocumentIR, rows: list[list[str]] | None 
     # 申請單(?!位): 申請單位 is "applicant unit" — a department, written in every
     # procedural notice — and matching its first three characters made any
     # document that names a department score a form name.
-    form_name_score = len(re.findall(r"申請單(?!位)|請領單|報支單|出差單|核銷單|請款單|申報單|異動單|增加單|移轉單|報廢單|申請表|登記表|檢核表|授權書|同意書|委託書", text))
+    # The same holds for 申報單位, 增加單位 (adding units) and the rest of the X單 names.
+    form_name_score = len(re.findall(r"(?:申請|請領|報支|出差|核銷|請款|申報|異動|增加|移轉|報廢)單(?!位)|申請表|登記表|檢核表|授權書|同意書|委託書", text))
     english_form_score = len(
         re.findall(
             r"\b(application|authorization|authorisation|consent|claim|request|reimbursement|transcript|tax return)\b|\bform\b",
@@ -1674,7 +1696,7 @@ def _should_merge_forms_as_single_source_document(
     if not document_ir.has_physical_pages():
         # Native Word page zero is not a physical one-page form.
         body_size = sum(len(block.get_text()) for block in document_ir.blocks)
-        return form_like_source and body_size <= 6000 and len(form_outputs) == 1
+        return form_like_source and body_size <= NATIVE_WORD_FORM_MAX_CHARS and len(form_outputs) == 1
     if len(source_pages) <= 1 and (source_has_form_keyword or form_like_source):
         return True
     if (

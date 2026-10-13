@@ -68,6 +68,7 @@ from app.pipeline.structured_rag import (
     build_form_documents_rag,
     build_structured_rag,
     build_structured_rag_with_vlm_fallback,
+    is_long_native_word,
     looks_like_reference_table,
     parse_html_table,
     plan_document,
@@ -5599,8 +5600,10 @@ class PackageStage:
         pages_with_form_enrichment: set[int] = set()
         form_enrichments_by_page: dict[int, dict[str, Any]] = {}
 
-        # Find form enrichments and their page indices
-        if not suppress_form_enrichment:
+        # Find form enrichments and their page indices. A long Word file has one
+        # logical page, so a form read from one of its tables would stand in for
+        # the whole report; its blocks render as themselves instead.
+        if not suppress_form_enrichment and not is_long_native_word(document_ir):
             for block_id, enrichment in enrichments.items():
                 if enrichment.get("kind") in ("form_asset", "form_guide"):
                     page_idx = enrichment.get("input", {}).get("page_idx")

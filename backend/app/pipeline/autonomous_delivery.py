@@ -22,8 +22,9 @@ IMAGE_LABELS = {
 }
 # Gaps (unreadable regions), invalid evidence and missing context still exclude.
 _UNVERIFIED_PICTURE_REASONS = {"content_or_context_unverified", "source_not_mapped"}
-# A recovered picture's own words about it (image_recovery, image_refinement); read lettering is 「圖片文字：」.
-_DESCRIPTION_LINE = re.compile(r"(?:圖片可確認內容|圖片內容)：")
+# A recovered picture's own words about it (image_recovery, image_refinement, a delivery patch's
+# relationship sentences); read lettering is 「圖片文字：」.
+_DESCRIPTION_LINE = re.compile(r"(?:圖片可確認內容|圖片內容|圖片關係)：")
 # How DeliveryExcerpts ties a delivered line to its source block without guessing.
 _EXACT_BINDINGS = {"source_marker", "source_text", "contained_source_text",
                    "ambiguous_source_occurrence", "ambiguous_contained_source_text"}
@@ -346,7 +347,10 @@ def keep_only_read_text(ir, outputs, pictures, asset_records, language, renderer
         block, record = ir.get_block(bid), asset_records.get(bid)
         if block.type != BlockType.IMAGE:
             delivered = renderer._block_to_text(block)
-            kept = "\n".join(line for line in delivered.split("\n") if not _DESCRIPTION_LINE.match(line))
+            # A repair that kept the delivered text records which of its lines were read off the picture.
+            read = block.payload.get("agentic_read_lines")
+            kept = "\n".join(line for line in delivered.split("\n")
+                             if (line in read if read is not None else not _DESCRIPTION_LINE.match(line)))
             if kept != delivered:
                 remaining[bid] = kept
             continue

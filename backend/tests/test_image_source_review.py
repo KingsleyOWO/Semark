@@ -256,7 +256,11 @@ async def test_image_split_text_blocks_retain_relationship_gate_in_local_and_fin
     replacement = candidate.blocks[0]
     assert replacement.type == BlockType.TEXT and replacement.block_id != original.block_id
     assert replacement.payload['agentic_relationship_evidence_id'] in replacement.payload['agentic_evidence_ids']
-    assert await runner.validate(candidate, [0], folder, image_origin='b0', image_pruned=True) is with_relation_checks
+    # An unaudited relationship no longer fails a repair (decided 2026-10-13); the gate still
+    # reports it, so the page review below stays needs_review without the checks.
+    assert await runner.validate(candidate, [0], folder, image_origin='b0', image_pruned=True)
+    validation = json.loads((folder / 'validation-image.json').read_text())['review']
+    assert any('relationship coverage is incomplete' in i for i in validation['issues']) is not with_relation_checks
     inventory = await runner.candidate_inventory(candidate, folder)
     assert not inventory.word_images  # The removed original ID cannot be the protection mechanism.
     record = await owner._inspect(0, candidate, inventory, folder)

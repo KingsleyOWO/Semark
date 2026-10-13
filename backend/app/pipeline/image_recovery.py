@@ -9,7 +9,8 @@ from app.pipeline.image_reading import (
     read_image_parts_bounded,
     reconcile_image_parts,
 )
-from app.pipeline.review_policy import dependency_closed_subset, partial_review_accepted
+from app.pipeline.image_source_review import appears_in
+from app.pipeline.review_policy import dependency_closed_subset
 
 
 async def repair_image(runner, ir, problem, decision, folder, skill):
@@ -40,6 +41,8 @@ async def repair_image(runner, ir, problem, decision, folder, skill):
     if method == "delivery_patch":
         statements = delivery_patch_statements(runner.owner.state, page, block.block_id)
         return build_delivery_patch_candidate(runner, ir, block, page, region, source, statements, folder), [page]
+    if method == "review_correction":
+        return await build_review_correction_candidate(runner, ir, block, page, region, source, original, folder), [page]
     if method == "targeted_edit":
         return await build_targeted_edit_candidate(runner, ir, block, page, region, source, original, folder), [page]
     from app.pipeline.image_geometry import geometry_eligible, measured_axes, repair_axis_image
@@ -137,13 +140,25 @@ def delivery_patch_attempted(recovery_state, block_id):
 
 
 EDITABLE_FAILURES = {"image_relationship_mismatch", "reading_disagreement", "image_content_mismatch"}
+# Methods that keep the delivered text and change only what they name.
+LOCAL_EDIT_METHODS = {"delivery_patch", "targeted_edit", "review_correction"}
+# The last of them, which also carries the review's spelled-out corrections, is accepted when its audit
+# finds nothing wrong in the wording it brought in, older faults left as they were: once committed the
+# picture is text and no later method can reach it, so an earlier method must leave nothing hard behind.
+IMPROVING_METHODS = {"targeted_edit"}
 
 
 def next_image_method(owner_state, recovery_state, page, block_id):
-    """Cheapest untried method first, each once: add omissions, fix named spans, then re-read.
+    """Cheapest untried method first, each once: apply corrections a review spelled out, add
+    omissions, fix named spans, then re-read.
 
     A picture that is only unreadable has nothing an edit could fix.
     """
+    from app.pipeline.image_edits import known_issues, spelled_out_corrections
+
+    if (spelled_out_corrections(known_issues(owner_state, recovery_state, page, block_id))
+            and not method_attempted(recovery_state, block_id, "review_correction")):
+        return "review_correction"
     if (delivery_patch_statements(owner_state, page, block_id)
             and not method_attempted(recovery_state, block_id, "delivery_patch")):
         return "delivery_patch"
@@ -175,7 +190,10 @@ def build_delivery_patch_candidate(runner, ir, block, page, region, source, stat
         raise ValueError("delivery_patch_requires_delivered_picture_text")
     atomic_write_json(folder / "delivery-patch.json", {"source_block_id": block.block_id, "statements": statements,
                                                        "kept_delivered_text": delivered}, ensure_ascii=False, indent=2)
-    return kept_text_candidate(runner, ir, block, page, region, source, delivered, statements, folder, "delivery_patch")
+    from app.pipeline.image_edits import transcription_lines
+    return kept_text_candidate(runner, ir, block, page, region, source, delivered, statements, folder, "delivery_patch",
+                               read_lines=transcription_lines(runner.root / "outputs", block.block_id),
+                               new_wording=[s.split("：", 1)[-1] for s in statements])
 
 
 async def build_targeted_edit_candidate(runner, ir, block, page, region, source, original, folder):
@@ -184,8 +202,10 @@ async def build_targeted_edit_candidate(runner, ir, block, page, region, source,
     from app.pipeline.image_edits import (
         EDIT_POLICY,
         ImageEditProposal,
+        apply_corrections,
         apply_edits,
         known_issues,
+        review_corrections,
         transcription_lines,
     )
     from app.pipeline.image_source_review import WordPictureItem
@@ -205,8 +225,14 @@ async def build_targeted_edit_candidate(runner, ir, block, page, region, source,
                if reading else None,
                "ocr_lines": lines or [], "output_language": language, "edit_policy": EDIT_POLICY}
     proposal = await read_contract(runner.owner, "propose_image_edits", payload, [source], ImageEditProposal)
-    text, statements, applied, rejected = apply_edits(delivered, proposal.edits, transcription=transcription,
+    # What a review spelled out and OCR reads goes in as-is; a rejected review_correction is not lost here.
+    corrections = review_corrections(issues, delivered, lines or [])
+    corrected = apply_corrections(delivered, corrections)
+    transcription = [apply_corrections(line, corrections) for line in transcription]
+    text, statements, applied, rejected = apply_edits(corrected, proposal.edits, transcription=transcription,
                                                       ocr_lines=lines, reading=reading)
+    applied = [{"op": "replace", "quote": wrong, "replacement": right, "reason": "review_correction"}
+               for wrong, right in corrections.items()] + applied
     record = {"source_block_id": block.block_id, "known_issues": issues, "ocr_lines": lines,
               "proposal": proposal.model_dump(), "applied": applied, "rejected": rejected,
               "delivered_text": delivered, "edited_text": text, "statements": statements}
@@ -215,12 +241,47 @@ async def build_targeted_edit_candidate(runner, ir, block, page, region, source,
         raise ValueError("targeted_edit_found_no_supported_edit")
     edit_evidence = runner.evidence.add(provider="targeted_image_edit", kind="image_edit_record", page=page,
                                         block_id=block.block_id, source=source, content=record)
+    from app.pipeline.content_coverage import normalized_text as _normalized
+    read = transcription + [line for line in text.split("\n") if lines and _normalized(line)
+                            and appears_in(line, "\n".join(lines))]
+    wording = [e["replacement"] for e in applied if e["op"] == "replace"] + [s.split("：", 1)[-1] for s in statements]
     return kept_text_candidate(runner, ir, block, page, region, source, text, statements, folder, "targeted_edit",
-                               evidence_ids=[edit_evidence])
+                               evidence_ids=[edit_evidence], read_lines=read, new_wording=wording)
 
 
-def kept_text_candidate(runner, ir, block, page, region, source, kept, statements, folder, method, *, evidence_ids=()):
-    """Replace the picture with its kept text in chunk-sized pieces plus any added statements."""
+async def build_review_correction_candidate(runner, ir, block, page, region, source, original, folder):
+    """Apply the corrections a review spelled out and PaddleOCR confirms; no model call writes text."""
+    from app.adapters import ocr
+    from app.pipeline.image_edits import apply_corrections, known_issues, review_corrections, transcription_lines
+
+    delivered = delivered_picture_text(runner, block)
+    if not delivered:
+        raise ValueError("review_correction_requires_delivered_picture_text")
+    lines = await runner.owner._ocr_lines(original, runner.inventory) if ocr.ocr_python() else None
+    issues = known_issues(runner.owner.state, runner.state, page, block.block_id)
+    corrections = review_corrections(issues, delivered, lines or [])
+    if not corrections:
+        raise ValueError("review_correction_found_no_confirmed_edit")
+    text = apply_corrections(delivered, corrections)
+    record = {"source_block_id": block.block_id, "known_issues": issues, "ocr_lines": lines,
+              "corrections": corrections, "delivered_text": delivered, "corrected_text": text}
+    atomic_write_json(folder / "review-correction.json", record, ensure_ascii=False, indent=2)
+    evidence = runner.evidence.add(provider="review_correction", kind="image_edit_record", page=page,
+                                   block_id=block.block_id, source=source, content=record)
+    read = [apply_corrections(line, corrections) for line in transcription_lines(runner.root / "outputs", block.block_id)]
+    return kept_text_candidate(runner, ir, block, page, region, source, text, [], folder, "review_correction",
+                               evidence_ids=[evidence], read_lines=read, new_wording=list(corrections.values()))
+
+
+def kept_text_candidate(runner, ir, block, page, region, source, kept, statements, folder, method, *, evidence_ids=(),
+                        read_lines=(), new_wording=()):
+    """Replace the picture with its kept text in chunk-sized pieces plus any added statements.
+
+    Each piece records which of its lines were read off the picture (an unverified picture
+    keeps only those) and every piece the wording the method brought in, which is what its
+    audit judges.
+    """
+    from app.pipeline.content_coverage import normalized_text
     from app.pipeline.image_source_review import WordPictureItem
 
     common = {**runner.source_payload(page), "agentic_source_region": region,
@@ -235,13 +296,20 @@ def kept_text_candidate(runner, ir, block, page, region, source, kept, statement
             source=source, content=WordPictureItem.model_validate(raw).model_dump())
         common["agentic_evidence_ids"].insert(0, relationship_evidence)
         common["agentic_relationship_evidence_id"] = relationship_evidence
+    read = {normalized_text(line) for line in read_lines if normalized_text(line)}
+    common["agentic_new_wording"] = [w for w in dict.fromkeys(new_wording) if w.strip()]
+
+    def piece_payload(text):
+        lines = [line for line in text.split("\n")
+                 if normalized_text(line) in read or line.startswith("圖片文字：")]
+        return {**common, "text": text, "agentic_read_lines": lines}
     replacements = [Block(block_id=f"recovery_{folder.name}_image_k{index}", type=BlockType.TEXT,
-                          page_idx=block.page_idx, bbox_norm=region, payload={**common, "text": piece})
+                          page_idx=block.page_idx, bbox_norm=region, payload=piece_payload(piece))
                     for index, piece in enumerate(kept_text_pieces(kept))]
     if statements:
         replacements.append(Block(block_id=f"recovery_{folder.name}_image_r0", type=BlockType.TEXT,
                                   page_idx=block.page_idx, bbox_norm=region,
-                                  payload={**common, "text": "\n".join(statements)}))
+                                  payload=piece_payload("\n".join(statements))))
     candidate = ir.model_copy(deep=True)
     index = next(i for i, old in enumerate(candidate.blocks) if old.block_id == block.block_id)
     candidate.blocks[index:index + 1] = replacements
@@ -408,8 +476,7 @@ async def validate_image_parts(runner, candidate, pages, folder, origin, *, allo
     for block in selected:
         replace_image_review_dependencies(block, findings[block.block_id])
     accepted = image_review_accepted(selected, findings, review)
-    if any(b.payload.get("agentic_image_repair_method") in {"axis_geometry", "delivery_patch", "targeted_edit"}
-           for b in selected):
+    if any(b.payload.get("agentic_image_repair_method") in {"axis_geometry", *LOCAL_EDIT_METHODS} for b in selected):
         # One measured proposal / one verbatim patch or edit: no fallback to guessing or pruning content into gaps.
         return accepted
     if accepted and not any(b.payload.get("agentic_gap") for b in selected):
@@ -454,15 +521,35 @@ def replace_image_review_dependencies(block, finding):
 
 
 def image_review_accepted(blocks, findings, review):
+    """A repaired picture passes when its audit finds nothing wrong in what the repair delivered.
+
+    Decided 2026-10-13: an audit had to find nothing at all, so a relationship left
+    unstated, illegible print, or an older fault a local edit never touched failed a
+    repair whose own change was right. Now remarks that only miss a relationship or meet
+    illegible print do not count, and a local edit fails only on a remark quoting the
+    wording it brought in. Declared gaps stay gaps; no readable part may depend on one.
+    """
+    from app.pipeline.review_policy import partial_review_accepted
+
     gaps = [b.block_id for b in blocks if b.payload.get("agentic_gap")]
     readable = {b.block_id for b in blocks if not b.payload.get("agentic_gap")}
-    good = {bid for bid in readable if findings[bid].status == "verified" and findings[bid].context_complete}
     dependencies = {b.block_id: set(b.payload.get("agentic_depends_on_block_ids", [])) for b in blocks}
-    if not review.reading_order_correct or dependency_closed_subset(good, dependencies) != readable:
+    if not review.reading_order_correct or dependency_closed_subset(readable, dependencies) != readable:
         return False
-    if gaps:
-        return partial_review_accepted(review.model_dump(), gaps, [b.block_id for b in blocks])
-    return bool(readable and review.source_complete and not review.issues)
+    if gaps and partial_review_accepted(review.model_dump(), gaps, [b.block_id for b in blocks]):
+        return True
+    return bool(readable) and not repaired_picture_problems(review.model_dump(), blocks)
+
+
+def repaired_picture_problems(review, blocks, *, unattributed=True):
+    """Hard remarks a review makes about a repaired picture's readable parts; for the improving edit,
+    only those quoting the wording it brought in (an edit that only deletes is judged in full)."""
+    from app.pipeline.review_policy import picture_problems
+
+    readable = {b.block_id for b in blocks if not b.payload.get("agentic_gap")}
+    improving = any(b.payload.get("agentic_image_repair_method") in IMPROVING_METHODS for b in blocks)
+    wording = [w for b in blocks for w in b.payload.get("agentic_new_wording", [])] if improving else []
+    return picture_problems(review, readable, new_wording=wording, unattributed=unattributed)
 
 
 async def validate_image_variant(runner, candidate, revised, pages, folder, origin, name):
@@ -518,9 +605,11 @@ def prune_unverified_parts(blocks, findings, review, origin, page):
     """Keep a verified independent subset; convert rejected parts to explicit gaps."""
     if not review.reading_order_correct:
         return False
+    from app.pipeline.review_policy import soft_review_remark
+
     readable = [b for b in blocks if not b.payload.get("agentic_gap")]
     good = {b.block_id for b in readable if findings[b.block_id].status == "verified"
-            and findings[b.block_id].context_complete}
+            or soft_review_remark(findings[b.block_id].observation)}
     dependencies = {b.block_id: set(findings[b.block_id].depends_on_block_ids)
                     | set(b.payload.get("agentic_depends_on_block_ids", [])) for b in readable}
     good = dependency_closed_subset(good, dependencies)

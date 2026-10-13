@@ -13,7 +13,10 @@ import struct
 import zipfile
 from pathlib import Path
 
+from lxml import etree
 from PIL import Image
+
+from app.adapters.word_revisions import accept_tracked_changes, is_revised_part
 
 EMR_HEADER, EMR_COMMENT, EMR_EOF, EMR_STRETCHDIBITS = 1, 70, 14, 81
 SRCCOPY, DIB_RGB_COLORS = 0x00CC0020, 0
@@ -162,11 +165,12 @@ def open_picture(blob):
 
 
 def drawable_word_copy(source, folder):
-    """A copy of the .docx whose single-bitmap metafiles hold the PNG they draw, for LibreOffice.
+    """A copy of the .docx for LibreOffice: single-bitmap metafiles hold the PNG they draw,
+    and tracked changes are accepted so the pages show the text the parser reads.
 
     The part keeps its name: LibreOffice reads a picture by its bytes, and Word
     relationships, content types and image hashes stay as they are. None when the
-    document has no such picture.
+    document has neither.
     """
     replaced = {}
     with zipfile.ZipFile(source) as archive:
@@ -177,6 +181,11 @@ def drawable_word_copy(source, folder):
                     buffer = io.BytesIO()
                     image.save(buffer, "PNG")
                     replaced[info.filename] = buffer.getvalue()
+            elif is_revised_part(info.filename):
+                root = etree.fromstring(archive.read(info))
+                if accept_tracked_changes(root):
+                    replaced[info.filename] = etree.tostring(root, xml_declaration=True, encoding="UTF-8",
+                                                             standalone=True)
         if not replaced:
             return None
         folder = Path(folder)

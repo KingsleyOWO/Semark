@@ -102,3 +102,109 @@ class GenuineFormStillDetectedTest(unittest.TestCase):
         ]
 
         self.assertTrue(is_form_like_document(_document(english_form, path="form-4506.pdf")))
+
+
+def _word(blocks: list[tuple[str, str]], *, path: str) -> DocumentIR:
+    """A native Word document: no page images or boxes, so every block is on page 0."""
+    return DocumentIR(
+        doc_id="doc",
+        run_id="run",
+        source=SourceInfo(path=path, ext="docx", sha256="abc", size_bytes=1000),
+        engine=EngineInfo(backend="native_docx", method="auto"),
+        pages=[PageInfo(page_idx=0)],
+        blocks=[
+            Block(
+                block_id=f"b{idx:03d}",
+                type=BlockType.TABLE if kind == "table" else BlockType.TEXT,
+                page_idx=0,
+                reading_order=idx,
+                payload={"table_body": body} if kind == "table" else {"text": body},
+            )
+            for idx, (kind, body) in enumerate(blocks)
+        ],
+    )
+
+
+# Shape of the 2026-10 brand coaching reports: tens of thousands of characters,
+# a budget table with 金額/合計, and one passing mention of a 檢核表.
+LONG_WORD_REPORT = [
+    ("text", "示範企業品牌輔導結案報告書"),
+    *[("text", f"第{n}節 品牌定位與市場策略說明，輔導團隊與企業共同盤點品牌現況並提出改善建議。" * 12) for n in range(30)],
+    ("text", "輔導過程依品牌健檢檢核表逐項確認，並增加單位內部溝通頻率。"),
+    ("table", "<table><tr><td>項目</td><td>金額</td><td>合計</td></tr>"
+              "<tr><td>人事費</td><td>120,000</td><td>120,000</td></tr>"
+              "<tr><td>負責人姓名</td><td>王示範</td><td></td></tr></table>"),
+]
+
+SHORT_WORD_FORM = [
+    ("text", "出差申請單"),
+    ("table", "<table><tr><td>申請人</td><td></td><td>申請日期</td><td></td></tr>"
+              "<tr><td>出差事由</td><td></td><td>金額</td><td></td></tr>"
+              "<tr><td>單位主管</td><td></td><td>簽章</td><td></td></tr></table>"),
+]
+
+
+class NativeWordReportIsNotAFormTest(unittest.TestCase):
+    def test_long_word_report_is_not_delivered_as_a_form(self):
+        from app.pipeline.structured_rag import build_form_documents_rag
+
+        report = _word(LONG_WORD_REPORT, path="示範企業結案報告書.docx")
+
+        self.assertFalse(is_form_like_document(report))
+        output = build_form_documents_rag(report, {}, semantic_output_language="zh-TW")
+        self.assertEqual(output.plan.document_type, "generic_document")
+        self.assertEqual(output.records, [])
+
+    def test_short_word_form_is_still_a_form(self):
+        from app.pipeline.structured_rag import build_form_documents_rag
+
+        form = _word(SHORT_WORD_FORM, path="出差申請單.docx")
+
+        self.assertTrue(is_form_like_document(form))
+        output = build_form_documents_rag(form, {}, semantic_output_language="zh-TW")
+        self.assertIn(output.plan.document_type, {"form_document", "form_collection"})
+        self.assertTrue(output.records)
+
+    def test_unit_names_ending_in_dan_wei_are_not_form_names(self):
+        notice = [
+            "各申報單位應於期限內增加單位內部稽核，異動單位須另行函報。",
+            "金額與合計由各單位自行填列。",
+        ]
+
+        self.assertFalse(is_form_like_document(_document(notice)))
+
+
+def _form_enrichment(block_id: str) -> dict:
+    return {block_id: {
+        "kind": "form_asset",
+        "input": {"page_idx": 0},
+        "output": {"title": "企業發展重要記事", "document_type": "form",
+                   "structured_content": "表單語意：企業發展重要記事"},
+    }}
+
+
+class LongWordReportKeepsItsTextTest(unittest.TestCase):
+    """A form read from one table of a long Word report must not stand in for the report."""
+
+    def test_rag_text_keeps_every_paragraph_of_a_long_word_report(self):
+        from app.pipeline.stages.package import PackageStage
+
+        report = _word(LONG_WORD_REPORT, path="示範企業結案報告書.docx")
+        table_id = report.blocks[-1].block_id
+
+        rag_md, _ = PackageStage()._render_rag_md(
+            document_ir=report, asset_map={}, enrichments=_form_enrichment(table_id))
+
+        self.assertIn("第29節 品牌定位與市場策略說明", rag_md)
+        self.assertIn("輔導過程依品牌健檢檢核表逐項確認", rag_md)
+        self.assertIn("120,000", rag_md)
+
+    def test_a_short_word_form_still_reads_as_its_form(self):
+        from app.pipeline.stages.package import PackageStage
+
+        form = _word(SHORT_WORD_FORM, path="出差申請單.docx")
+
+        rag_md, _ = PackageStage()._render_rag_md(
+            document_ir=form, asset_map={}, enrichments=_form_enrichment(form.blocks[-1].block_id))
+
+        self.assertIn("表單語意：企業發展重要記事", rag_md)

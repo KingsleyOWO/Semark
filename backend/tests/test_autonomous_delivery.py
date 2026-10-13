@@ -488,9 +488,11 @@ async def test_picture_citing_its_section_title_is_not_held_back_by_the_cover_ti
     chunks = read_chunks(tmp_path)
     picture = next(c for c in chunks if 'pic' in c['block_ids'])
     assert 'section' in picture['block_ids'] and 'Logo history' in picture['content']
-    assert picture['metadata']['unverified_block_ids'] == ['pic']
+    # The picture's own finding is verified; the cover title failing on its page no longer
+    # drags it to unverified (decided 2026-10-13).
+    assert picture['metadata']['unverified_block_ids'] == []
     assert all('cover' not in c['block_ids'] for c in chunks)
-    assert '[Image content: automatic reading, not verified]\nA green sailing ship logo, 1982' in (
+    assert '[Image content: automatic reading, verified]\nA green sailing ship logo, 1982' in (
         outputs / 'delivery.md').read_text()
 
 
@@ -584,3 +586,74 @@ async def test_verified_picture_keeps_its_description(tmp_path):
     assert 'A paper sachet of herbal ointment' in (tmp_path / 'outputs/documents/fig0000.md').read_text()
     picture = next(c for c in read_chunks(tmp_path) if 'pic' in c['block_ids'])
     assert 'A paper sachet of herbal ointment' in picture['content']
+
+
+@pytest.mark.asyncio
+async def test_main_document_keeps_only_the_text_read_off_an_unverified_picture(tmp_path):
+    # Until 2026-10-13 main.md kept every description in full; only the picture's own
+    # document was reduced. Lines of other blocks, a twin line included, stay.
+    ir, source, model = _split_picture_fixture(tmp_path, 'needs_review', ['Herbal Balm', '60g'])
+    outputs = tmp_path / 'outputs'
+    (outputs / 'documents/main.md').write_text('\n'.join([
+        'Source page 1: Revenue 100, cost 80.', 'The sachet is printed in green.', 'Herbal Balm', '60g', 'ointment']))
+    ir, _ = await DocumentReview(config(), model, model).run(ir, tmp_path, source_path=source)
+    finalize_delivery(ir, tmp_path, config())
+
+    assert (outputs / 'documents/main.md').read_text().split('\n') == [
+        'Source page 1: Revenue 100, cost 80.', 'Herbal Balm', '60g']
+    index = {d['document_id']: d for d in json.loads((outputs / 'documents_index.json').read_text())}
+    assert index['main']['image_reading_spans'] == [
+        {'block_id': 'pic', 'review_status': 'unverified', 'start_line': 2, 'end_line': 3}]
+
+
+@pytest.mark.asyncio
+async def test_picture_whose_review_only_misses_its_layout_keeps_its_description(tmp_path):
+    ir, source, _ = _split_picture_fixture(tmp_path, 'verified', ['Herbal Balm'])
+
+    def review(_, value):
+        for block in value['blocks']:
+            block['context_complete'] = True
+            if block['block_id'] == 'pic':
+                block.update(status='needs_review',
+                             observation='pic delivery does not state that the logo is left of the title.')
+        value.update(source_complete=False, issues=['pic: left/right layout relationship is not preserved.'])
+        return value
+    model = AuditModel(review)
+    ir, _ = await DocumentReview(config(), model, model).run(ir, tmp_path, source_path=source)
+    finalize_delivery(ir, tmp_path, config())
+
+    assert 'A paper sachet of herbal ointment' in (tmp_path / 'outputs/documents/fig0000.md').read_text()
+    report = json.loads((tmp_path / 'outputs/processing_report.json').read_text())
+    assert next(b for b in report['blocks'] if b['block_id'] == 'pic')['image_label'] == 'verified'
+
+
+@pytest.mark.asyncio
+async def test_unverified_recovered_picture_loses_its_description_lines_but_keeps_read_lettering(tmp_path):
+    origin = {'agentic_image_origin': 'pic', 'agentic_source_pages': [0]}
+    blocks = [Block(block_id='b0', type=BlockType.TEXT, page_idx=0, reading_order=0,
+                    payload={'text': 'Source page 1: Revenue 100, cost 80.'}),
+              Block(block_id='read', type=BlockType.TEXT, page_idx=0, reading_order=1,
+                    payload={'text': '圖片文字：Herbal Balm 60g', 'agentic_content_kind': 'transcription', **origin}),
+              Block(block_id='seen', type=BlockType.TEXT, page_idx=0, reading_order=2,
+                    payload={'text': '圖片可確認內容：A green sachet beside a teacup',
+                             'agentic_content_kind': 'visual_summary', **origin})]
+    ir, source = fixture(tmp_path, blocks=blocks)
+
+    def review(_, value):
+        for block in value['blocks']:
+            block['context_complete'] = True
+            if block['block_id'] != 'b0':
+                block.update(status='needs_review', observation='The sachet is blue, not green; 60g is 80g.')
+        value.update(source_complete=False, issues=['Picture wording is wrong.'])
+        return value
+    model = AuditModel(review)
+    ir, _ = await DocumentReview(config(), model, model).run(ir, tmp_path, source_path=source)
+    finalize_delivery(ir, tmp_path, config())
+    outputs = tmp_path / 'outputs'
+
+    main = (outputs / 'documents/main.md').read_text()
+    assert '圖片文字：Herbal Balm 60g' in main and 'teacup' not in main
+    chunks = read_chunks(tmp_path)
+    assert any('read' in c['block_ids'] for c in chunks)
+    assert 'teacup' not in json.dumps(chunks, ensure_ascii=False)
+    assert 'teacup' not in (outputs / 'delivery.md').read_text()

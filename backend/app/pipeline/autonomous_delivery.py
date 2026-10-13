@@ -1,11 +1,12 @@
 """Terminal automatic delivery with explicit gaps and a source-verified RAG subset."""
+import re
 from pathlib import Path
 from urllib.parse import quote
 
 from app.models.document_ir import BlockType
 from app.pipeline.delivery import atomic_write_json, atomic_write_jsonl, atomic_write_text
 from app.pipeline.privacy import scrub_transcribed_privacy
-from app.pipeline.review_policy import dependency_closed_subset, reviewed_block_usable
+from app.pipeline.review_policy import dependency_closed_subset, picture_content_confirmed, reviewed_block_usable
 
 # Picture content is delivered whether or not the source review could confirm
 # it (policy chosen 2026-10-01: enlarged figures now read correctly, while the
@@ -21,6 +22,11 @@ IMAGE_LABELS = {
 }
 # Gaps (unreadable regions), invalid evidence and missing context still exclude.
 _UNVERIFIED_PICTURE_REASONS = {"content_or_context_unverified", "source_not_mapped"}
+# A recovered picture's own words about it (image_recovery, image_refinement); read lettering is 「圖片文字：」.
+_DESCRIPTION_LINE = re.compile(r"(?:圖片可確認內容|圖片內容)：")
+# How DeliveryExcerpts ties a delivered line to its source block without guessing.
+_EXACT_BINDINGS = {"source_marker", "source_text", "contained_source_text",
+                   "ambiguous_source_occurrence", "ambiguous_contained_source_text"}
 
 
 def is_picture_content(block):
@@ -117,7 +123,13 @@ def build_automatic_delivery(ir, run_path, config, review_summary, ledger, upstr
             observations = [b for b in page.get("review", {}).get("blocks", []) if b["block_id"] == bid]
             good = good and bool(page.get("images") and len(observations) == 1 and
                                 reviewed_block_usable(page, observations[0]))
-        good = good and coverage[bid]["documents"] and coverage[bid]["chunks"] is not False
+        delivered = bool(coverage[bid]["documents"] and coverage[bid]["chunks"] is not False)
+        if (not good and delivered and valid and source_pages and is_picture_content(block)
+                and not block.payload.get("agentic_gap")):
+            # A picture is judged on its own finding, not on its page (decided 2026-10-13).
+            names = {bid, block.payload.get("agentic_image_origin") or bid}
+            good = all(picture_content_confirmed(pages.get(index, {}), bid, names, text) for index in source_pages)
+        good = good and delivered
         if good:
             eligible.add(bid)
         else:
@@ -131,8 +143,10 @@ def build_automatic_delivery(ir, run_path, config, review_summary, ledger, upstr
     # a picture already shipping labelled unverified does not need its section heading verified (a 31-page
     # PDF held back 29 of 46 pictures that way). Units, qualifiers and other recorded dependencies still bind it,
     # a recorded heading included, but not the headings above that one (spot check 2026-10-07: 7 pictures citing
-    # their own verified section title were held back by an unverified cover title).
-    closure = {bid: recorded[bid] if bid in unverified_pictures else deps for bid, deps in dependencies.items()}
+    # their own verified section title were held back by an unverified cover title). The same holds for a
+    # verified picture: under an unverified heading it was replaced by a gap marker while an unverified
+    # picture next to it shipped.
+    closure = {bid: recorded[bid] if bid in pictures else deps for bid, deps in dependencies.items()}
     retained = dependency_closed_subset(eligible | unverified_pictures, closure)
     reasons.update({bid: "required_context_unverified" for bid in eligible - retained})
     unverified_pictures &= retained
@@ -143,7 +157,8 @@ def build_automatic_delivery(ir, run_path, config, review_summary, ledger, upstr
     asset_records = {item.get("block_id"): item for item in read_jsonl(outputs / "assets_index.jsonl")}
     from app.pipeline.semantic.language import resolve_semantic_output_language
     language = resolve_semantic_output_language(config.package.semantic_output_language.value, ir)
-    read_only = keep_only_read_text(ir, outputs, unverified_pictures, asset_records, language)
+    read_only = keep_only_read_text(ir, outputs, unverified_pictures, asset_records, language, renderer,
+                                    [b for b in ir.blocks if not rendered[b.block_id][1]])
     non_informative = {b.block_id for b in ir.blocks if b.block_id in retained
                        and b.payload.get("agentic_information_status") == "non_informative"}
     rag_eligible = dependency_closed_subset(retained - non_informative, closure)
@@ -158,7 +173,13 @@ def build_automatic_delivery(ir, run_path, config, review_summary, ledger, upstr
     # From here on an unverified picture is the text read off it, and nothing when none was read.
     for bid, text in read_only.items():
         renderer._asset_text[bid] = text
+    if trimmed := {bid: text for bid, text in read_only.items() if ir.get_block(bid).type != BlockType.IMAGE}:
+        ir = ir.model_copy(update={"blocks": [
+            b.model_copy(update={"payload": {**b.payload, "text": trimmed[b.block_id]}}) if b.block_id in trimmed else b
+            for b in ir.blocks]})
     nothing_read = {bid for bid, text in read_only.items() if not text}
+    # A dropped description is no context: the lines read off the same picture stay retrievable.
+    closure = {bid: set(deps) - nothing_read for bid, deps in closure.items()}
     rag_eligible = dependency_closed_subset(rag_eligible - nothing_read, closure)
     # Gaps delimit chunk groups: overlap may never bridge an excluded region.
     groups, current = [], []
@@ -302,14 +323,17 @@ def build_automatic_delivery(ir, run_path, config, review_summary, ledger, upstr
     return summary
 
 
-def keep_only_read_text(ir, outputs, pictures, asset_records, language):
+def keep_only_read_text(ir, outputs, pictures, asset_records, language, renderer, delivered_blocks):
     """An unverified picture keeps only the text read off it (the user's choice, 2026-10-08).
 
     The model's description, facts and keywords of a picture review could not confirm
     are dropped from its document: in a sample of ten such pictures one was described
     as something else entirely. What stays is the source caption, if the parser found
     one, and the lines read off the picture. A picture with neither leaves no document;
-    its image file stays in assets/. Returns block_id -> the remaining text.
+    its image file stays in assets/. A recovered picture loses its 「圖片可確認內容」
+    lines. The same text is replaced in main.md, which carried every description in
+    full until 2026-10-13 (about 1000 lines in a 44-report batch). Returns block_id ->
+    the remaining text.
     """
     from app.models.document_ir import image_content_caption
     from app.pipeline.final_delivery import read_json
@@ -320,6 +344,12 @@ def keep_only_read_text(ir, outputs, pictures, asset_records, language):
     remaining, dropped = {}, set()
     for bid in sorted(pictures):
         block, record = ir.get_block(bid), asset_records.get(bid)
+        if block.type != BlockType.IMAGE:
+            delivered = renderer._block_to_text(block)
+            kept = "\n".join(line for line in delivered.split("\n") if not _DESCRIPTION_LINE.match(line))
+            if kept != delivered:
+                remaining[bid] = kept
+            continue
         path = outputs / "documents" / f"{(record or {}).get('asset_id')}.md"
         if block.type != BlockType.IMAGE or not record or record.get("type") != "figure_asset" or not path.is_file():
             continue
@@ -343,7 +373,36 @@ def keep_only_read_text(ir, outputs, pictures, asset_records, language):
         atomic_write_json(outputs / "documents_index.json",
                           [entry for entry in index if entry.get("document_id") not in dropped],
                           ensure_ascii=False, indent=2)
+    if remaining and (outputs / "documents" / "main.md").is_file():
+        strip_picture_wording(outputs.parent, remaining, delivered_blocks, renderer)
     return remaining
+
+
+def strip_picture_wording(run_path, remaining, delivered_blocks, renderer):
+    """Drop from main.md the lines of reduced pictures that are not in their remaining text.
+
+    main.md words a picture differently from its own document (no summary line, a
+    caption heading), so its lines are found the way the review found them: a line goes
+    only when it is bound to reduced pictures alone, by an exact marker or exact text,
+    and none of them keeps it. Lines bound fuzzily or to any other block stay. Returns
+    how many lines were dropped.
+    """
+    from app.pipeline.content_coverage import normalized_text, plain_text
+    from app.pipeline.review_sources import DeliveryExcerpts
+
+    path = run_path / "outputs" / "documents" / "main.md"
+    keep = {bid: {normalized_text(plain_text(line)) for line in text.split("\n")} for bid, text in remaining.items()}
+    excerpts = DeliveryExcerpts(run_path, delivered_blocks)
+    excerpts._bind(delivered_blocks, renderer)
+    name = str(path.relative_to(run_path))
+    drop = {p["line"] for p in excerpts.paragraphs
+            if p["file"] == name and p["binding"] in _EXACT_BINDINGS and p["block_ids"]
+            and set(p["block_ids"]) <= keep.keys()
+            and not any(p["normalized"] in keep[bid] for bid in p["block_ids"])}
+    if drop:
+        lines = path.read_text(encoding="utf-8").split("\n")
+        atomic_write_text(path, "\n".join(line for number, line in enumerate(lines, 1) if number not in drop))
+    return len(drop)
 
 
 def index_image_readings(ir, run_path, renderer, pictures, eligible, delivered_blocks):

@@ -21,6 +21,7 @@ from docx.table import Table, _Cell
 from docx.text.paragraph import Paragraph
 
 from app.adapters.metafile import metafile_bitmap
+from app.adapters.word_revisions import accept_tracked_changes
 
 
 @dataclass
@@ -64,6 +65,7 @@ def _parse_word_document(input_path: Path, output_dir: Path) -> WordParseResult:
         )
 
     content_controls = _unwrap_content_controls(document)
+    tracked_changes = accept_tracked_changes(document.element.body)
     # Cell text is read several times per table (rows, picture labels, HTML),
     # so list numbers are counted once, in document order, before any of it.
     _NUMBER_LABELS.set(_number_labels(document))
@@ -195,6 +197,7 @@ def _parse_word_document(input_path: Path, output_dir: Path) -> WordParseResult:
         stats={
             "parser": "native_docx",
             "content_controls_unwrapped": content_controls,
+            "tracked_changes_accepted": tracked_changes,
             "paragraph_count": paragraph_count,
             "table_count": table_count,
             "image_count": image_count,

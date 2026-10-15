@@ -80,6 +80,46 @@ def test_a_quote_must_name_one_exact_delivered_span():
     assert text == DELIVERED and not applied and len(rejected) == 2
 
 
+def test_a_misreading_the_draft_repeats_is_fixed_everywhere():
+    # 晴嵐 on v20.23: 12 of 13 refused corrections quoted a span the draft wrote 2-7 times.
+    delivered = "包裝標示「花生世家」字樣。\n花生世家\n品牌名稱為花生世家，搭配花生插圖。"
+    edit = ImageEdit(op="replace", quote="花生世家", replacement="花生田家", reason="Image shows 花生田家.")
+    text, _, applied, rejected = apply_edits(delivered, [edit], transcription={"花生世家"}, ocr_lines=["花生田家"],
+                                             reading=_reading("花生田家"))
+
+    assert "花生世家" not in text and text.count("花生田家") == 3 and len(applied) == 1 and not rejected
+
+
+def test_a_repeated_span_the_picture_shows_somewhere_is_not_changed_everywhere():
+    # 「茶」 misread for 「大」 once, while the picture also prints 「茶飲」: the other 茶 are right.
+    delivered = "招牌寫「茶」字。\n茶飲\n店內提供茶飲與甜點。"
+    edit = ImageEdit(op="replace", quote="茶", replacement="大", reason="Image shows 大.")
+    text, _, applied, rejected = apply_edits(delivered, [edit], transcription={"茶飲"}, ocr_lines=["大", "茶飲"],
+                                             reading=_reading("大\n茶飲"))
+
+    assert text == delivered and not applied and "shows it" in rejected[0]["refused"]
+
+
+def test_one_occurrence_the_rules_refuse_stops_the_whole_edit():
+    # The transcription line would become wording OCR does not read, so no occurrence changes.
+    delivered = "標語「Peanut House」。\nPeanut House 花生"
+    edit = ImageEdit(op="replace", quote="Peanut House", replacement="PeanuTend", reason="Image shows PeanuTend.")
+    text, _, applied, rejected = apply_edits(delivered, [edit], transcription={"Peanut House 花生"},
+                                             ocr_lines=["PeanuTend"], reading=_reading("PeanuTend"))
+
+    assert text == delivered and not applied and "transcription line" in rejected[0]["refused"]
+
+
+def test_a_repeated_span_changes_everywhere_only_into_wording_ocr_reads():
+    # Replayed on 814 stored proposals: the blind reading alone renamed a company everywhere.
+    delivered = "看板印有「qingya 晴諾米」字樣。\n品牌名稱 qingya 晴諾米。"
+    edit = ImageEdit(op="replace", quote="qingya 晴諾米", replacement="qingva 晴諾來", reason="Image shows qingva.")
+    text, _, applied, rejected = apply_edits(delivered, [edit], transcription=set(), ocr_lines=["看板"],
+                                             reading=_reading("qingva 晴諾來"))
+
+    assert text == delivered and not applied and "PaddleOCR does not read" in rejected[0]["refused"]
+
+
 def test_only_a_certain_relation_of_the_blind_reading_is_added():
     relation = {"relation_id": "r0", "kind": "value_pair", "source_fact": "頁碼為 07", "certain": True}
     _, statements, applied, rejected = _apply({"op": "add_relation", "relation_id": "r0"},

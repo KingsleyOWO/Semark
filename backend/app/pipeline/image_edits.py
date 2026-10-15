@@ -25,8 +25,9 @@ from app.pipeline.zh_text import to_taiwan_traditional
 
 EDIT_POLICY = """Fix delivered_text only where the original image shows it is wrong or incomplete.
 known_issues come from earlier audits of this same delivery: check each against the pixels and fix every one
-that is real, together with any other statement the image does not show. Each edit quotes delivered_text exactly,
-with a span that occurs once in it. op=delete removes description wording the image does not support (invented
+that is real, together with any other statement the image does not show. Each edit quotes delivered_text exactly.
+A quoted span that occurs several times is edited everywhere it occurs, which the system allows only when the
+image shows that span nowhere; otherwise quote a longer span that occurs once. op=delete removes description wording the image does not support (invented
 objects, added translations or glosses, duplicated sentences). op=replace changes the quoted span; any new wording
 must be copied verbatim from ocr_lines or independent_reading, or the edit is discarded. A line listed in
 transcription_lines may only be replaced by that line exactly as ocr_lines reads it, and is never deleted.
@@ -106,6 +107,23 @@ def apply_edits(delivered, edits, *, transcription, ocr_lines, reading):
     def refuse(edit, why):
         rejected.append({**edit.model_dump(), "refused": why})
 
+    def edited(text, start, edit):
+        """The text with the occurrence at start edited, or unchanged with why the rules refuse it."""
+        replacement = edit.replacement if edit.op == "replace" else ""
+        changed = text[:start] + replacement + text[start + len(edit.quote):]
+        if any(_folded(line) in protected for line in _lines(text, start, start + len(edit.quote))):
+            if edit.op == "delete":
+                return text, "a transcription line is never deleted"
+            if not ocr or not all(appears_in(line, ocr) for line in _lines(changed, start, start + len(replacement))
+                                  if normalized_text(line)):
+                return text, "a transcription line changes only into the line PaddleOCR reads"
+        elif normalized_text(wording := _new_wording(edit.quote, replacement)) and not appears_in(wording, evidence):
+            return text, "new wording is in neither PaddleOCR nor the independent reading"
+        elif ocr and _breaks_ocr_wording(text, changed, start, edit.quote, replacement, ocr):
+            # The second reading can be the one that is wrong; OCR's wording is never edited away.
+            return text, "would change description wording PaddleOCR reads"
+        return changed, None
+
     for edit in edits:
         if edit.op == "add_relation":
             relation = relations.get(edit.relation_id)
@@ -119,28 +137,30 @@ def apply_edits(delivered, edits, *, transcription, ocr_lines, reading):
             statements.append(statement)
             applied.append(edit.model_dump())
             continue
-        if text.count(edit.quote) != 1:
-            refuse(edit, "quote is not exactly one delivered span")
+        starts = [match.start() for match in re.finditer(re.escape(edit.quote), text)]
+        if not starts:
+            refuse(edit, "quote is not in the delivered text")
             continue
-        start = text.index(edit.quote)
-        replacement = edit.replacement if edit.op == "replace" else ""
-        changed = text[:start] + replacement + text[start + len(edit.quote):]
-        if any(_folded(line) in protected for line in _lines(text, start, start + len(edit.quote))):
-            if edit.op == "delete":
-                refuse(edit, "a transcription line is never deleted")
-                continue
-            if not ocr or not all(appears_in(line, ocr) for line in _lines(changed, start, start + len(replacement))
-                                  if normalized_text(line)):
-                refuse(edit, "a transcription line changes only into the line PaddleOCR reads")
-                continue
-        elif normalized_text(wording := _new_wording(edit.quote, replacement)) and not appears_in(wording, evidence):
-            refuse(edit, "new wording is in neither PaddleOCR nor the independent reading")
+        # A misreading the draft repeats (its line, then its description) is fixed everywhere, but
+        # only when the picture shows the quoted wording nowhere: then no occurrence can be right.
+        # 晴嵐 on v20.23: 12 of 13 refused corrections quoted a span written 2-7 times.
+        if len(starts) > 1 and appears_in(edit.quote, evidence):
+            refuse(edit, "quote occurs more than once and the picture shows it, so not every occurrence is wrong")
             continue
-        elif ocr and _breaks_ocr_wording(text, changed, start, edit.quote, replacement, ocr):
-            # The second reading can be the one that is wrong; OCR's wording is never edited away.
-            refuse(edit, "would change description wording PaddleOCR reads")
+        # Changing every occurrence needs PaddleOCR to read the new wording: replayed on 814 stored
+        # proposals, the blind reading alone renamed a company everywhere (qingya 晴雅 → qingva 晴微).
+        if len(starts) > 1 and edit.op == "replace" and not (ocr and appears_in(edit.replacement, ocr)):
+            refuse(edit, "quote occurs more than once and PaddleOCR does not read the replacement")
             continue
-        text = changed
+        result, why = text, None
+        for start in reversed(starts):
+            result, why = edited(result, start, edit)
+            if why:
+                break
+        if why:
+            refuse(edit, why)
+            continue
+        text = result
         applied.append(edit.model_dump())
     text = "\n".join(line for line in text.split("\n") if line.strip())
     return text, statements, applied, rejected

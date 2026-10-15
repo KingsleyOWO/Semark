@@ -81,13 +81,12 @@ def test_a_quote_must_name_one_exact_delivered_span():
 
 
 def test_only_a_certain_relation_of_the_blind_reading_is_added():
-    relation = {"relation_id": "r0", "kind": "other", "source_fact": "頁尾位於右下角", "bbox": [0, 900, 1000, 1000],
-                "certain": True}
+    relation = {"relation_id": "r0", "kind": "value_pair", "source_fact": "頁碼為 07", "certain": True}
     _, statements, applied, rejected = _apply({"op": "add_relation", "relation_id": "r0"},
                                               {"op": "add_relation", "relation_id": "r7"},
                                               reading=_reading(relationships=[relation]))
 
-    assert statements == ["圖片關係：頁尾位於右下角"] and len(applied) == 1 and len(rejected) == 1
+    assert statements == ["圖片關係：頁碼為 07"] and len(applied) == 1 and len(rejected) == 1
 
 
 def test_methods_run_cheapest_first_and_each_once():

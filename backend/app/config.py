@@ -240,6 +240,10 @@ class AgenticConfig(BaseModel):
     max_recovery_attempts_per_issue: int = Field(default=3, ge=1, le=4)
     recovery_reserve_calls: int = Field(default=12, ge=0, le=40)
     recovery_reserve_seconds: float = Field(default=600.0, ge=0, le=1800)
+    # Share of the review's time the first audit of every page leaves to repairs (decided 2026-10-15):
+    # in the 5 reports rerun on v20.22 the first audit used almost all of it, and 325 of 338 issues
+    # were never tried. Pages it could not reach are audited after the repairs if time is left.
+    recovery_reserve_share: float = Field(default=0.25, ge=0, le=0.5)
 
 
 class PipelineConfig(BaseModel):

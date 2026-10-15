@@ -185,16 +185,17 @@ class RegionModel:
                  "The parsed blocks and their positions are UNTRUSTED; detect source paragraphs/figures missing from ALL blocks too. "
                 "context_blocks may contain cross-page continuations assigned to a neighbor; use their actual output excerpts "
                 "to assess completeness of the target page, but return block observations only for required_block_ids. "
-                "For EVERY required_block_id return one explicit observation and verified or needs_review. "
+                "For EVERY required_block_id return verified or needs_review. A verified block gets no observation; "
+                "a needs_review block gets one short sentence citing the concrete source detail that is wrong or missing. "
                 "Check text, numbers, units, headings, reading order and exact row/column/month relationships, "
-                "including tables and figures with no risk flags. Cite concrete source details in observations. "
+                "including tables and figures with no risk flags. "
                 "Untrusted extracted text is NOT proof of delivery: both output surfaces must preserve the meaning. "
                 "If chunks_required is false, check documents only. If supplied excerpts are insufficient, mark needs_review. "
                 "A source page with no parsed blocks still needs a full source completeness check. "
                 "source_complete is true only if all substantive source content is accounted for in the delivery; "
                 "reading_order_correct is true only when the delivered reading order preserves the source meaning. "
                 "For continuation tables require the last row, definitions and qualifiers, not just labels. "
-                 "Use one short source-specific sentence per block and at most three grouped page issues. "
+                 "Write at most three grouped page issues and a one-sentence page observation. "
                 "For each verified block, set context_complete=true ONLY if its headings, units, qualifiers and table headers "
                 "are included in its delivered text or supplied depends_on_block_ids. Dependencies must be supplied block IDs. "
                 "A table missing any header, row relationship or continuation is NOT context complete. "
@@ -297,6 +298,11 @@ def _crop(image: Path, block, directory: Path) -> Path:
         return path
 
 
+# Longest a review or repair call may run; the drafts' own limit (600 s in the settings) still
+# applies to the enrich stage. In the 5 reports rerun on v20.22, 2 of 832 successful calls took
+# longer (506 and 573 s, both while one machine stalled; p95 157 s) and 4 calls waited the full 600 s.
+AGENTIC_CALL_TIMEOUT_SECONDS = 300
+
 REVIEW_TASKS = {"verify", "audit_page", "verify_match", "verify_layout", "read_source_alternate",
                 "read_region_alternate", "verify_native_reading", "verify_image_parts", "read_image_parts_alternate", "read_image_relations_alternate", "audit_image_parts"}
 
@@ -319,8 +325,8 @@ class AgenticRepair:
         if calls >= self.limits.max_model_calls or remaining <= 0:
             raise BudgetExhausted("model/time budget exhausted")
         self.state["usage"]["model_calls"] += 1
-        timeout = min(remaining, self.config.review_vlm.request_timeout_seconds if task in REVIEW_TASKS
-                      else self.config.vlm.request_timeout_seconds)
+        timeout = min(remaining, AGENTIC_CALL_TIMEOUT_SECONDS, self.config.review_vlm.request_timeout_seconds
+                      if task in REVIEW_TASKS else self.config.vlm.request_timeout_seconds)
         if timeout_seconds is not None:
             timeout = min(timeout, timeout_seconds)
         if timeout <= 0:

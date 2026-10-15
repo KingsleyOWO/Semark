@@ -24,7 +24,8 @@ class ImageSourceRelation(Contract):
     relation_id: str = Field(pattern=r'^[A-Za-z0-9_-]{1,24}$')
     kind: Literal['axis_mapping', 'spatial_position', 'arrow', 'value_pair', 'table_relation', 'other']
     source_fact: str = Field(min_length=1, max_length=320)
-    bbox: list[int] = Field(min_length=4, max_length=4)
+    # No longer asked for (2026-10-15): nothing downstream reads a blind relation's box.
+    bbox: list[int] = Field(default_factory=list, max_length=4)
     direction: Direction = 'none'
     horizontal: Horizontal = 'unspecified'
     vertical: Vertical = 'unspecified'
@@ -32,8 +33,8 @@ class ImageSourceRelation(Contract):
 
     @model_validator(mode='after')
     def valid_relation(self):
-        x0, y0, x1, y1 = self.bbox
-        if not (0 <= x0 < x1 <= 1000 and 0 <= y0 < y1 <= 1000):
+        if self.bbox and (len(self.bbox) != 4 or not (0 <= self.bbox[0] < self.bbox[2] <= 1000
+                                                      and 0 <= self.bbox[1] < self.bbox[3] <= 1000)):
             raise ValueError('Source relationship bbox must be a nonempty original-image 0..1000 rectangle')
         if self.kind == 'arrow' and self.direction == 'none':
             raise ValueError('Arrows require a direction, or explicit uncertain direction')
@@ -80,6 +81,18 @@ class WordPictureItem(NativeItem):
             raise ValueError('A chart/table/diagram cannot claim complete relationships with an empty label-only reading')
         return self
 
+    @model_validator(mode='after')
+    def layout_prose_dropped(self):
+        """Relations that only describe layout are not checked (decided 2026-10-15).
+
+        In the 5 reports rerun on v20.22, 504 of 1328 blind relations were layout prose (who
+        stands beside whom on a photo, which panel is left on a slide). An audit finding one
+        missing counts for nothing since 2026-10-13, and 4 of the 22 contradictions found came
+        from them; writing and auditing them took about a fifth of the review's output.
+        """
+        self.relationships = [r for r in self.relationships if r.kind != 'other']
+        return self
+
 
 class WordPictureReading(Contract):
     items: list[WordPictureItem] = Field(min_length=1, max_length=4)
@@ -89,7 +102,8 @@ class ImageRelationshipCheck(Contract):
     relation_id: str = Field(pattern=r'^[A-Za-z0-9_-]{1,24}$')
     status: Literal['matched', 'contradicted', 'missing', 'uncertain']
     delivered_quote: str = Field(default='', max_length=500)
-    observation: str = Field(min_length=1, max_length=240)
+    # Written only for contradicted/uncertain; a matched check is its quote (2026-10-15).
+    observation: str = Field(default='', max_length=240)
     direction: Direction = 'none'
     horizontal: Horizontal = 'unspecified'
     vertical: Vertical = 'unspecified'
@@ -97,21 +111,23 @@ class ImageRelationshipCheck(Contract):
 
 SOURCE_RELATION_INSTRUCTIONS = """In addition to exact lettering, read the image's substantive RELATIONSHIPS independently.
 No proposed caption, expected answer or neighboring prose is supplied. Classify image_type from pixels.
-For charts/diagrams/tables, labels alone are incomplete evidence. In relationships record axis endpoints
-and meaning; each entity's actual side relative to the named axes; arrows from tail to head including
-movement between repeated/faded marks; value-to-year/series/unit links; table row/header links.
-Use short source_fact and a bounding box in original-image 0..1000 coordinates per relation, local IDs r0,r1,...
-For spatial_position use horizontal/vertical only relative to the named visible axes/reference, not the
-whole-image midpoint. Marks crossing an axis must be spans_axis, not forced into a quadrant. An ambiguous
-side is uncertain. For arrows direction is tail-to-head in image coordinates (up is toward image top).
-Names alone and an arrow's presence do not capture its meaning. Never infer sequence from mere alignment.
-Omit direction/side fields where irrelevant. certain=false retains an ambiguous relationship explicitly.
-Keep each source_fact <=320 characters; maximum 16 relationships. If more substantive relationships exist,
-set relationships_complete=false and explain the omitted scope; never silently truncate or claim completeness.
-Photos/logos/documents without substantive relationships may have an empty list with relationships_complete=true.
-Lettering completeness and relationship completeness are separate. Put literal wording in text, never only
-in observation. Write each source_fact in relationship_language (zh-TW: Traditional Chinese), quoting printed
-labels exactly as printed. This reading is candidate evidence for an independent pixel/delivery audit, not certification."""
+List ONLY relationships whose wrong delivery would change the meaning: axis endpoints and meaning; each
+entity's actual side relative to the named axes; arrows from tail to head including movement between
+repeated/faded marks; value-to-label/year/series/unit links; table row/header links. Do NOT list layout:
+where things sit in the picture, what is beside what on a photo or slide, panel order, decoration.
+For charts/diagrams/tables, labels alone are incomplete evidence. Use a short source_fact (<=120 characters)
+per relation, local IDs r0,r1,... Give no bbox. For spatial_position use horizontal/vertical only relative to
+the named visible axes/reference, not the whole-image midpoint. Marks crossing an axis must be spans_axis,
+not forced into a quadrant. An ambiguous side is uncertain. For arrows direction is tail-to-head in image
+coordinates (up is toward image top). Names alone and an arrow's presence do not capture its meaning. Never
+infer sequence from mere alignment. Omit direction/side fields except on arrows and spatial_position.
+certain=false retains an ambiguous relationship explicitly. Maximum 16 relationships. If more substantive
+relationships exist, set relationships_complete=false and explain the omitted scope; never silently truncate
+or claim completeness. Photos/logos/documents without such relationships have an empty list with
+relationships_complete=true. Lettering completeness and relationship completeness are separate. Put literal
+wording in text, never only in observation; observation is one short sentence. Write each source_fact in
+relationship_language (zh-TW: Traditional Chinese), quoting printed labels exactly as printed. This reading is
+candidate evidence for an independent pixel/delivery audit, not certification."""
 
 RELATION_AUDIT_INSTRUCTIONS = """independent_image_readings are BLIND source observations, not ground truth.
 Check them again against the original pixels and the actual delivered documents/chunks, never by agreement.
@@ -120,14 +136,17 @@ For every listed relation return exactly one image_relationship_checks entry acr
 required blocks, on the block that delivers it. Do not repeat the relation on every child or borrow another
 image's relation IDs. Check BOTH source correctness and delivery preservation.
 status=matched requires a verbatim delivered_quote from that block's supplied delivery, including the actual
-relationship (a list of labels is insufficient). Report direction/horizontal/vertical as expressed by the
-DELIVERY, not copied from the source reading. If the source relation is uncertain or unsupported, use uncertain.
-A relation the delivery does not state at all is missing, not uncertain, however minor.
-If delivery asserts the opposite side/direction use contradicted; omitted arrow/axis/value linkage is missing.
-Bounded or crossing-axis positions must not be forced into quadrants. A static map/matrix is not a temporal
-flow: check start/end and causal language against actual arrows. Preserve explicit uncertainty. Source text
-can match exactly while the relationships are wrong. Keep observations <=240 characters, quote <=500.
-A failed/missing/uncertain relationship means needs_review for that image block, even if all labels match."""
+relationship (a list of labels is insufficient): quote the shortest span that states it, <=160 characters,
+and write no observation. Report direction/horizontal/vertical, only on arrows and spatial positions, as
+expressed by the DELIVERY, not copied from the source reading. If the source relation is uncertain or
+unsupported, use uncertain. A relation the delivery does not state at all is missing, not uncertain, however
+minor; a missing check is relation_id and status only. If delivery asserts the opposite side/direction or a
+different value/row use contradicted; omitted arrow/axis/value linkage is missing. Bounded or crossing-axis
+positions must not be forced into quadrants. A static map/matrix is not a temporal flow: check start/end and
+causal language against actual arrows. Preserve explicit uncertainty. Source text can match exactly while the
+relationships are wrong. A contradicted or uncertain check gets one observation <=120 characters naming the
+difference. A contradicted relationship means needs_review for that image block, even if all labels match;
+a missing or uncertain one is recorded from its check and does not by itself change the block's status."""
 
 
 async def read_word_picture_batch(owner, payload, images, *, source_ids):

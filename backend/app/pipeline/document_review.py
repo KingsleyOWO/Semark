@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.adapters.vlm import VLMAdapter
 from app.config import settings
@@ -36,18 +36,29 @@ OCR_VOTE_POLICY = (
     "the author's typos and variant spellings: never 'correct' it, and do not fail a block for a spelling OCR "
     "confirms. verdict=delivery settles that line as delivered, even where your own reading of it differs. "
     "OCR is evidence, not certification: still check every other part of the picture against the pixels.")
-REVIEW_VERSION = "document-review-20261008.1-dense-pages-in-parts"
+REVIEW_VERSION = "document-review-20261015.1-terse-findings-no-layout-relations"
 SCHEDULER_VERSION = "tool-scheduler-20260930.1-complete-tool-budget"
+
+
+UNEXPLAINED_FINDING = "The reviewer marked this block needs_review and gave no observation."
 
 
 class BlockReview(BaseModel):
     model_config = ConfigDict(extra="forbid")
     block_id: str
     status: Literal["verified", "needs_review"]
-    observation: str = Field(min_length=1, max_length=700)
+    # A verified block is not explained (2026-10-15): those sentences were 13% of every audit's output.
+    observation: str = Field(default="", max_length=700)
     context_complete: bool = False
     depends_on_block_ids: list[str] = Field(default_factory=list, max_length=20)
     image_relationship_checks: list[ImageRelationshipCheck] = Field(default_factory=list, max_length=16)
+
+    @model_validator(mode="after")
+    def failure_is_explained(self):
+        # An empty remark would read as "nothing found wrong" wherever remarks are weighed.
+        if self.status == "needs_review" and not self.observation.strip():
+            self.observation = UNEXPLAINED_FINDING
+        return self
 
 
 class PageReview(BaseModel):
@@ -1082,9 +1093,9 @@ class DocumentReview(AgenticRepair):
         for page in inventory.pages:
             self.state["pages"].setdefault(str(page), {"page_idx": page, "status": "not_reviewed", "reason": "queued"})
         self._save()
-        self._reserve = None
         recovery_runner = (RecoveryController(self, inventory, run_path, rebuild, parse_cache_path)
                            if self.limits.recovery_enabled and rebuild and self.limits.mode != "off" else None)
+        self._reserve = (0, self.limits.max_seconds * self.limits.recovery_reserve_share) if recovery_runner else None
         self._protected_budget = (0, 0)
         self._phase = "audit"
         for completed, page in enumerate(order):

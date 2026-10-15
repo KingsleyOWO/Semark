@@ -32,10 +32,11 @@ def _finding(*checks):
         horizontal="unspecified", vertical="unspecified") for relation_id, quote in checks])
 
 
-def test_a_sideless_position_with_no_axes_is_a_description_that_can_certify():
+def test_a_sideless_position_with_no_axes_is_layout_and_is_not_checked():
+    # Validation v20.1 turned these into checked descriptions; since 2026-10-15 layout is not listed at all.
     reading = _reading([_relation("r0")])
 
-    assert (reading.relationships[0].kind, reading.relationships[0].certain) == ("other", True)
+    assert reading.relationships == []
     assert relationship_issue(reading, _finding(("r0", "與會者圍坐長桌進行工作坊")), "照片中與會者圍坐長桌進行工作坊。") == ""
 
 
@@ -52,7 +53,7 @@ def test_a_sideless_position_on_a_picture_with_axes_stays_uncertain():
 def test_relation_ids_the_audit_invents_certify_nothing_and_fail_nothing():
     delivered = "品牌標語：一步一步，拼出想要的生活"
     assert relationship_issue(_reading([]), _finding(("b0_text", "一步一步，拼出想要的生活")), delivered) == ""
-    reading = _reading([_relation("r0", "other", "品牌標語為一步一步")])
+    reading = _reading([_relation("r0", "value_pair", "品牌標語為一步一步")])
     assert relationship_issue(reading, _finding(("r0", "一步一步"), ("r9", "遇見")), delivered) == ""
     assert "omitted" in relationship_issue(reading, _finding(("r9", "遇見")), delivered)
 
@@ -129,16 +130,16 @@ def test_a_title_of_its_own_still_leads_the_picture_text():
         "圖 3 色彩規範", caption]
 
 
-def test_a_slide_layout_side_is_a_description_checked_by_its_quote():
+def test_a_slide_layout_side_is_layout_and_never_fails_the_picture():
     # Validation v20.6: colour slides failed 「position differs」 although the audit quoted
     # 「左側為黃色背景，右側為灰色背景」 and matched it; it only left the side fields blank.
-    # Sides are compared field by field against a chart's axes, not on a slide.
+    # Sides are compared field by field against a chart's axes; on a slide they are layout,
+    # not listed since 2026-10-15.
     reading = _reading([_relation("r0", fact="黃色面板位於左半部，灰色面板位於右半部", horizontal="left")],
                        image_type="document")
 
-    assert reading.relationships[0].kind == "other"
-    assert relationship_issue(reading, _finding(("r0", "左側為黃色背景，右側為灰色背景")),
-                              "色彩規範：左側為黃色背景，右側為灰色背景。") == ""
+    assert reading.relationships == []
+    assert relationship_issue(reading, _finding(), "色彩規範：左側為黃色背景，右側為灰色背景。") == ""
 
 
 def test_a_sided_position_on_a_chart_without_listed_axes_is_still_compared():

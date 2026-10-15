@@ -17,13 +17,15 @@ def elapsed_before_review(stage_stats, current_stage_seconds=0.0):
 def document_budget(limits, pages, *, elapsed_seconds=0.0):
     """User limits are hard ceilings, including for existing run configurations.
 
-    New runs have one limit, time per document (six hours, earlier stages included);
-    a stored run created with page-scaled budgets keeps them.
+    New runs have one limit, the review's time (six hours, repairs included). Earlier stages
+    are recorded but no longer counted (decided 2026-10-15): in the 5 reports rerun on v20.22
+    the drafts took 1.9-4.3 h of the six, and repairs got 0-1.5 h. A stored run created with
+    page-scaled budgets keeps them.
     """
     calls, seconds = limits.max_model_calls, limits.max_seconds
     if not limits.adaptive_budget:
-        return {"policy": "document_time_limit", "source_pages": pages, "max_model_calls": calls,
-                "max_seconds": max(0.0, seconds - elapsed_seconds), "elapsed_before_review_seconds": elapsed_seconds,
+        return {"policy": "review_time_limit", "source_pages": pages, "max_model_calls": calls,
+                "max_seconds": seconds, "elapsed_before_review_seconds": elapsed_seconds,
                 "hard_max_model_calls": calls, "hard_max_seconds": seconds}
     # Page-scaled budget of a run stored before 2026-10-06. Allow both page audit passes
     # plus actual complete-tool work; time scales with at most six full repairs.

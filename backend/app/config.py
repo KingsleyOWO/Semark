@@ -225,12 +225,12 @@ DOCUMENT_TIME_LIMIT_SECONDS = 6 * 3600
 
 
 class AgenticConfig(BaseModel):
-    """Source review is on for new runs; each problem tries its planned methods within six hours per document."""
+    """Source review is on for new runs; each problem tries its planned methods within six hours of review per document."""
     mode: Literal["off", "shadow", "apply"] = "apply"
     max_actions: int = Field(default=NO_COUNT_LIMIT, ge=0)
     max_attempts_per_block: int = Field(default=2, ge=1, le=3)
     max_model_calls: int = Field(default=NO_COUNT_LIMIT, ge=0)
-    # The whole document, parse and drafts included; the review gets what earlier stages left.
+    # The review and its repairs; parse and drafts are not counted (since 2026-10-15).
     max_seconds: float = Field(default=DOCUMENT_TIME_LIMIT_SECONDS, gt=0, le=DOCUMENT_TIME_LIMIT_SECONDS)
     # Page-scaled call/time budgets of runs created before 2026-10-06; new runs use the time limit only.
     adaptive_budget: bool = False

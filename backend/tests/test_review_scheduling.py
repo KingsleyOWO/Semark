@@ -14,15 +14,15 @@ from app.pipeline.document_review import DocumentReview, PageReview
 from app.pipeline.review_budget import document_budget, elapsed_before_review, tool_cost
 
 
-def test_a_document_is_bounded_only_by_six_hours_including_its_earlier_stages():
+def test_a_review_is_bounded_only_by_six_hours_whatever_its_earlier_stages_took():
     # Decided 2026-10-06: no limit on model calls or repair actions. Each problem's planned
-    # methods (at most three, each once) decide the work; six hours per document, drafts
-    # included, caps it.
+    # methods (at most three, each once) decide the work; six hours caps it. Since 2026-10-15
+    # the drafts are not counted in them: they took up to 4.3 of the six, leaving repairs none.
     limits = AgenticConfig()
     budget = document_budget(limits, 47, elapsed_seconds=3600)
-    assert budget['policy'] == 'document_time_limit'
-    assert budget['max_seconds'] == 5 * 3600
-    assert document_budget(limits, 3, elapsed_seconds=7 * 3600)['max_seconds'] == 0
+    assert budget['policy'] == 'review_time_limit'
+    assert budget['max_seconds'] == 6 * 3600 and budget['elapsed_before_review_seconds'] == 3600
+    assert document_budget(limits, 3, elapsed_seconds=7 * 3600)['max_seconds'] == 6 * 3600
     assert limits.max_model_calls >= 10 ** 6 and limits.max_recovery_actions >= 10 ** 6 and limits.max_actions >= 10 ** 6
     assert limits.max_recovery_attempts_per_issue == 3
     assert limits.max_seconds == 6 * 3600  # planning must not mutate shared profiles
@@ -36,7 +36,7 @@ def test_a_stored_run_configuration_keeps_the_budget_it_was_created_with():
     assert explicit['max_seconds'] == 600 and explicit['max_model_calls'] == 18
 
 
-def test_time_spent_before_the_review_counts_against_the_document():
+def test_time_spent_before_the_review_is_recorded():
     stats = {'parse': {'duration_seconds': 120.0}, 'enrich': {'duration_seconds': 3000.0},
              'normalize': {}, 'package': {'duration_seconds': 30.5}}
     assert elapsed_before_review(stats, current_stage_seconds=4.5) == 3155.0

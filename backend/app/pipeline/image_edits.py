@@ -83,6 +83,14 @@ def _new_wording(old, new):
     return new[start:end]
 
 
+def _misreading(quote, replacement):
+    """At most half the quote's characters change and the rest keep their order (腸 → 暢 in 好腸安)."""
+    old, new = _folded(quote), _folded(replacement)
+    changed = sum(max(i2 - i1, j2 - j1) for tag, i1, i2, j1, j2
+                  in SequenceMatcher(None, old, new, autojunk=False).get_opcodes() if tag != "equal")
+    return bool(old) and changed * 2 <= len(old)
+
+
 OCR_CONTEXT = 3  # characters each side of an edit: enough to hold a short CJK name such as 「晴空光年」
 
 
@@ -137,9 +145,23 @@ def apply_edits(delivered, edits, *, transcription, ocr_lines, reading):
             statements.append(statement)
             applied.append(edit.model_dump())
             continue
+        if edit.op == "replace" and to_taiwan_traditional(edit.quote) == edit.quote:
+            # PaddleOCR answers in simplified glyphs (健锋, 片装) for traditional print; the delivery
+            # keeps its zh-TW script. The rules below compare both scripts alike.
+            edit = edit.model_copy(update={"replacement": to_taiwan_traditional(edit.replacement)})
+        if edit.op == "replace" and edit.replacement == edit.quote:
+            # Replayed, 75 proposed edits repeated their quote and 20 only turned zh-TW glyphs simplified.
+            refuse(edit, "the edit changes nothing but the script")
+            continue
         starts = [match.start() for match in re.finditer(re.escape(edit.quote), text)]
         if not starts:
             refuse(edit, "quote is not in the delivered text")
+            continue
+        # Only a misreading is repeated: most of the quote stays in place. Replayed, the rewrites that
+        # passed the checks below were wrong: a title OCR read as "T", a right-to-left couplet put in
+        # OCR's left-to-right order, a generic noun swapped for a product name.
+        if len(starts) > 1 and edit.op == "replace" and not _misreading(edit.quote, edit.replacement):
+            refuse(edit, "quote occurs more than once and the edit rewrites it rather than fixing a misreading")
             continue
         # A misreading the draft repeats (its line, then its description) is fixed everywhere, but
         # only when the picture shows the quoted wording nowhere: then no occurrence can be right.

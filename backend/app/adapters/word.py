@@ -252,7 +252,8 @@ def _text_box_texts(paragraph: Paragraph) -> list[str]:
 
     A modern box is stored twice: mc:Choice (wps:txbx) and an mc:Fallback VML
     copy for older readers. Boxes nested in a box belong to that box's own
-    paragraphs, which this function visits recursively.
+    paragraphs, which this function visits recursively. A table in a box gives
+    one string per row.
     """
     texts: list[str] = []
     for box in paragraph._p.iter(qn("w:txbxContent")):
@@ -263,7 +264,10 @@ def _text_box_texts(paragraph: Paragraph) -> list[str]:
             between.append(ancestor.tag)
         if _MC_FALLBACK in between or qn("w:txbxContent") in between or qn("w:p") in between:
             continue
-        for child in box.iterchildren(qn("w:p")):
+        for child in box.iterchildren(qn("w:p"), qn("w:tbl")):
+            if child.tag == qn("w:tbl"):
+                texts.extend(_nested_table_rows(Table(child, paragraph._parent)))
+                continue
             inner = Paragraph(child, paragraph._parent)
             text = _paragraph_text(inner)
             if text:
@@ -585,12 +589,34 @@ def _table_rows(table: Table) -> list[list[str]]:
 
 def _cell_text(cell: _Cell) -> str:
     parts: list[str] = []
-    for paragraph in cell.paragraphs:
-        text = _paragraph_text(paragraph)
+    for block in _iter_block_items(cell):
+        if isinstance(block, Table):
+            rows = _nested_table_rows(block)
+            if rows:
+                parts.append("；".join(rows))
+            continue
+        text = _paragraph_text(block)
         if text:
             parts.append(text)
-        parts.extend(_text_box_texts(paragraph))
+        parts.extend(_text_box_texts(block))
     return " / ".join(parts).strip()
+
+
+def _nested_table_rows(table: Table) -> list[str]:
+    """A table inside a cell or a text box, one string per row with its cells joined by " | ".
+
+    The outer table's HTML holds only text, so the inner grid is flattened. Each XML cell
+    counts once (a merged cell's continuation is empty), and an empty cell keeps its place
+    so the columns stay aligned; trailing empty cells and empty rows are left out.
+    """
+    rows = []
+    for tr in table._tbl.tr_lst:
+        cells = [_cell_text(_Cell(tc, table)) for tc in tr.tc_lst]
+        while cells and not cells[-1]:
+            cells.pop()
+        if cells:
+            rows.append(" | ".join(cells).strip())
+    return rows
 
 
 # Placeholder name for a table the document never named; not source text.

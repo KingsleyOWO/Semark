@@ -91,21 +91,21 @@ def test_a_misreading_the_draft_repeats_is_fixed_everywhere():
 
 
 def test_a_repeated_span_the_picture_shows_somewhere_is_not_changed_everywhere():
-    # 「茶」 misread for 「大」 once, while the picture also prints 「茶飲」: the other 茶 are right.
-    delivered = "招牌寫「茶」字。\n茶飲\n店內提供茶飲與甜點。"
-    edit = ImageEdit(op="replace", quote="茶", replacement="大", reason="Image shows 大.")
-    text, _, applied, rejected = apply_edits(delivered, [edit], transcription={"茶飲"}, ocr_lines=["大", "茶飲"],
-                                             reading=_reading("大\n茶飲"))
+    # 「茶飲」 misread once for 「茶點」, while the picture also prints 「茶飲」: the other one is right.
+    delivered = "招牌寫「茶飲」。\n茶飲\n店內提供茶飲與甜點。"
+    edit = ImageEdit(op="replace", quote="茶飲", replacement="茶點", reason="Image shows 茶點.")
+    text, _, applied, rejected = apply_edits(delivered, [edit], transcription={"茶飲"}, ocr_lines=["茶點", "茶飲"],
+                                             reading=_reading("茶點\n茶飲"))
 
     assert text == delivered and not applied and "shows it" in rejected[0]["refused"]
 
 
 def test_one_occurrence_the_rules_refuse_stops_the_whole_edit():
     # The transcription line would become wording OCR does not read, so no occurrence changes.
-    delivered = "標語「Peanut House」。\nPeanut House 花生"
-    edit = ImageEdit(op="replace", quote="Peanut House", replacement="PeanuTend", reason="Image shows PeanuTend.")
-    text, _, applied, rejected = apply_edits(delivered, [edit], transcription={"Peanut House 花生"},
-                                             ocr_lines=["PeanuTend"], reading=_reading("PeanuTend"))
+    delivered = "標語「Peanut Houze」。\nPeanut Houze 花生"
+    edit = ImageEdit(op="replace", quote="Peanut Houze", replacement="Peanut House", reason="Image shows House.")
+    text, _, applied, rejected = apply_edits(delivered, [edit], transcription={"Peanut Houze 花生"},
+                                             ocr_lines=["Peanut House"], reading=_reading("Peanut House"))
 
     assert text == delivered and not applied and "transcription line" in rejected[0]["refused"]
 
@@ -118,6 +118,35 @@ def test_a_repeated_span_changes_everywhere_only_into_wording_ocr_reads():
                                              reading=_reading("qingva 晴諾來"))
 
     assert text == delivered and not applied and "PaddleOCR does not read" in rejected[0]["refused"]
+
+
+def test_a_repeated_span_is_not_rewritten_into_something_else():
+    # Replayed: OCR read only "T" of a certificate's small "Technical Manager", and a right-to-left
+    # couplet in its left-to-right order; neither is a misreading to fix everywhere.
+    delivered = "簽名下方為 Technical Manager。\nTechnical Manager"
+    edit = ImageEdit(op="replace", quote="Technical Manager", replacement="T", reason="OCR reads T.")
+    text, _, applied, rejected = apply_edits(delivered, [edit], transcription={"Technical Manager"},
+                                             ocr_lines=["T"], reading=_reading("SGS"))
+    assert text == delivered and not applied and "rewrites" in rejected[0]["refused"]
+
+    couplet = "橫批「時來運轉萬事順」。\n時來運轉萬事順"
+    edit = ImageEdit(op="replace", quote="時來運轉萬事順", replacement="成事萬轉運來時", reason="OCR.")
+    assert not apply_edits(couplet, [edit], transcription={"時來運轉萬事順"}, ocr_lines=["成事萬轉運来時"],
+                           reading=_reading("成事萬轉運來時"))[2]
+
+
+def test_new_wording_keeps_the_deliverys_script_and_a_script_change_is_no_edit():
+    # PaddleOCR answers 片装 for printed 片裝.
+    delivered = "包裝標示 8片入。\n8片入"
+    edit = ImageEdit(op="replace", quote="8片入", replacement="8片装", reason="OCR reads 8片装.")
+    text, _, applied, _ = apply_edits(delivered, [edit], transcription={"8片入"}, ocr_lines=["8片装"],
+                                      reading=_reading("8片裝"))
+    assert text == "包裝標示 8片裝。\n8片裝" and applied[0]["replacement"] == "8片裝"
+
+    same = ImageEdit(op="replace", quote="8片裝", replacement="8片装", reason="OCR reads 8片装.")
+    text, _, applied, rejected = apply_edits("8片裝", [same], transcription={"8片裝"}, ocr_lines=["8片装"],
+                                             reading=None)
+    assert text == "8片裝" and not applied and "nothing" in rejected[0]["refused"]
 
 
 def test_only_a_certain_relation_of_the_blind_reading_is_added():

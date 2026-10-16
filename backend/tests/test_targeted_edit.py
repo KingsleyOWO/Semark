@@ -101,9 +101,9 @@ def test_a_repeated_span_the_picture_shows_somewhere_is_not_changed_everywhere()
 
 
 def test_one_occurrence_the_rules_refuse_stops_the_whole_edit():
-    # The transcription line would become wording OCR does not read, so no occurrence changes.
+    # Deleting the word would cut the transcription line, so the description keeps it too.
     delivered = "標語「Peanut Houze」。\nPeanut Houze 花生"
-    edit = ImageEdit(op="replace", quote="Peanut Houze", replacement="Peanut House", reason="Image shows House.")
+    edit = ImageEdit(op="delete", quote="Houze", reason="Image shows no Houze.")
     text, _, applied, rejected = apply_edits(delivered, [edit], transcription={"Peanut Houze 花生"},
                                              ocr_lines=["Peanut House"], reading=_reading("Peanut House"))
 
@@ -282,3 +282,76 @@ def test_a_description_edit_never_breaks_wording_ocr_reads():
 
     assert text == delivered and not applied
     assert "OCR" in rejected[0]["refused"]
+
+
+def test_a_line_changes_in_the_number_both_readers_read_though_ocr_garbles_its_label():
+    # A page-sized chart: OCR reads 「品度」 for the label but the score 3.33 cleanly.
+    delivered = "雷達圖分值如下。\n品牌辨識度 3.23\n品牌辨識度最弱。"
+    edit = ImageEdit(op="replace", quote="品牌辨識度 3.23", replacement="品牌辨識度 3.33", reason="Image shows 3.33.")
+    text, _, applied, _ = apply_edits(delivered, [edit], transcription={"品牌辨識度 3.23"},
+                                      ocr_lines=["品度", "3.33"], reading=_reading("品牌辨識度 3.33"))
+    assert "品牌辨識度 3.33" in text and applied
+
+    # The blind reading keeps the old number: OCR alone does not change a printed line.
+    delivered = "包裝標示「木耳 290g」。\n木耳 290g\n淨重木耳 290g。"
+    edit = ImageEdit(op="replace", quote="木耳 290g", replacement="木耳 200g", reason="OCR reads 200g.")
+    text, _, applied, _ = apply_edits(delivered, [edit], transcription={"木耳 290g"},
+                                      ocr_lines=["木", "200g"], reading=_reading("木耳 290g"))
+    assert text == delivered and not applied
+
+
+def test_a_latin_word_is_read_only_whole():
+    delivered = "簽名為 Daniel Liu。\nDaniel Liu\n證書由 Daniel Liu 簽署。"
+    edit = ImageEdit(op="replace", quote="Daniel Liu", replacement="Daniel Leu", reason="Signature reads Leu.")
+    reading = _reading("Daniel Leu")
+    assert apply_edits(delivered, [edit], transcription={"Daniel Liu"}, ocr_lines=["Daniel", "Leu"],
+                       reading=reading)[2]
+    text, _, applied, rejected = apply_edits(delivered, [edit], transcription={"Daniel Liu"},
+                                             ocr_lines=["Daniel", "Fleur"], reading=reading)
+    assert text == delivered and not applied and "PaddleOCR does not read" in rejected[0]["refused"]
+
+
+def test_wording_another_picture_prints_replaces_a_name_the_draft_invented():
+    # A tiny chart OCR garbles 「品牌统力」; a sharper form in the same report prints the eight names.
+    delivered = "雷達圖八項指標。\n品牌決策力 1.4\n品牌決策力 在企業營運層面統一品牌發展目標。"
+    edit = ImageEdit(op="replace", quote="品牌決策力", replacement="品牌統御力", reason="Image shows 品牌統御力.")
+    form = ["品牌辨識度", "品牌重視度", "品牌統御力", "品牌創新度"]
+    arguments = dict(transcription={"品牌決策力 1.4"}, ocr_lines=["品牌统力", "1.4"],
+                     reading=_reading("品牌統御力 1.4"))
+    text, _, applied, _ = apply_edits(delivered, [edit], document_ocr=[form, ["品牌统力", "1.4"]], **arguments)
+    assert "品牌決策力" not in text and text.count("品牌統御力") == 2 and applied
+    # Without another picture's reading the garbled OCR backs nothing.
+    assert not apply_edits(delivered, [edit], **arguments)[2]
+    # Nor when this picture's own OCR is nearer the quote.
+    near = dict(arguments, ocr_lines=["品牌決策", "1.4"])
+    assert not apply_edits(delivered, [edit], document_ocr=[form], **near)[2]
+
+
+def test_a_relation_quotes_only_lettering_the_delivery_or_ocr_has():
+    invented = {"relation_id": "r1", "kind": "value_pair", "certain": True,
+                "source_fact": "「願景」對應「我們為誰解決什麼問題」。"}
+    blank = {"relation_id": "r2", "kind": "value_pair", "certain": True,
+             "source_fact": "「__ Application __」位於「06」下方。"}
+    _, statements, applied, rejected = _apply({"op": "add_relation", "relation_id": "r1"},
+                                              {"op": "add_relation", "relation_id": "r2"},
+                                              reading=_reading(relationships=[invented, blank]))
+    assert statements == ["圖片關係：「__ Application __」位於「06」下方。"]
+    assert "neither delivered nor read" in rejected[0]["refused"]
+
+
+def test_an_unreadable_spot_is_filled_only_with_what_ocr_reads():
+    # The blind reading named the same signature three ways on three forms.
+    delivered = "訪談人員為手寫簽名（字跡模糊難辨）。\n訪談人員：[?]（簽名）"
+    guesses = [ImageEdit(op="replace", quote="（字跡模糊難辨）", replacement="「晴諾米」", reason="Signature."),
+               ImageEdit(op="replace", quote="訪談人員：[?]（簽名）", replacement="訪談人員：晴諾米（簽名）",
+                         reason="Signature.")]
+    text, _, applied, rejected = apply_edits(delivered, guesses, transcription=set(), ocr_lines=["訪談人員"],
+                                             reading=_reading("訪談人員：晴諾米（簽名）"))
+    assert text == delivered and not applied and all("unreadable spot" in r["refused"] for r in rejected)
+
+    text, _, applied, _ = apply_edits(delivered, guesses[1:], transcription=set(), ocr_lines=["晴諾米"],
+                                      reading=_reading("訪談人員：晴諾米（簽名）"))
+    assert "訪談人員：晴諾米（簽名）" in text and applied
+    # Dropping the remark brings in no wording.
+    drop = ImageEdit(op="replace", quote="手寫簽名（字跡模糊難辨）", replacement="手寫簽名", reason="No remark.")
+    assert apply_edits(delivered, [drop], transcription=set(), ocr_lines=["訪談人員"], reading=None)[2]

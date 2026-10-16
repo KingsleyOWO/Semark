@@ -3,6 +3,8 @@ import asyncio
 import copy
 import hashlib
 import json
+import math
+import re
 import shutil
 import time
 from pathlib import Path
@@ -22,6 +24,8 @@ from app.pipeline.recovery_models import (
     SourceMatch,
 )
 from app.pipeline.review_policy import (
+    _BLOCK_ID,
+    _names,
     page_review_problems,
     partial_review_accepted,
     picture_content_confirmed,
@@ -35,17 +39,17 @@ from app.pipeline.review_sources import (
     needs_content_recovery,
 )
 
-RECOVERY_VERSION = "document-tools-v14-effective-repairs"
+RECOVERY_VERSION = "document-tools-v15-keep-read-lines-honest-attempts"
 SKILLS = Path(__file__).with_name("recovery_skills")
 TOOL_DESCRIPTIONS = {
-    "ocr_image": "First observe the original image at scale=1; if disputed, use a crop around returned line bbox at scale=2/4 instead of magnifying the whole image. Observe lettering on ONE mapped image using PaddleOCR; optional original-image 0..1000 region and scale 1/2/4. Returns source-bound line IDs, coordinates and scores. No content is published. Then repair_image can resolve conflicts against the original image.",
+    "ocr_image": "Only for small disputed lettering: PaddleOCR on ONE smaller original-image 0..1000 region of one mapped image at scale 2/4, around a line bbox an earlier OCR returned. repair_image already reads the whole picture with PaddleOCR itself, so a whole-image OCR request is run as repair_image. Returns source-bound line IDs, coordinates and scores. No content is published.",
     "inspect_layout": "List source-bound MinerU page regions. Reuse parse artifacts; otherwise parse only this page. Read-only, not verification. Then select up to three region_ids for read_regions detail crops or one Word image ID for repair_image.",
     "resolve_source": "Locate one unmapped block using candidate source pages; does not rewrite content.",
     "read_source": "Keep native page text; independently read original images as separate scene, text and gap blocks. Final source audit is required.",
     "read_regions": "Read whole-page source-owned rows/bands; request bounded context when needed, then assemble verbatim. Optionally magnify up to three inspected region_ids; verify actual delivery.",
     "reparse_pdf": "Run MinerU on one physical PDF page, including a Word-converted source; compare a candidate.",
     "rebuild_delivery": "Repair scoped block text/order or exact duplicates; rebuild documents and chunks.",
-    "repair_image": "Repair one listed image_targets block_id (or one inspected Word region_id) while preserving every table and other block. Separate scene facts, literal text and explicit gaps; image verification does not certify the page.",
+    "repair_image": "Repair one listed image_targets block_id (or one inspected Word region_id) while preserving every table and other block. Reads the whole picture with PaddleOCR first. Separate scene facts, literal text and explicit gaps; image verification does not certify the page.",
     "defer": "Record why this issue cannot be resolved with current evidence/tools.",
 }
 
@@ -177,6 +181,39 @@ def adopt_candidate_evidence(records, pages, folder, root):
             shutil.copy2(staged, live)
 
 
+OCR_MAX_PIXELS = 20_000_000  # read_ocr refuses a larger picture or scaled region
+
+
+def ocr_scale(source, region, scale):
+    """The requested OCR scale, halved until the scaled region fits read_ocr's pixel limit.
+
+    Rerun 2026-10-15: scale 4 on a 3446x1714 picture failed outright where scale 1 reads it.
+    """
+    from PIL import Image
+
+    with Image.open(source) as image:
+        width, height = image.size
+    box = (math.floor(region[0] * width / 1000), math.floor(region[1] * height / 1000),
+           math.ceil(region[2] * width / 1000), math.ceil(region[3] * height / 1000))
+    while scale > 1 and (box[2] - box[0]) * scale * (box[3] - box[1]) * scale > OCR_MAX_PIXELS:
+        scale //= 2
+    return scale
+
+
+# Wording an audit quotes: 「…」, “…”, ‘…’, "…" or a single-quoted span not inside a word (image's).
+_QUOTED = re.compile(r"「([^」\n]+)」|“([^”\n]+)”|‘([^’\n]+)’|\"([^\"\n]+)\"|(?<![A-Za-z])'([^'\n]+)'(?![A-Za-z])")
+
+
+def edit_disputes_issue(folder):
+    """Whether a targeted edit came back empty: the edit model found nothing wrong where an audit did.
+
+    Rerun 2026-10-15: 8 empty proposals, each followed at once by a 150-580 s full re-read; in
+    one the audit was wrong, in three the edit model (shown a transparent picture on black).
+    """
+    record = read_json(folder / "targeted-edit.json", {})
+    return bool(record) and not (record.get("proposal") or {}).get("edits")
+
+
 class RebuildMismatch(ValueError):
     """The live rebuild did not reproduce the verified candidate; nothing of it was published."""
 
@@ -278,7 +315,27 @@ class RecoveryController:
         def patch_first(problem):
             cheap = {"review_correction": 0, "delivery_patch": 0, "targeted_edit": 1}
             return cheap.get(self.repair_method(problem["block_id"]), 2) if problem.get("kind") == "image" else 2
-        return sorted(result, key=lambda problem: (patch_first(problem), -priority(problem)))
+        # An issue the edit model found nothing wrong for waits until every other issue had its
+        # turn: a full re-read of it (300-600 s) is spent only when no undisputed issue is waiting.
+        def disputed(problem):
+            return bool(self.state["issues"].get(problem["id"], {}).get("disputed"))
+        return sorted(result, key=lambda problem: (disputed(problem), patch_first(problem), -priority(problem)))
+
+    @staticmethod
+    def out_of_budget(issue, **details):
+        """Time or calls ran out for this issue: budget_exhausted only when it was never tried.
+
+        Rerun 2026-10-15: 57 issues ended budget_exhausted, 55 of them after 1-3 failed tries,
+        so the report read as if repairs had never run. A tried issue stays unresolved with its
+        attempts and last result.
+        """
+        issue.update(details, stopped_by_budget=True)
+        issue["status"] = "unresolved" if issue.get("attempts") else "budget_exhausted"
+
+    @staticmethod
+    def record_result(issue, step):
+        issue["last_result"] = {"action": step["action"], "method": step.get("method", "full"),
+                                "status": step.get("status"), "result": str(step.get("result", ""))[:300]}
 
     def available(self):
         return (self.state["actions"] < self.owner.limits.max_recovery_actions
@@ -369,19 +426,87 @@ class RecoveryController:
                      and b.bbox_norm[1] < b.bbox_norm[3])]
 
     def unaccepted_pictures(self, ir, record):
-        """Pictures the page's last review found wrong; a re-read picture is reviewed as its parts."""
+        """Pictures a hard remark of the page's last review names; a re-read picture is reviewed as its parts.
+
+        Rerun 2026-10-15: two pictures were re-read (910 s) for a page held back by remarks on
+        other blocks, while their own findings said only that small print was illegible. A
+        picture is re-read for its own finding, a page issue or an image issue naming it, and
+        only when that remark says something is wrong (review_policy.soft_review_remark).
+        """
+        review = record.get("review", {})
         pictures = set()
         settled = self.settled_pictures(ir, record.get("page_idx"), record) if "page_idx" in record else set()
-        for finding in record.get("review", {}).get("blocks", []):
+        for finding in review.get("blocks", []):
             if finding.get("status") == "verified" or finding.get("block_id") in settled:
                 continue
             block = ir.get_block(finding.get("block_id"))
             if block is None:
                 continue
             origin = block.payload.get("agentic_image_origin")
-            if origin or block.type == BlockType.IMAGE:
+            if not (origin or block.type == BlockType.IMAGE):
+                continue
+            names = {block.block_id, origin or block.block_id}
+            own = finding.get("observation") or ""
+            remarks = [own, *(i.get("detail", "") for i in record.get("image_issues") or [] if i.get("block_id") in names),
+                       *(i for i in review.get("issues") or [] if _names(i, names))]
+            # A finding left unexplained says nothing is right; it counts as a hard remark.
+            if not own.strip() or any(r.strip() and not soft_review_remark(r) for r in remarks):
                 pictures.add(origin or block.block_id)
         return pictures
+
+    @staticmethod
+    def unattributed_page_problem(record):
+        """A hard page remark naming no block: it may concern any picture of the page."""
+        return any(not _BLOCK_ID.search(i) and not soft_review_remark(i)
+                   for i in record.get("review", {}).get("issues") or [])
+
+    def picture_only_problems(self, ir, page, record):
+        """Whether every remaining problem of the page's review concerns its pictures alone.
+
+        Order, a block that is not a picture, or a hard remark naming no block or another
+        block is a page problem a page tool may still fix.
+        """
+        from app.pipeline.autonomous_delivery import is_picture_content
+
+        review = record.get("review", {})
+        pictures = set()
+        for block in self.inventory.blocks(page, ir):
+            if is_picture_content(block):
+                pictures |= {block.block_id, block.payload.get("agentic_image_origin") or block.block_id}
+        if not pictures or not review.get("reading_order_correct", False):
+            return False
+        if any(f.get("status") != "verified" and f.get("block_id") not in pictures for f in review.get("blocks", [])):
+            return False
+        hard = [i for i in review.get("issues") or [] if not soft_review_remark(i)]
+        return all(set(_BLOCK_ID.findall(i)) and set(_BLOCK_ID.findall(i)) <= pictures for i in hard)
+
+    async def quoted_wording_missing(self, problem, origin, ir):
+        """Wording the issue quotes that PaddleOCR reads in the picture and its repair still lacks.
+
+        Rerun 2026-10-15: a repair was marked resolved while the two panel headings its issue
+        quoted, which OCR reads once the picture is on white, were still not delivered. Only
+        quotes naming this picture, or no block, count. Never fails a committed repair.
+        """
+        from app.adapters.ocr import ocr_python
+        from app.pipeline.image_source_review import appears_in
+
+        names = {origin} | {b.block_id for b in ir.blocks if b.payload.get("agentic_image_origin") == origin}
+        texts = [t for t in problem.get("issues") or [] if isinstance(t, str)
+                 and (problem.get("block_id") == origin or not _BLOCK_ID.search(t) or _names(t, names))]
+        quotes = list(dict.fromkeys(q for t in texts for match in _QUOTED.finditer(t)
+                                    for q in match.groups() if q and normalized_text(q)))
+        source = self.inventory.word_images.get(origin)
+        if not quotes or source is None or not ocr_python():
+            return []
+        try:
+            lines = await self.owner._ocr_lines(source, self.inventory)
+        except Exception:
+            return []
+        if not lines:
+            return []
+        ocr = "\n".join(lines)
+        delivered = "\n".join(b.get_text() for b in ir.blocks if b.payload.get("agentic_image_origin") == origin)
+        return [q for q in quotes if appears_in(q, ocr) and not appears_in(q, delivered)]
 
     def reconcile_image_findings(self, ir, page, record):
         """A later source audit can invalidate an earlier scoped success.
@@ -474,6 +599,10 @@ class RecoveryController:
                          word_pictures=features["word_images"], image_read_calls=reads,
                          layout_cached=layout_cached, detail_regions=region_count, image_geometry=geometry,
                          delivery_patch=patch, targeted_edit=edit, review_correction=correction)
+        if (action == "repair_image" and method == "full" and self.inventory.word_images.get(problem.get("block_id"))
+                and not any(item["content"].get("region") == [0, 0, 1000, 1000] for item in self.evidence.for_target(
+                    page, problem.get("block_id"), provider="paddleocr"))):
+            cost["seconds"] = round(cost["seconds"] + tool_cost(self.owner.state, "ocr_image")["seconds"], 1)
         if correction:
             cost["method"] = ("review_correction: replace only wording an audit spelled out as wrong and "
                               "PaddleOCR reads as written, then audit")
@@ -565,9 +694,16 @@ class RecoveryController:
                 recent = [s for s in self.state["steps"] if s["issue_id"] == problem["id"] or
                           (s["action"] == "repair_image" and s.get("page_idx") == problem.get("page_idx")
                            and (page_scope or s.get("block_id") == problem.get("block_id")))]
-                if sum(s["action"] not in {"inspect_layout", "ocr_image"} and not (page_scope and s["action"] == "repair_image")
+                # A rejected plan ran no tool, so it is not an attempt; it has its own bound.
+                if sum(s["action"] not in {"inspect_layout", "ocr_image", "invalid_plan"}
+                       and not (page_scope and s["action"] == "repair_image")
                        for s in recent) >= self.owner.limits.max_recovery_attempts_per_issue:
                     issue["status"] = "attempt_limit"
+                    break
+                if sum(s["action"] == "invalid_plan" and s["issue_id"] == problem["id"]
+                       for s in recent) >= self.owner.limits.max_recovery_attempts_per_issue:
+                    issue.update(status="deferred", reason="The planner kept choosing a tool or target outside "
+                                                           "this issue's scope")
                     break
                 allowed = (["ocr_image", "repair_image", "defer"] if problem.get("kind") == "image" else
                            ["resolve_source", "defer"] if "block_id" in problem else
@@ -581,11 +717,25 @@ class RecoveryController:
                     if any(block is None for block in scoped_blocks):
                         issue["status"] = "superseded"
                         break
+                    if "block_id" in problem and problem.get("kind") != "image" and scoped_blocks[0].type == BlockType.IMAGE:
+                        # resolve_source, the one tool for an unmapped block, cannot place a picture
+                        # (rerun 2026-10-15: 11 planned calls refused this way in two reports).
+                        issue.update(status="deferred", reason="unmapped_picture: no rendered page matched it and its "
+                                                               "page cannot be inferred; it is delivered unverified")
+                        break
                     image_targets = self.image_targets(ir, problem["page_idx"]) if page_scope else []
                     unaccepted = self.unaccepted_pictures(ir, current) if page_scope else set()
-                    if unaccepted:
-                        # Re-reading a picture the review accepted cannot fix the page.
+                    if page_scope and current.get("review") and (unaccepted or not self.unattributed_page_problem(current)):
+                        # Re-reading a picture no hard remark names cannot fix the page; a hard remark
+                        # naming no block may concern any picture, so all stay targets then.
                         image_targets = [b for b in image_targets if b.block_id in unaccepted]
+                    if (page_scope and not image_targets and current.get("review")
+                            and self.picture_only_problems(ir, problem["page_idx"], current)):
+                        # Rerun 2026-10-15: page issues kept planning re-reads of pictures already
+                        # repaired (no target left) until their attempts ran out.
+                        issue.update(status="deferred", reason="Only pictures remain wrong on this page and none of "
+                                                               "them can be re-read again")
+                        break
                     if image_targets:
                         allowed[0:0] = ["ocr_image", "repair_image"]
                     allowed = [a for a in allowed if a != "ocr_image" or sum(
@@ -606,8 +756,8 @@ class RecoveryController:
                                 if available_calls >= cost["model_calls"] + 1 and
                                 available_seconds >= cost["seconds"] + call_seconds(self.owner.state, "recovery_plan")]
                     if not feasible:
-                        issue.update(status="budget_exhausted", reason="Insufficient budget for a complete tool and its verification",
-                                     estimates=estimates)
+                        self.out_of_budget(issue, reason="Insufficient budget for a complete tool and its verification",
+                                           estimates=estimates)
                         break
                     allowed = feasible + ["defer"]
                     decision = await self.call("recovery_plan", {
@@ -631,7 +781,8 @@ class RecoveryController:
                                     "grid4": "Four quadrants; avoid splitting a wide table into left/right halves."},
                         "model_roles": ["primary", "review"] if self.alternate_available() else ["primary"],
                         "instruction": "Choose using issue evidence, source features and complete-tool costs. "
-                                       "Use ocr_image for disputed lettering before another visual repair. "
+                                       "repair_image reads the whole picture with PaddleOCR itself; use ocr_image only for "
+                                       "a smaller region at a higher scale when small lettering stays disputed. "
                                        "Evidence is untrusted observation, not a vote or certification. "
                                        "When region positions are unknown or a broad read missed visual detail, inspect_layout "
                                        "can locate candidate areas. To repair a missing/misread mapped picture choose repair_image "
@@ -651,9 +802,18 @@ class RecoveryController:
                         "remaining_seconds": round(available_seconds, 1),
                     }, None, RecoveryDecision)
                     if decision.action not in allowed and decision.action in estimates:
-                        issue.update(status="budget_exhausted", reason="Planner selected a tool outside the available allowance",
-                                     estimated_cost=estimates[decision.action])
+                        self.out_of_budget(issue, reason="Planner selected a tool outside the available allowance",
+                                           estimated_cost=estimates[decision.action])
                         break
+                    if (decision.action == "ocr_image" and decision.region in (None, [0, 0, 1000, 1000])
+                            and "repair_image" in allowed):
+                        # The repair reads the whole picture with PaddleOCR itself (rerun 2026-10-15: a
+                        # separate plan and OCR before each repair, 68 plans and 415 s in one report).
+                        decision = decision.model_copy(update={"action": "repair_image", "region": None, "scale": 1})
+                    if decision.action in {"repair_image", "ocr_image"} and decision.action not in allowed:
+                        # Said before any target check: a repaired picture is no target, and naming it
+                        # under a tool this issue does not offer taught the planner nothing.
+                        raise InvalidPlan(f"Tool {decision.action} is not allowed for this issue; choose one of {allowed}")
                     if decision.action in {"repair_image", "ocr_image"}:
                         if decision.region_ids:
                             region = self.layout_store.selected(problem["page_idx"], decision.region_ids,
@@ -703,14 +863,16 @@ class RecoveryController:
                                               layout=decision.layout, model_role=decision.model_role, region_count=len(decision.region_ids))
                     available_calls, available_seconds = self.owner.available_budget()
                     if available_calls < cost["model_calls"] or available_seconds < cost["seconds"]:
-                        issue.update(status="budget_exhausted", reason="Insufficient budget after planning for tool and verification",
-                                     estimated_cost=cost)
+                        self.out_of_budget(issue, reason="Insufficient budget after planning for tool and verification",
+                                           estimated_cost=cost)
                         break
                     step["page_idx"] = problem.get("page_idx")
                     step["evidence_revision"] = self.image_evidence_revision(problem.get("page_idx"), decision.block_id)
                     step["estimated_cost"] = cost
                     self.state["steps"].append(step)
                     self.state["queries" if decision.action in {"inspect_layout", "ocr_image"} else "actions"] += 1
+                    if decision.action not in {"inspect_layout", "ocr_image"}:
+                        issue["attempts"] = issue.get("attempts", 0) + 1
                     step["reserved_seconds"] = available_seconds
                     self.save()
                     before = self.owner.state["usage"]["seconds"]
@@ -837,6 +999,14 @@ class RecoveryController:
                         issue["status"] = ("candidate_only" if self.owner.limits.mode == "shadow" else
                                            "located" if decision.action == "resolve_source" else
                                            "applied_partial" if partial else "improved" if remaining else "resolved")
+                        missing = []
+                        if decision.action == "repair_image" and self.owner.limits.mode == "apply":
+                            missing = await self.quoted_wording_missing(problem, decision.block_id, ir)
+                        if missing:
+                            # The audit quoted lettering PaddleOCR reads and the repair still lacks it:
+                            # kept, but the issue is open for the next method.
+                            issue.update(status="unresolved", reason="quoted_wording_still_missing",
+                                         missing_wording=missing)
                         step["result"] = {"affected_pages": pages, "source_verified": True, "source_complete": not partial and decision.action != "resolve_source",
                                           "scope": "image" if decision.action == "repair_image" else "page"}
                         if not page_scope and decision.action == "repair_image" and self.owner.limits.mode == "apply":
@@ -853,7 +1023,8 @@ class RecoveryController:
                                 issue["status"] = "unresolved"
                                 continue
                             if self.owner.limits.mode == "apply":
-                                issue["status"] = ("resolved" if current.get("status") == "verified" else
+                                issue["status"] = ("unresolved" if missing else
+                                    "resolved" if current.get("status") == "verified" else
                                     "applied_partial" if partial_review_accepted(current.get("review", {}),
                                         set(current.get("declared_gap_ids", [])), current.get("block_ids")) else "unverified")
                         break
@@ -869,7 +1040,7 @@ class RecoveryController:
                         continue
                     except BudgetExhausted as exc:
                         step.update(status="budget_exhausted", result=str(exc))
-                        issue["status"] = "budget_exhausted"
+                        self.out_of_budget(issue)
                         break
                     except Exception as exc:
                         if committed:
@@ -877,9 +1048,13 @@ class RecoveryController:
                             raise RecoveryCommitError("Accepted candidate rebuild failed; resume required") from exc
                         step.update(status="rejected", result=(type(exc).__name__ + ": " + str(exc))[:1000])
                         issue["status"] = "unresolved"
+                        if method == "targeted_edit" and edit_disputes_issue(folder):
+                            issue["disputed"] = True
                     finally:
                         self.owner._protected_budget = previous_protection
                         step.pop("reserved_seconds", None)
+                        if decision.action not in {"inspect_layout", "ocr_image"}:
+                            self.record_result(issue, step)
                         step["duration_seconds"] = round(time.monotonic() - started, 3)
                         counted = self.owner.state["usage"]["seconds"] - before
                         self.owner.state["usage"]["seconds"] += max(0, time.monotonic() - started - counted)
@@ -887,11 +1062,12 @@ class RecoveryController:
                 except RecoveryCommitError:
                     raise
                 except BudgetExhausted:
-                    issue["status"] = "budget_exhausted"
+                    self.out_of_budget(issue)
                     break
                 except InvalidPlan as exc:
                     # Spot check 2026-10-07: nine page issues ended here after one plan named a picture that had
-                    # used both re-reads. The rejection is the next plan's evidence and counts as an attempt.
+                    # used both re-reads. The rejection is the next plan's evidence; it ran no tool, so it counts
+                    # toward its own bound, not the issue's attempts.
                     self.state["steps"].append({
                         "key": digest([problem["id"], "invalid_plan", len(self.state["steps"])]),
                         "issue_id": problem["id"], "action": "invalid_plan", "planned_action": decision.action,
@@ -904,10 +1080,12 @@ class RecoveryController:
                     issue.update(status="planner_failed", reason=(type(exc).__name__ + ": " + str(exc))[:600])
                     break
             if not self.available() and issue["status"] in {"pending", "unresolved"}:
-                issue["status"] = "budget_exhausted"
+                self.out_of_budget(issue)
             self.save()
         self.state["stop_reason"] = ("budget_exhausted" if not self.available() else
-                                     "insufficient_tool_budget" if any(i["status"] == "budget_exhausted"
+                                     "insufficient_tool_budget" if any(
+                                         i["status"] == "budget_exhausted"
+                                         or i["status"] == "unresolved" and i.get("stopped_by_budget")
                                          for i in self.state["issues"].values()) else "completed")
         self.save()
         return ir
@@ -1130,24 +1308,25 @@ class RecoveryController:
             raise ValueError("ocr_requires_one_mapped_original_image")
         runtime = ocr_runtime_identity()
         region = decision.region or [0, 0, 1000, 1000]
+        scale = ocr_scale(source, region, decision.scale)
         sha = hashlib.sha256(source.read_bytes()).hexdigest()
         for old in self.evidence.for_target(page, bid, provider="paddleocr"):
             value = old["content"]
             if (old["metadata"].get("runtime_identity") == runtime and value["source_sha256"] == sha
-                    and value["region"] == region and value["scale"] == decision.scale):
+                    and value["region"] == region and value["scale"] == scale):
                 return {"evidence_id": old["evidence_id"], "status": value["status"],
                         "line_count": len(value["lines"]), "cache_hit": True}
         failures = self.state.setdefault("ocr_capacity_failures", {})
-        identity = digest([runtime, sha, region, decision.scale])
+        identity = digest([runtime, sha, region, scale])
         if identity in failures:
             raise ValueError(failures[identity]["reason"] + "; cached scope failure; select a smaller region")
         try:
-            value = await read_ocr(source, region, decision.scale, folder,
+            value = await read_ocr(source, region, scale, folder,
                                    timeout=min(90, self.owner.available_budget()[1]))
         except ValueError as exc:
             if str(exc).startswith(("ocr_output_capacity_exceeded", "ocr_pixel_limit")):
                 failures[identity] = {"block_id": bid, "page_idx": page, "source_sha256": sha,
-                                      "region": region, "scale": decision.scale, "reason": str(exc)[:300]}
+                                      "region": region, "scale": scale, "reason": str(exc)[:300]}
                 self.save()
             raise
         eid = self.evidence.add(provider="paddleocr", kind="transcription", page=page, block_id=bid,
@@ -1213,7 +1392,35 @@ class RecoveryController:
 
     async def repair_image(self, ir, problem, decision, folder, skill):
         from app.pipeline.image_recovery import repair_image
+        block_id = problem.get("block_id") or decision.block_id
+        if self.repair_method(block_id) == "full":
+            await self.picture_ocr(ir, problem, block_id, folder)
         return await repair_image(self, ir, problem, decision, folder, skill)
+
+    async def picture_ocr(self, ir, problem, block_id, folder):
+        """PaddleOCR of the whole picture as repair evidence, unless an earlier observation has it.
+
+        Only a full re-read resolves its reading against OCR observations; the patch and edit
+        methods read OCR lines themselves. A picture OCR cannot take is repaired without them.
+        """
+        from app.adapters.ocr import ocr_python
+
+        page = problem["page_idx"]
+        source = self.inventory.word_images.get(block_id)
+        if source is None or not ocr_python() or any(
+                item["content"].get("region") == [0, 0, 1000, 1000]
+                for item in self.evidence.for_target(page, block_id, provider="paddleocr")):
+            return
+        from PIL import Image
+
+        with Image.open(source) as image:
+            scale = 2 if image.width * image.height < 1_500_000 else 1  # as the review's OCR reads it
+        decision = RecoveryDecision(action="ocr_image", reason="Whole-picture OCR for the repair",
+                                    block_id=block_id, scale=scale)
+        try:
+            await self.ocr_image(ir, problem, decision, folder / "picture-ocr", None)
+        except (ValueError, TimeoutError) as exc:
+            atomic_write_json(folder / "picture-ocr-error.json", {"reason": str(exc)[:600]}, ensure_ascii=False)
 
     async def read_source(self, ir, problem, decision, folder, skill):
         blocks = self.inventory.blocks(problem["page_idx"], ir)
@@ -1235,25 +1442,46 @@ class RecoveryController:
         if self.owner.available_budget()[0] < len(pictures) * 6 + audit_calls:
             raise BudgetExhausted("Insufficient calls for image-part reading and final source verification")
         requests = image_read_requests(self.owner.config, ir, skill, decision.model_role)
+        # The page's pictures by their Word part: a material whose Word bytes match one replaces it.
+        pictures_here = {b.payload.get("word_source", {}).get("image_sha256"): b
+                         for b in self.inventory.blocks(page, ir) if b.type == BlockType.IMAGE}
         blocks, checks = [], []
         for material in materials:
             if material["image"]:
                 primary, independent = [await read_image_parts_bounded(
                     self.owner, task, payload, material["image"], max_depth=1) for task, payload in requests]
                 parts = reconcile_image_parts(primary, independent)
+                replaced = pictures_here.get(material.get("word_sha256")) if material.get("word_sha256") else None
+                carried = []
+                if replaced is not None:
+                    # A page re-read keeps the picture's drafted lines no audit showed wrong, as a picture
+                    # re-read does (rerun 2026-10-15: re-reads that came back as gaps dropped read names).
+                    from app.pipeline.image_edits import known_issues, transcription_lines
+                    from app.pipeline.image_recovery import keep_drafted_read_lines
+                    parts, carried, _, _ = keep_drafted_read_lines(
+                        parts, transcription_lines(self.root / "outputs", replaced.block_id),
+                        known_issues(self.owner.state, self.state, page, replaced.block_id))
                 checks.append({"source_id": material["id"], "source_sha256": hashlib.sha256(
                     material["image"].read_bytes()).hexdigest(), "primary": primary.model_dump(),
-                    "independent": independent.model_dump(), "candidate": parts})
+                    "independent": independent.model_dump(), "candidate": parts,
+                    "replaced_picture": replaced.block_id if replaced is not None else None,
+                    "carried_drafted_lines": carried})
                 origin = Block(block_id=material["id"], type=BlockType.IMAGE, page_idx=page,
                                bbox_norm=material["bbox"], payload={})
                 replacements = build_image_parts_blocks(self, origin, page, material["bbox"],
                     material["image"], parts, [], folder / (folder.name + "-" + material["id"]))
                 for block in replacements:
                     # The native material ID is source-owned, not an original IR
-                    # image block ID. Never manufacture an image ownership link.
+                    # image block ID. Never manufacture an image ownership link; the
+                    # picture it replaces, matched by its Word bytes, keeps its own
+                    # document and file in the delivery.
                     block.payload.pop("agentic_image_origin", None)
                     block.payload.update(agentic_recovery_tool="read_source",
                                          agentic_native_source_id=material["id"])
+                    if replaced is not None:
+                        block.payload.update(agentic_replaced_picture=replaced.block_id,
+                                             agentic_image_path=replaced.payload.get("img_path", ""),
+                                             image_source_context=replaced.payload.get("word_source", {}))
                 blocks.extend(replacements)
             else:
                 blocks.append(Block(block_id=f"recovery_{folder.name}_{material['id']}", type=BlockType.TEXT,

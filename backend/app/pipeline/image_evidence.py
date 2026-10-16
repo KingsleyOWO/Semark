@@ -27,10 +27,8 @@ async def resolve_image_evidence(runner, block, page, source, primary, independe
         eid = store.add(provider="prior_vlm", kind="image_reading", page=page, block_id=block.block_id,
                         source=source, content=prior)
         evidence_ids.append(eid)
-    for observation in store.for_target(page, block.block_id, provider="paddleocr"):
-        # Evidence for a different source image revision cannot vote on these pixels.
-        if observation["source"]["sha256"] != evidence_source_sha(source):
-            continue
+    for observation in one_ocr_observation(store.for_target(page, block.block_id, provider="paddleocr"),
+                                           evidence_source_sha(source)):
         evidence_ids.append(observation["evidence_id"])
         candidates.extend({"source_ref": observation["evidence_id"] + ":" + item["line_id"],
                            "evidence_id": observation["evidence_id"], "text": item["text"],
@@ -57,19 +55,12 @@ async def resolve_image_evidence(runner, block, page, source, primary, independe
                 or not overlap(available[selection.source_ref]["bbox"], available[selection.covered_by]["bbox"])):
             raise ReadingFormatError("image_resolution_invalid_region_link")
     decisions = {s.source_ref: s for s in resolution.selections}
-    retained = []
-    for item in selected:
-        for other in retained:
-            if overlap(item["bbox"], other["bbox"]) >= 0.5:
-                if normalized_text(item["text"]) != normalized_text(other["text"]):
-                    raise ReadingFormatError("image_resolution_selected_conflicting_readings")
-                break
-        else:
-            retained.append(item)
+    retained, disputed = select_agreeing_readings(selected)
     # Replace only gaps for source regions that have now been directly resolved.
     gaps = protocol_gaps + [g for g in parts["gaps"] if g["reason"] not in {
         "image_text_unreadable_or_disputed", "image_text_not_accounted_for_by_both_readers",
         "image_text_conflicts_with_prior_source_reading", "image_visual_depends_on_unverified_content"}]
+    gaps += [{"bbox": bbox, "reason": "image_text_readings_conflict"} for bbox in disputed]
     regions = [c for c in candidates if c["provider"] != "paddleocr"]
     for region in regions:
         decision = decisions[region["source_ref"]]
@@ -86,8 +77,11 @@ async def resolve_image_evidence(runner, block, page, source, primary, independe
     if not resolution.accounted_for and not protocol_gaps:
         gaps.append({"bbox": [0, 0, 1000, 1000], "reason": "image_evidence_coverage_incomplete"})
     text_dependent = parts["text_dependent"]
-    text = [{"text": item["text"], "bbox": item["bbox"], "evidence_id": item["evidence_id"]}
-            for item in retained] if not gaps or not text_dependent else []
+    # Readings both readers and the adjudication support stay beside the gaps of the regions that
+    # are not: a chart or table used to lose every reading over one disputed cell, and its re-read
+    # became a placeholder its audit always failed (rerun 2026-10-15, 3-6 minutes each). The pieces
+    # of a text-dependent picture depend on one another, gaps included, so none is certified alone.
+    text = [{"text": item["text"], "bbox": item["bbox"], "evidence_id": item["evidence_id"]} for item in retained]
     visual = parts["visual_facts"]
     if not gaps and primary.visual_facts and independent.visual_facts:
         visual = primary.visual_facts
@@ -105,6 +99,58 @@ async def resolve_image_evidence(runner, block, page, source, primary, independe
          "status": "candidate_requires_source_audit"}, ensure_ascii=False, indent=2)
     return result, evidence_ids
 
+
+
+def one_ocr_observation(observations, source_sha):
+    """One PaddleOCR observation of these pixels: the widest region, at its largest scale.
+
+    A planned OCR step and the repair's own OCR both read a picture, at scale 1 and 2; counting
+    both doubled every line, so a 64-line chart came to 155 candidates and was refused as over
+    capacity (rerun 2026-10-15). Evidence for another revision of the source never votes.
+    """
+    def area(observation):
+        region = observation["content"].get("region") or observation.get("bbox") or [0, 0, 1000, 1000]
+        return (region[2] - region[0]) * (region[3] - region[1])
+
+    current = [o for o in observations if o["source"]["sha256"] == source_sha]
+    if not current:
+        return []
+    return [max(current, key=lambda o: (area(o), o["content"].get("scale", 1), len(o["content"].get("lines", []))))]
+
+
+def _folded(text):
+    from app.pipeline.zh_text import to_taiwan_traditional
+    return normalized_text(to_taiwan_traditional(text))
+
+
+def select_agreeing_readings(selected):
+    """The supported readings to deliver, and the regions where two of them disagree.
+
+    Readings of one region agree when, in either script, they are equal or one holds the other;
+    the longer is kept, so OCR's fragment 「No.」 does not cut the 「1」 off 「No.1」 and its
+    simplified 「输」 does not count against 「輪」. A real disagreement holds back that region
+    only, as a gap; it used to fail the whole picture. Rerun 2026-10-15: 11 re-reads (49 min)
+    failed so, on 31 pairs of which 24 were containment and 4 only script.
+    """
+    retained, disputed = [], []
+    for item in selected:
+        if any(overlap(item["bbox"], bbox) >= 0.5 for bbox in disputed):
+            continue
+        for index, other in enumerate(retained):
+            if overlap(item["bbox"], other["bbox"]) >= 0.5:
+                mine, theirs = _folded(item["text"]), _folded(other["text"])
+                if mine in theirs:
+                    pass
+                elif theirs in mine:
+                    retained[index] = item
+                else:
+                    retained.pop(index)
+                    disputed.append([min(item["bbox"][0], other["bbox"][0]), min(item["bbox"][1], other["bbox"][1]),
+                                     max(item["bbox"][2], other["bbox"][2]), max(item["bbox"][3], other["bbox"][3])])
+                break
+        else:
+            retained.append(item)
+    return retained, disputed
 
 
 IMAGE_RESOLUTION_BATCH_SIZE = 24

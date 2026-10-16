@@ -1,5 +1,6 @@
 """Recover one picture as separately auditable visual/text/gap blocks."""
 import hashlib
+import re
 import shutil
 
 from app.models.document_ir import Block, BlockType
@@ -57,12 +58,79 @@ async def repair_image(runner, ir, problem, decision, folder, skill):
     from app.pipeline.image_evidence import resolve_image_evidence
     parts, evidence_ids = await resolve_image_evidence(runner, block, page, source, primary, independent,
                                                        prior, parts, folder, model_role=decision.model_role)
+    from app.adapters import ocr
+    from app.pipeline.image_edits import known_issues, transcription_lines
+    drafted = transcription_lines(runner.root / "outputs", block.block_id)
+    lines = await runner.owner._ocr_lines(original, runner.inventory) if drafted and ocr.ocr_python() else None
+    parts, carried, named, contested = keep_drafted_read_lines(
+        parts, drafted, known_issues(runner.owner.state, runner.state, page, block.block_id), lines)
     atomic_write_json(folder / "image-parts.json", {
         "source_block_id": block.block_id, "source_sha256": sha,
         "primary": primary.model_dump(), "independent": independent.model_dump(),
         "prior_source_reading": prior, "candidate": parts,
+        "drafted_read_lines": {"carried": carried, "named_wrong": named, "contested": contested},
     }, ensure_ascii=False, indent=2)
+    # Audits of such candidates were spent on what was already delivered, on gaps, or on a line
+    # the same audits would fault again.
+    if not named and not any(not appears_in(line, "\n".join(drafted)) for line in reread_lines(parts)):
+        raise ValueError("full_reread_found_nothing_new")
+    if contested:
+        raise ValueError("full_reread_could_not_settle_a_disputed_line")
     return build_image_parts_candidate(runner, ir, block, page, region, source, parts, evidence_ids, folder), [page]
+
+
+def reread_lines(parts):
+    return [item["text"] for item in parts["text_regions"] if not item.get("carried")] + list(parts["visual_facts"])
+
+
+# A remark saying quoted wording is not in the picture at all, as opposed to omitted or misplaced.
+_NOT_IN_PICTURE = re.compile(r"不存在|並未出現|未出現在|虛構|捏造|無中生有|憑空|"
+                             r"not (?:present|visible|shown|found) in|does not (?:appear|exist)|hallucin|fabricat|invent", re.I)
+
+
+def keep_drafted_read_lines(parts, drafted, issues, ocr_lines=()):
+    """A full re-read keeps every drafted line read off the picture that no audit showed wrong.
+
+    Edits already never drop a transcription line. Rerun 2026-10-15: a re-read that came
+    back as one whole-picture gap replaced 48 logo names an audit had called omitted, not
+    wrong, and others lost a brand name and a seal their issues asked for. Being quoted is
+    not being wrong: one audit quoted two correct column headings to say a row sat under
+    the wrong one. A drafted line is wrong when an audit spells out a correction pair for
+    it and the re-read or PaddleOCR reads the other side and not this one, or quotes it as
+    not in the picture while neither reads it. Returns (parts, carried lines, lines shown wrong,
+    carried lines an audit disputes that neither settles).
+    """
+    from app.pipeline.content_coverage import normalized_text
+    from app.pipeline.image_edits import _QUOTED, spelled_out_corrections
+    from app.pipeline.review_policy import soft_review_remark
+
+    read = "\n".join(reread_lines(parts))
+    seen = "\n".join([read, *(ocr_lines or [])])
+    wrong = set()
+    for a, b in spelled_out_corrections(issues):
+        for bad, good in ((a, b), (b, a)):
+            if appears_in(good, seen) and not appears_in(bad, seen):
+                wrong.add(normalized_text(bad))
+    wrong |= {normalized_text(next(g for g in m.groups() if g is not None))
+              for remark in issues if _NOT_IN_PICTURE.search(remark) and not soft_review_remark(remark)
+              for m in _QUOTED.finditer(remark)
+              if not appears_in(next(g for g in m.groups() if g is not None), seen)}
+    wrong.discard("")
+    disputed = {normalized_text(side) for pair in spelled_out_corrections(issues) for side in pair} - {""}
+    carried, named, contested = [], [], []
+    for line in drafted:
+        if not normalized_text(line) or appears_in(line, read):
+            continue
+        if any(q in normalized_text(line) for q in wrong):
+            named.append(line)
+            continue
+        carried.append(line)
+        if any(q in normalized_text(line) for q in disputed):
+            contested.append(line)
+    if carried:
+        parts = {**parts, "text_regions": [*parts["text_regions"],
+                                           *({"text": line, "bbox": None, "carried": True} for line in carried)]}
+    return parts, carried, named, contested
 
 
 def delivery_patch_statements(state, page, block_id):
@@ -229,8 +297,10 @@ async def build_targeted_edit_candidate(runner, ir, block, page, region, source,
     corrections = review_corrections(issues, delivered, lines or [])
     corrected = apply_corrections(delivered, corrections)
     transcription = [apply_corrections(line, corrections) for line in transcription]
+    # Other pictures of the document PaddleOCR has read: the same printed name, legible elsewhere.
+    document_ocr = [entry["lines"] for entry in runner.owner.state.get("ocr_lines", {}).values() if entry.get("lines")]
     text, statements, applied, rejected = apply_edits(corrected, proposal.edits, transcription=transcription,
-                                                      ocr_lines=lines, reading=reading)
+                                                      ocr_lines=lines, reading=reading, document_ocr=document_ocr)
     applied = [{"op": "replace", "quote": wrong, "replacement": right, "reason": "review_correction"}
                for wrong, right in corrections.items()] + applied
     record = {"source_block_id": block.block_id, "known_issues": issues, "ocr_lines": lines,
@@ -288,7 +358,8 @@ def kept_text_candidate(runner, ir, block, page, region, source, kept, statement
               "agentic_source_image": str(source.relative_to(runner.root)),
               "agentic_recovery_tool": "repair_image", "agentic_image_repair_method": method,
               "agentic_image_origin": block.block_id, "image_source_context": block.payload.get("word_source", {}),
-              "agentic_evidence_ids": list(evidence_ids), "agentic_content_kind": "visual_summary"}
+              "agentic_evidence_ids": list(evidence_ids), "agentic_content_kind": "visual_summary",
+              **picture_identity(block)}
     # A PDF picture has no blind Word reading; a Word picture's relationships must stay audited.
     if raw := runner.owner.state["pages"][str(page)].get("word_image_readings", {}).get(block.block_id):
         relationship_evidence = runner.evidence.add(
@@ -318,6 +389,81 @@ def kept_text_candidate(runner, ir, block, page, region, source, kept, statement
     return candidate
 
 
+def picture_identity(block):
+    """The replaced picture's file, which keeps its own figure document and link (spot check
+    2026-10-16: 16 repaired pictures lost both). Its caption is not carried: a repair can be the
+    very thing that found a drafted caption wrong."""
+    return {"agentic_image_path": block.payload.get("img_path", "")}
+
+
+PENDING_GAP_REASONS = {"image_evidence_budget_deferred", "image_evidence_response_contract_failed"}
+GAP_KINDS = {"pending": "尚未完成證據核對的文字或必要內容", "illegible": "無法可靠辨識的文字或必要內容",
+             "omitted": "未納入文字解讀的區域（保留來源圖）"}
+
+
+def _gap_kind(reason):
+    return ("omitted" if reason == "region_not_interpreted" else
+            "pending" if reason in PENDING_GAP_REASONS else "illegible")
+
+
+def gap_marker(page, regions):
+    """One line for all of a picture's undelivered regions, by kind and count.
+
+    A line per region named the picture by its internal ID: one meeting photo shipped
+    eleven of them, and each held its page back on its own.
+    """
+    from collections import Counter
+
+    counts = Counter(_gap_kind(region["reason"]) for region in regions)
+    return (f"〔原文第 {page + 1} 頁圖片："
+            + "、".join(f"{GAP_KINDS[kind]} {counts[kind]} 處" for kind in GAP_KINDS if counts[kind]) + "〕")
+
+
+def picture_gap(origin, regions):
+    """The agentic_gap of a picture's one gap block; every region keeps its box and reasons."""
+    boxes = [region["image_bbox"] for region in regions]
+    union = [min(b[0] for b in boxes), min(b[1] for b in boxes), max(b[2] for b in boxes), max(b[3] for b in boxes)]
+    reasons = [region["reason"] for region in regions]
+    gap = {"reason": next((r for r in reasons if r != "region_not_interpreted"), reasons[0]), "source_id": origin,
+           "image_bbox": union, "regions": regions}
+    if sources := sorted({r for region in regions for r in region.get("source_reasons", [region["reason"]])}
+                         if any("source_reasons" in region for region in regions) else []):
+        gap["source_reasons"] = sources
+    return gap
+
+
+def merge_picture_gaps(blocks, origin, page):
+    """Fold every gap block of one picture into its first, in place of separate markers.
+
+    Pruning and region revision mark parts one at a time; the delivery shows one marker.
+    Returns the blocks with the others removed and dependencies on them moved to the first.
+    """
+    gaps = [b for b in blocks if b.payload.get("agentic_image_origin") == origin and b.payload.get("agentic_gap")]
+    if len(gaps) < 2 and not (gaps and "regions" not in gaps[0].payload["agentic_gap"]):
+        return blocks
+    first = gaps[0]
+    regions = [region for b in gaps for region in b.payload["agentic_gap"].get("regions") or [{
+        "reason": b.payload["agentic_gap"]["reason"], "image_bbox": b.payload["agentic_gap"].get(
+            "image_bbox", b.payload.get("agentic_image_region", [0, 0, 1000, 1000])),
+        **({"source_reasons": b.payload["agentic_gap"]["source_reasons"]}
+           if "source_reasons" in b.payload["agentic_gap"] else {})}]]
+    first.payload["agentic_gap"] = picture_gap(origin, regions)
+    first.payload["agentic_image_region"] = first.payload["agentic_gap"]["image_bbox"]
+    first.payload["text"] = gap_marker(page, regions)
+    removed = {b.block_id for b in gaps[1:]}
+    fields = ("agentic_depends_on_block_ids", "agentic_source_depends_on_block_ids",
+              "agentic_review_depends_on_block_ids")
+    for field in fields:
+        first.payload[field] = sorted(set().union(*(b.payload.get(field, []) for b in gaps)) - {first.block_id} - removed)
+    kept = [b for b in blocks if b.block_id not in removed]
+    for b in kept:
+        for field in fields:
+            if field in b.payload:
+                b.payload[field] = sorted({first.block_id if bid in removed else bid
+                                           for bid in b.payload[field]} - {b.block_id})
+    return kept
+
+
 def build_image_parts_candidate(runner, ir, block, page, region, source, parts, evidence_ids, folder,
                                 *, relationship_reading=None, relationship_parents=()):
     """Materialize source observations for the same ordinary scoped delivery audit."""
@@ -329,6 +475,23 @@ def build_image_parts_candidate(runner, ir, block, page, region, source, parts, 
     for order, item in enumerate(candidate.blocks):
         item.reading_order = order
     return candidate
+
+
+def distinct_text_regions(regions):
+    """Text regions whose wording no other region already delivers in full.
+
+    Readers return a block and then its lines, or a line and a phrase inside it: one
+    table shipped 「Customer\\nCost…」 and each word again, a photo ten nested regions.
+    A region whose text another one contains (an equal one: a later one) adds nothing.
+    """
+    from app.pipeline.content_coverage import normalized_text
+    from app.pipeline.zh_text import to_taiwan_traditional
+
+    texts = [normalized_text(to_taiwan_traditional(item["text"])) for item in regions]
+    return [item for index, item in enumerate(regions)
+            if texts[index] and not any(other != index and texts[index] in texts[other]
+                                        and (len(texts[other]) > len(texts[index]) or other < index)
+                                        for other in range(len(regions)))]
 
 
 def build_image_parts_blocks(runner, block, page, region, source, parts, evidence_ids, folder,
@@ -350,7 +513,7 @@ def build_image_parts_blocks(runner, block, page, region, source, parts, evidenc
               "agentic_source_image": str(source.relative_to(runner.root)),
               "agentic_recovery_tool": "repair_image", "agentic_image_origin": block.block_id,
               "image_source_context": block.payload.get("word_source", {}),
-              "agentic_evidence_ids": evidence_ids}
+              "agentic_evidence_ids": evidence_ids, **picture_identity(block)}
     if relationship_evidence:
         common["agentic_relationship_evidence_id"] = relationship_evidence
 
@@ -372,24 +535,24 @@ def build_image_parts_blocks(runner, block, page, region, source, parts, evidenc
 
     for index, text in enumerate(parts["visual_facts"] if parts.get("information_status") != "non_informative" else []):
         add("圖片可確認內容：" + to_taiwan_traditional(text), "visual_summary", f"v{index}")
-    for index, item in enumerate(parts["text_regions"]):
+    for index, item in enumerate(distinct_text_regions(parts["text_regions"])):
         add("圖片文字：" + to_taiwan_traditional(item["text"]), "transcription", f"t{index}", image_region=item["bbox"])
+        if item.get("carried"):
+            replacements[-1].payload["agentic_drafted_line"] = True
     gaps = parts["gaps"]
-    pending_reasons = {"image_evidence_budget_deferred", "image_evidence_response_contract_failed"}
     if not replacements:
         # One whole-image gap avoids nested placeholders, but must not turn a
         # protocol/budget deferral into a claim that the source pixels are illegible.
         reasons = sorted({gap["reason"] for gap in gaps})
-        reason = next((reason for reason in reasons if reason in pending_reasons),
+        reason = next((reason for reason in reasons if reason in PENDING_GAP_REASONS),
                       "image_essential_content_unverified")
         gaps = [{"bbox": [0, 0, 1000, 1000], "reason": reason, "source_reasons": reasons}]
-    for index, gap in enumerate(gaps):
-        limitation = "尚未完成證據核對" if gap["reason"] in pending_reasons else "無法可靠辨識"
-        add(f"〔{limitation}：原文第 {page + 1} 頁，圖片 {block.block_id}，區域 {index + 1} 的文字或必要內容〕",
-            "transcription", f"g{index}", gap={"reason": gap["reason"], "source_id": block.block_id,
-                                             "image_bbox": gap["bbox"],
-                                             **({"source_reasons": gap["source_reasons"]} if "source_reasons" in gap else {})},
-            image_region=gap["bbox"])
+    if gaps:
+        regions = [{"reason": gap["reason"], "image_bbox": gap["bbox"],
+                    **({"source_reasons": gap["source_reasons"]} if "source_reasons" in gap else {})} for gap in gaps]
+        gap = picture_gap(block.block_id, regions)
+        add(gap_marker(page, regions), "transcription", "g0", gap=gap,
+            image_region=gap["image_bbox"])
     if parts["text_dependent"]:
         for item in replacements:
             item.payload["agentic_depends_on_block_ids"] = [other.block_id for other in replacements
@@ -499,8 +662,7 @@ async def validate_image_parts(runner, candidate, pages, folder, origin, *, allo
     # A failed proposal never replaces the original candidate. Independently check
     # the conservative subset, including the exact omission markers in delivery.
     subset = candidate.model_copy(deep=True)
-    blocks = [b for b in subset.blocks if b.payload.get("agentic_image_origin") == origin]
-    if revision_budget(runner.owner, propose=False) and prune_unverified_parts(blocks, findings, review, origin, pages[0]):
+    if revision_budget(runner.owner, propose=False) and prune_candidate(subset, findings, review, origin, pages[0]):
         return await validate_image_variant(runner, candidate, subset, pages, folder, origin, "verified-subset")
     return False
 
@@ -623,6 +785,17 @@ def prune_unverified_parts(blocks, findings, review, origin, page):
     from app.pipeline.image_refinement import mark_region_omitted
     for block in rejected:
         mark_region_omitted(block, origin, page)
+    return True
+
+
+def prune_candidate(candidate, findings, review, origin, page):
+    """prune_unverified_parts on a candidate, its gap markers folded into one."""
+    blocks = [b for b in candidate.blocks if b.payload.get("agentic_image_origin") == origin]
+    if not prune_unverified_parts(blocks, findings, review, origin, page):
+        return False
+    candidate.blocks = merge_picture_gaps(candidate.blocks, origin, page)
+    for order, item in enumerate(candidate.blocks):
+        item.reading_order = order
     return True
 
 

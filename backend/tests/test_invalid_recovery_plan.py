@@ -2,8 +2,10 @@
 
 Spot check 2026-10-07: nine page issues of one report ended as planner_failed because
 the planner chose a picture that had already used both full re-reads. The rejected
-plan is recorded with what was allowed and counts as an attempt, so the planner can
-choose again but cannot loop.
+plan is recorded with what was allowed, so the planner can choose again but cannot
+loop. Since 2026-10-16 a rejected plan has its own bound and is not one of the issue's
+attempts: in one report three rejected plans for a repaired picture used up a page
+issue's attempts before any tool ran.
 """
 import pytest
 from PIL import Image
@@ -28,7 +30,7 @@ async def test_an_out_of_scope_plan_is_rejected_and_the_planner_plans_again(tmp_
 
 
 @pytest.mark.asyncio
-async def test_repeated_invalid_plans_stop_at_the_attempt_limit(tmp_path):
+async def test_repeated_invalid_plans_stop_at_their_own_bound(tmp_path):
     model = RecoveryModel(action="resolve_source")
     ir, owner, runner = await setup(tmp_path, model)
 
@@ -38,7 +40,22 @@ async def test_repeated_invalid_plans_stop_at_the_attempt_limit(tmp_path):
     limit = owner.limits.max_recovery_attempts_per_issue
     assert [s["action"] for s in runner.state["steps"]] == ["invalid_plan"] * limit
     assert model.tasks.count("recovery_plan") == limit
-    assert runner.state["issues"]["page:0"]["status"] == "attempt_limit"
+    issue = runner.state["issues"]["page:0"]
+    assert issue["status"] == "deferred" and "outside this issue's scope" in issue["reason"]
+    assert not issue.get("attempts")
+
+
+@pytest.mark.asyncio
+async def test_invalid_plans_leave_the_issue_its_attempts(tmp_path):
+    model = RecoveryModel(actions=["resolve_source", "resolve_source", "read_regions"])
+    ir, owner, runner = await setup(tmp_path, model)
+
+    await runner.run(ir)
+
+    steps = runner.state["steps"]
+    assert [s["action"] for s in steps] == ["invalid_plan", "invalid_plan", "read_regions"]
+    issue = runner.state["issues"]["page:0"]
+    assert issue["attempts"] == 1 and issue["last_result"]["action"] == "read_regions"
 
 
 @pytest.mark.asyncio

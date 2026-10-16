@@ -148,13 +148,18 @@ def finalize_delivery(ir: DocumentIR, run_path: Path, config: PipelineConfig) ->
     stats["partial_rag_ready"] = automatic["rag_ready"]
     recovery = read_json(outputs / "recovery_report.json", {})
     if recovery:
-        statuses = [i.get("status") for i in recovery.get("issues", {}).values()]
+        issues_by_id = recovery.get("issues", {}).values()
+        statuses = [i.get("status") for i in issues_by_id]
         stats["agentic_recovery"] = {
             "applied": sum(s.get("status") == "applied" for s in recovery.get("steps", [])),
             "rejected": sum(s.get("status") == "rejected" for s in recovery.get("steps", [])),
             "resolved": statuses.count("resolved"),
             "unresolved": sum(s != "resolved" for s in statuses),
+            # Never tried for lack of time, as against tried and stopped by it (2026-10-16: the
+            # report counted 57 issues out of time where 55 had had one to three attempts).
             "budget_exhausted": statuses.count("budget_exhausted"),
+            "stopped_by_budget": sum(bool(i.get("stopped_by_budget")) for i in issues_by_id),
+            "attempts": sum(i.get("attempts", 0) for i in issues_by_id),
             "deferred": statuses.count("deferred"),
         }
     stats["final_coverage"] = {

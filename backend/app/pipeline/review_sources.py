@@ -7,6 +7,7 @@ from pathlib import Path
 
 import fitz
 
+from app.models.document_ir import BlockType
 from app.pipeline.agentic_evidence import page_image
 from app.pipeline.content_coverage import normalized_text, plain_text
 from app.pipeline.final_delivery import delivered_documents, read_json, read_jsonl
@@ -185,6 +186,7 @@ class SourceInventory:
                                             for bid, values in matches.items() if values and values[0].get("source_image")}
                         self.mapping, self.mapping_details = locate_word_blocks(
                             blocks, texts, image_matches=matches, overrides=overrides)
+                        self.place_pictures_in_tables(blocks)
                         from app.pipeline.delivery import atomic_write_json
                         atomic_write_json(self.directory / "word-page-mapping.json", {
                             "version": "word-layout-v1", "source_sha256": sha, "pdf_sha256": pdf_sha,
@@ -194,6 +196,31 @@ class SourceInventory:
                 except Exception as exc:
                     self.error = "Source cannot be opened: " + str(exc)[:300]
         self.fallback()
+
+    def place_pictures_in_tables(self, blocks):
+        """A Word picture no rendered page matched sits on its table's page when the table has one.
+
+        Rerun 2026-10-15: two pictures in the cells of a one-page table matched no page
+        render, so no review saw them and the only tool offered for them, resolve_source,
+        refuses pictures. A cell cannot leave its table; a table spanning pages (a repeated
+        header row) or a picture outside any table is left unmapped. The picture's own
+        exported pixels, when there are any, become its repair source.
+        """
+        for block in blocks:
+            source = block.payload.get("word_source") or {}
+            parent = source.get("parent_table_block_id")
+            if block.type != BlockType.IMAGE or self.mapping.get(block.block_id) or not parent:
+                continue
+            pages = self.mapping.get(parent) or []
+            if len(pages) != 1:
+                continue
+            self.mapping[block.block_id] = list(pages)
+            self.mapping_details[block.block_id] = {**self.mapping_details.get(block.block_id, {}),
+                                                    "pages": list(pages), "method": "parent_table_page",
+                                                    "anchor_block_ids": [parent]}
+            exported = self.directory / ("word-image-" + str(source.get("image_sha256")) + ".png")
+            if block.block_id not in self.word_images and source.get("image_sha256") and exported.is_file():
+                self.word_images[block.block_id] = exported
 
     def fallback(self):
         # Parsed page images cannot prove the source has no omitted pages.
@@ -380,8 +407,19 @@ class DeliveryExcerpts:
         self._bind(blocks, renderer)
         block_ids = {b.block_id for b in blocks}
         # The file line number only locates spans for the documents index; the audit never sees it.
-        documents = [{k: v for k, v in paragraph.items() if k not in {"normalized", "line"}}
-                     for paragraph in self.paragraphs if block_ids.intersection(paragraph["block_ids"])]
+        # A line repeated across the document (a "No.1" sign, a standard indicator text) names
+        # only the owners in this scope, and that others exist: with every owner listed, a repair
+        # of any one picture changed the excerpt of every page carrying the line, and each commit
+        # re-audited them (rerun 2026-10-15: 57 of 74 repair-phase page audits were other pages).
+        documents = []
+        for paragraph in self.paragraphs:
+            owners = [bid for bid in paragraph["block_ids"] if bid in block_ids]
+            if not owners:
+                continue
+            item = {k: v for k, v in paragraph.items() if k not in {"normalized", "line"}}
+            if len(owners) < len(paragraph["block_ids"]):
+                item.update(block_ids=owners, also_elsewhere=True)
+            documents.append(item)
         chunks = [{"chunk_id": c.get("chunk_id"), "content": c.get("content", ""),
                    "block_ids": c.get("block_ids", [])}
                   for c in self.chunks if block_ids.intersection(c.get("block_ids", []))]

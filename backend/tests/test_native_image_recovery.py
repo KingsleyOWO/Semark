@@ -141,3 +141,29 @@ async def test_native_reading_does_not_spend_final_audit_reservation(tmp_path, m
     await runner.read_source(ir, {'page_idx': 0}, RecoveryDecision(action='read_source', reason='Read.'),
                              tmp_path / 'candidate', 'Read original image.')
     assert owner.available_budget()[0] == 5  # Protected final audit is not charged twice.
+
+
+@pytest.mark.asyncio
+async def test_a_page_reread_names_the_picture_it_replaces_and_keeps_its_drafted_lines(tmp_path, monkeypatch):
+    """A page re-read keeps the picture's link and its drafted lines (2026-10-16): a Word picture matched
+    by its bytes keeps its own document, and a reading that leaves its sign a gap drops no read name."""
+    from app.models.document_ir import Block, BlockType
+
+    ir, owner, runner = await setup(tmp_path, SceneModel(), cfg(max_recovery_actions=1))
+    source = runner.inventory.image(0)
+    monkeypatch.setattr(recovery_evidence, 'native_materials', lambda *args: [
+        {'id': 'image-0', 'text': '', 'bbox': [0, 200, 1000, 1000], 'kind': 'word_embedded_image',
+         'image': source, 'word_sha256': 'a' * 64}])
+    ir.blocks.append(Block(block_id='pic', type=BlockType.IMAGE, page_idx=0, reading_order=len(ir.blocks),
+                           payload={'img_path': 'images/pic.png', 'word_source': {'image_sha256': 'a' * 64}}))
+    runner.inventory.mapping['pic'] = [0]
+    (tmp_path / 'outputs').mkdir(exist_ok=True)
+    with open(tmp_path / 'outputs/enrichments.jsonl', 'a') as handle:
+        handle.write(json.dumps({'block_id': 'pic', 'output': {'all_text': ['晴諾米拼圖工作室']}}, ensure_ascii=False) + '\n')
+    candidate, _ = await runner.read_source(ir, {'page_idx': 0}, RecoveryDecision(action='read_source', reason='Read.'),
+                                            tmp_path / 'candidate', 'Read original image.')
+    pieces = [b for b in candidate.blocks if b.payload.get('agentic_native_source_id') == 'image-0']
+    assert pieces and {b.payload.get('agentic_replaced_picture') for b in pieces} == {'pic'}
+    assert {b.payload.get('agentic_image_path') for b in pieces} == {'images/pic.png'}
+    assert any(b.get_text() == '圖片文字：晴諾米拼圖工作室' for b in pieces)
+    assert not any(b.payload.get('agentic_image_origin') for b in pieces)

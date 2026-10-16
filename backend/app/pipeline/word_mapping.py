@@ -6,7 +6,7 @@ import math
 import fitz
 from PIL import Image, ImageChops, ImageOps, ImageStat
 
-from app.adapters.metafile import open_picture
+from app.adapters.metafile import on_white, open_picture
 from app.models.document_ir import BlockType
 from app.pipeline.agentic_evidence import match_word_pages
 from app.pipeline.content_coverage import normalized_text, plain_text
@@ -100,11 +100,12 @@ def word_image_matches(blocks, source, pdf_path, *, evidence_dir=None):
             sources[block.block_id] = by_rel[rel]
             if evidence_dir is not None:
                 # Export only the original relationship part whose bytes match the IR.
-                # PNG normalizes format/EXIF without reducing the original resolution.
+                # PNG normalizes format/EXIF without reducing the original resolution; the
+                # picture goes on white as printed, for readers, OCR and crops alike.
                 name = "word-image-" + meta["image_sha256"] + ".png"
                 path = evidence_dir / name
                 with open_picture(blob) as original:
-                    ImageOps.exif_transpose(original).convert("RGBA").save(path)
+                    on_white(ImageOps.exif_transpose(original)).save(path)
                 evidence[block.block_id] = name
     result, decoded, painted = {}, {}, []
     if not sources:

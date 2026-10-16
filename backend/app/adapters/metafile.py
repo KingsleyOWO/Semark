@@ -148,6 +148,26 @@ def metafile_bitmap(data):
     return emfplus_bitmap(data) or stretched_bitmap(data)
 
 
+def has_transparency(image):
+    return image.mode in ("RGBA", "LA", "PA", "RGBa", "La") or "transparency" in image.info
+
+
+def on_white(image):
+    """The picture in RGB as Word prints it: transparent pixels on white paper.
+
+    convert("RGB") keeps whatever colour is stored under a transparent pixel, black in
+    most exported PNGs. Rerun 2026-10-15: 22 of one report's 117 pictures lost their dark
+    lettering that way to OCR and the models (a table's header and two rows read as black,
+    a logo wall's names gone), while the page review saw them on white.
+    """
+    if not has_transparency(image):
+        return image.convert("RGB")
+    rgba = image.convert("RGBA")
+    background = Image.new("RGBA", rgba.size, "white")
+    background.alpha_composite(rgba)
+    return background.convert("RGB")
+
+
 def open_picture(blob):
     """Pillow's image of a Word picture part, including the bitmap a metafile only copies.
 

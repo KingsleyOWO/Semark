@@ -32,9 +32,13 @@ from openai import AsyncOpenAI
 from PIL import Image
 from pydantic import BaseModel, Field, ValidationError
 
+from app.adapters.metafile import has_transparency, on_white
 from app.config import VLMApiMode, VLMConfig, VLMImageMode
 from app.pipeline.semantic.language import prompt_form_sections, prompt_language_instruction
 from app.pipeline.semantic.normalizer import fields_to_dicts, normalize_fields
+
+# How a picture is prepared for the model; part of the cache identity (see compute_config_hash).
+IMAGE_PREPARATION = "transparent-on-white-v1"
 
 # qwen3-vl's image processor rejects any side that does not exceed its patch
 # factor of 32 px — the ollama runner panics in SmartResize and drops the
@@ -778,6 +782,9 @@ class VLMAdapter:
             "decode_params": config.decode_params.model_dump(),
             "request_timeout_seconds": config.request_timeout_seconds,
             "figure_target_pixels": config.figure_target_pixels,
+            # What the model is shown changed: transparent pictures on white (2026-10-16), so a
+            # cached reading of the same picture on black is not reused.
+            "image_preparation": IMAGE_PREPARATION,
         }
         canonical = json.dumps(config_dict, sort_keys=True)
         return hashlib.sha256(canonical.encode()).hexdigest()[:16]
@@ -1356,8 +1363,8 @@ class VLMAdapter:
             # silently answers without ever seeing the image.
             return self._encode_image_as_data_uri(image_path)
         if self.config.image_mode == VLMImageMode.STATIC_URL:
-            # Use static URL from backend
-            if doc_id and run_id:
+            # Use static URL from backend; a served transparent file would reach the model on black.
+            if doc_id and run_id and self._white_png(image_path) is None:
                 # Construct URL: /api/assets/{doc_id}/{run_id}/{relative_path}
                 parts = image_path.parts
                 if "assets" in parts:
@@ -1375,7 +1382,8 @@ class VLMAdapter:
     def _enlarged_figure_png(self, image_path: Path) -> bytes | None:
         """PNG of the figure enlarged toward figure_target_pixels, or None to send it as-is.
 
-        Alpha is kept so the model sees the same picture, only larger.
+        A transparent picture is enlarged on white, as the page shows it: the model's
+        processor drops alpha to the black stored underneath.
         """
         target = self.config.figure_target_pixels
         if target <= 0:
@@ -1386,8 +1394,10 @@ class VLMAdapter:
                 factor = min(FIGURE_MAX_UPSCALE, math.sqrt(target / (width * height)))
                 if factor <= 1.0:
                     return None
-                if image.mode not in ("RGB", "RGBA", "L", "LA"):
-                    image = image.convert("RGBA")
+                if has_transparency(image):
+                    image = on_white(image)
+                elif image.mode not in ("RGB", "L"):
+                    image = image.convert("RGB")
                 enlarged = image.resize((round(width * factor), round(height * factor)), Image.Resampling.LANCZOS)
         except (OSError, ValueError, ZeroDivisionError):
             return None
@@ -1395,8 +1405,23 @@ class VLMAdapter:
         enlarged.save(buffer, format="PNG")
         return buffer.getvalue()
 
+    @staticmethod
+    def _white_png(image_path: Path) -> bytes | None:
+        """PNG of a transparent picture on white, or None for an opaque or unreadable one."""
+        try:
+            with Image.open(image_path) as image:
+                if not has_transparency(image):
+                    return None
+                buffer = io.BytesIO()
+                on_white(image).save(buffer, format="PNG")
+                return buffer.getvalue()
+        except (OSError, ValueError):
+            return None
+
     def _encode_image_as_data_uri(self, image_path: Path) -> str:
-        """Encode image as data URI."""
+        """Encode image as data URI; a transparent picture goes on white."""
+        if (white := self._white_png(image_path)) is not None:
+            return "data:image/png;base64," + base64.b64encode(white).decode("ascii")
         image_data = self._encode_image(image_path)
         mime_type = self._get_mime_type(image_path)
         return f"data:{mime_type};base64,{image_data}"

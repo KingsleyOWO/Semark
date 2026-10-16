@@ -5,7 +5,7 @@ import zipfile
 
 import fitz
 
-from app.adapters.metafile import open_picture
+from app.adapters.metafile import on_white, open_picture
 from app.pipeline.delivery import atomic_write_json
 
 
@@ -90,14 +90,15 @@ def native_materials(inventory, page, folder):
                 except (OSError, ValueError):
                     continue
                 if match:
-                    match.update(blob=blob, kind='word_embedded_image')
+                    # The Word part's own hash names the IR picture it is, as image_sha256 does.
+                    match.update(blob=blob, kind='word_embedded_image', word_sha256=hashlib.sha256(blob).hexdigest())
     materials.sort(key=lambda m: (m['bbox'][1], m['bbox'][0]))
     for material in materials:
         if 'blob' in material:
             blob = material.pop('blob')
             image_path = folder / (material['id'] + '.png')
             with open_picture(blob) as image:
-                image.convert('RGB').save(image_path)
+                on_white(image).save(image_path)
             material['image'] = image_path
             material['sha256'] = hashlib.sha256(image_path.read_bytes()).hexdigest()
     atomic_write_json(folder / 'sources.json', [dict(m, image=str(m['image']) if m['image'] else None)

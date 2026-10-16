@@ -6,6 +6,7 @@ from pathlib import Path
 import fitz
 from PIL import Image
 
+from app.adapters.metafile import on_white
 from app.models.document_ir import BlockType
 from app.pipeline.content_coverage import normalized_text
 
@@ -73,7 +74,7 @@ def _embedded_image(block, cache, directory):
         with Image.open(source) as image:
             image.load()
             if not target.exists():
-                image.convert("RGB").save(target)
+                on_white(image).save(target)
         return target
     except (OSError, ValueError):
         return None

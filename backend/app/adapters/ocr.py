@@ -11,6 +11,7 @@ from pathlib import Path
 
 from PIL import Image
 
+from app.adapters.metafile import on_white
 from app.config import settings
 
 
@@ -50,7 +51,8 @@ async def read_ocr(source, region, scale, folder, *, timeout=90):
         size = ((box[2] - box[0]) * scale, (box[3] - box[1]) * scale)
         if image.width * image.height > 20_000_000 or size[0] * size[1] > 20_000_000:
             raise ValueError("ocr_pixel_limit")
-        image.convert("RGB").crop(box).resize(size, Image.Resampling.LANCZOS).save(target)
+        # On white, as printed: the black under transparent pixels hid dark lettering.
+        on_white(image).crop(box).resize(size, Image.Resampling.LANCZOS).save(target)
     env = {**os.environ, "OMP_NUM_THREADS": "4", "OPENBLAS_NUM_THREADS": "4",
            "PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK": "True"}
     if settings.ocr_model_cache:

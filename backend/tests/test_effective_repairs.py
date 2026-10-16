@@ -190,3 +190,32 @@ async def test_a_targeted_edit_is_kept_when_only_an_older_fault_remains(tmp_path
     assert runner.state["issues"]["image:picture"]["status"] == "improved"
     delivered = "\n".join(b.payload["text"] for b in result.blocks if b.payload.get("agentic_image_origin") == "picture")
     assert "LUMIO Brand Guidelines | 07" in delivered and "橡皮" in delivered
+
+
+@pytest.mark.asyncio
+async def test_a_corrected_line_is_still_a_line_read_off_the_picture(tmp_path, monkeypatch):
+    """2026-10-16: an unverified radar chart delivered neither its fixed label nor its fixed score: the
+    corrected lines matched no drafted line and OCR, garbling the label, read no line whole."""
+    model = AuditingModel(edits=[{"op": "replace", "quote": "| 87", "replacement": "| 07", "reason": "OCR reads 07."}])
+    record = _record("Footer reads 07, delivery says 87.")
+    record["word_image_readings"] = {"picture": {
+        "source_id": "image0", "text": "Application\nLUMIO Brand Guidelines | 07", "complete": True,
+        "observation": "Slide.", "image_type": "document", "relationships": [], "relationships_complete": True}}
+    ir, owner, runner = await _picture_run(tmp_path, model, record, monkeypatch, description="頁面展示名片與信封。")
+
+    async def garbled(*_):
+        return ["Application", "LUMI0 Brand Gu1de | 07"]
+    owner._ocr_lines = garbled
+    result = await runner.run(ir)
+
+    steps = [(s.get("method"), s["status"]) for s in runner.state["steps"] if s["issue_id"] == "image:picture"]
+    assert steps == [("targeted_edit", "applied")]
+    read = [line for b in result.blocks if b.payload.get("agentic_image_origin") == "picture"
+            for line in b.payload["agentic_read_lines"]]
+    assert "圖片文字：LUMIO Brand Guidelines | 07" in read or "LUMIO Brand Guidelines | 07" in read
+
+
+def test_a_quote_inside_the_other_is_no_misreading():
+    """Rerun 2026-10-16: 「社群策略 建議」, which the picture shows, became 「建議」 because OCR reads the shorter."""
+    remark = "來源圖片顯示「社群策略 建議」，交付文字誤寫為「建議」。"
+    assert review_corrections([remark], "標籤：社群策略 建議\n品牌活動 建議", ["社群策略", "晴諾米", "建議"]) == {}

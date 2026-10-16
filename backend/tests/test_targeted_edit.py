@@ -355,3 +355,35 @@ def test_an_unreadable_spot_is_filled_only_with_what_ocr_reads():
     # Dropping the remark brings in no wording.
     drop = ImageEdit(op="replace", quote="手寫簽名（字跡模糊難辨）", replacement="手寫簽名", reason="No remark.")
     assert apply_edits(delivered, [drop], transcription=set(), ocr_lines=["訪談人員"], reading=None)[2]
+
+
+def test_a_replacement_spanning_lines_never_drops_a_transcription_line():
+    """2026-10-16: 「晴諾米\\nBright Forever\\n晴川銀行」 became 「晴諾米\\n晴川銀行」; the badge reads "Bright Together"."""
+    delivered = "合作夥伴標誌牆。\n晴諾米\nBright Forever\n晴川銀行"
+    edit = ImageEdit.model_validate({"op": "replace", "quote": "晴諾米\nBright Forever\n晴川銀行",
+                                     "replacement": "晴諾米\n晴川銀行", "reason": "Not a separate brand."})
+    text, _, applied, rejected = apply_edits(delivered, [edit], transcription={"晴諾米", "Bright Forever", "晴川銀行"},
+                                             ocr_lines=["晴諾米", "晴川銀行", "We", "Jamily"], reading=_reading("晴諾米"))
+    assert text == delivered and not applied
+    assert rejected[0]["refused"] == "a transcription line is never deleted"
+
+
+def test_a_hedge_is_removed_only_when_ocr_reads_what_it_held_back():
+    """2026-10-16: 「NORIA」（或相近字樣） became 「NORIA」; the screen shows "?ORIA"."""
+    delivered = "會議室螢幕顯示「NORIA」（或相近字樣）的標誌。"
+    edit = ImageEdit.model_validate({"op": "replace", "quote": "「NORIA」（或相近字樣）", "replacement": "「NORIA」",
+                                     "reason": "The screen shows NORIA."})
+    for ocr, removed in ((["ORIA"], False), (["NORIA"], True)):
+        text, _, applied, rejected = apply_edits(delivered, [edit], transcription=set(), ocr_lines=ocr,
+                                                 reading=_reading("NORIA"))
+        assert bool(applied) == removed and ("或相近字樣" not in text) == removed
+
+
+def test_a_description_respells_a_latin_word_only_into_what_ocr_reads():
+    """Rerun 2026-10-16: the blind reading alone turned a label's Lumora (OCR 「Lumara」) into Lumosa."""
+    delivered = "包裝標籤印有 Lumora 字樣。"
+    edit = ImageEdit.model_validate({"op": "replace", "quote": "Lumora", "replacement": "Lumosa", "reason": "Label."})
+    text, _, applied, rejected = apply_edits(delivered, [edit], transcription=set(), ocr_lines=["Lumara"],
+                                             reading=_reading("Lumosa"))
+    assert text == delivered and not applied
+    assert rejected[0]["refused"] == "a Latin word changes only into one this picture's PaddleOCR reads"

@@ -5462,7 +5462,9 @@ class PackageStage:
         shutil.copy2(source, destination)
         text = "\n".join(line for b in group if (line := b.get_text().strip()))
         page = group[0].page_idx
-        title = f"Picture, page {page + 1}" if semantic_output_language == "en" else f"第 {page + 1} 頁圖片"
+        # A Word report is one page of blocks; the repair recorded the rendered page it read.
+        shown = (group[0].payload.get("agentic_source_pages") or [page])[0]
+        title = f"Picture, page {shown + 1}" if semantic_output_language == "en" else f"第 {shown + 1} 頁圖片"
         return AssetEntry(
             type="figure_asset", asset_id=asset_id, doc_id=document_ir.doc_id, run_id=document_ir.run_id,
             title=title, page_idx=page, asset_path=f"assets/figures/{destination.name}", block_id=origin,

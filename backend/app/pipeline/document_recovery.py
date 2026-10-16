@@ -39,7 +39,7 @@ from app.pipeline.review_sources import (
     needs_content_recovery,
 )
 
-RECOVERY_VERSION = "document-tools-v15-keep-read-lines-honest-attempts"
+RECOVERY_VERSION = "document-tools-v16-word-text-stays-repairs-never-drop"
 SKILLS = Path(__file__).with_name("recovery_skills")
 TOOL_DESCRIPTIONS = {
     "ocr_image": "Only for small disputed lettering: PaddleOCR on ONE smaller original-image 0..1000 region of one mapped image at scale 2/4, around a line bbox an earlier OCR returned. repair_image already reads the whole picture with PaddleOCR itself, so a whole-image OCR request is run as repair_image. Returns source-bound line IDs, coordinates and scores. No content is published.",
@@ -99,6 +99,15 @@ async def render_candidate(config, ir, folder, original, parse_cache):
     result = await ChunkStage(config).run(ir.doc_id, ir.run_id, ir, folder)
     if not result.success:
         raise ValueError("candidate chunking failed: " + str(result.error))
+
+
+def word_native_page(ir, blocks):
+    """Text the parser read from the Word file itself is on this page, or the report has no other pages.
+
+    A page of a native Word report that owns no block (the middle of a long table) is still Word's.
+    """
+    return (any((b.payload.get("word_source") or {}).get("source") == "native_docx" for b in blocks)
+            or not ir.has_physical_pages() and ir.source.ext.lstrip(".").lower() in {"doc", "docx"})
 
 
 def restore_recovery(controller, ir, run_path):
@@ -568,6 +577,13 @@ class RecoveryController:
             for action in ("read_source", "read_regions", "reparse_pdf"):
                 constraints[action].update(available=False,
                     requires="preserve typed image relationship evidence; use repair_image before whole-page replacement")
+        if word_native_page(self.inventory.ir, blocks):
+            # Rerun 2026-10-16: of 8 page reads and rebuilds on two Word reports none was right. They split
+            # the author's paragraphs at the rendered line wraps, dropped bullets, turned a caption's 銀獎
+            # into the 銅獎 a medal photo shows, and delivered a long table's rows a second time.
+            for action in ("read_source", "read_regions", "reparse_pdf", "rebuild_delivery"):
+                constraints[action].update(available=False,
+                    requires="Word text is the source itself; a page reading never replaces or rewrites it")
         constraints["rebuild_delivery"]["text_edit_block_ids"] = [b.block_id for b in blocks
             if b.type not in {BlockType.TABLE, BlockType.IMAGE}]
         constraints["repair_image"].update(max_region_revisions=1, max_revision_targets=4, max_candidate_audits=3, max_text_regions_per_response=16, format_fallback="split source image, at most 4 crops / 7 reads per reader", max_aggregate_text_regions=64, max_adjudication_candidates=128, max_evidence_text_chars=18000)

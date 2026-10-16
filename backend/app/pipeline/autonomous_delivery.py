@@ -25,6 +25,10 @@ _UNVERIFIED_PICTURE_REASONS = {"content_or_context_unverified", "source_not_mapp
 # A recovered picture's own words about it (image_recovery, image_refinement, a delivery patch's
 # relationship sentences); read lettering is 「圖片文字：」.
 _DESCRIPTION_LINE = re.compile(r"(?:圖片可確認內容|圖片內容|圖片關係)：")
+_PICTURE_MARKER = re.compile(r"〔原文(?:第 \d+ 頁)?圖片：")
+# A description saying lettering is there but could not be read, which an unverified picture must not lose.
+_ILLEGIBLE_NOTE = re.compile(r"無法(?:可靠|清楚|完整)?(?:辨識|辨認|判讀)|難以?辨(?:識|認)|看不清|字跡模糊|模糊不清|"
+                             r"illegible|unreadable", re.I)
 # How DeliveryExcerpts ties a delivered line to its source block without guessing.
 _EXACT_BINDINGS = {"source_marker", "source_text", "contained_source_text",
                    "ambiguous_source_occurrence", "ambiguous_contained_source_text"}
@@ -167,7 +171,8 @@ def build_automatic_delivery(ir, run_path, config, review_summary, ledger, upstr
     from app.pipeline.semantic.language import resolve_semantic_output_language
     language = resolve_semantic_output_language(config.package.semantic_output_language.value, ir)
     read_only = keep_only_read_text(ir, outputs, unverified_pictures, asset_records, language, renderer,
-                                    [b for b in ir.blocks if not rendered[b.block_id][1]])
+                                    [b for b in ir.blocks if not rendered[b.block_id][1]],
+                                    {bid: record.get("source_pages") or [] for bid, record in records.items()})
     non_informative = {b.block_id for b in ir.blocks if b.block_id in retained
                        and b.payload.get("agentic_information_status") == "non_informative"}
     rag_eligible = dependency_closed_subset(retained - non_informative, closure)
@@ -186,7 +191,9 @@ def build_automatic_delivery(ir, run_path, config, review_summary, ledger, upstr
         ir = ir.model_copy(update={"blocks": [
             b.model_copy(update={"payload": {**b.payload, "text": trimmed[b.block_id]}}) if b.block_id in trimmed else b
             for b in ir.blocks]})
-    nothing_read = {bid for bid, text in read_only.items() if not text}
+    # A marker for unread lettering is no reading: a picture with nothing else is not retrieved.
+    nothing_read = {bid for bid, text in read_only.items()
+                    if not [line for line in text.split("\n") if line.strip() and not _PICTURE_MARKER.match(line)]}
     # A dropped description is no context: the lines read off the same picture stay retrievable.
     closure = {bid: set(deps) - nothing_read for bid, deps in closure.items()}
     rag_eligible = dependency_closed_subset(rag_eligible - nothing_read, closure)
@@ -347,7 +354,11 @@ def build_automatic_delivery(ir, run_path, config, review_summary, ledger, upstr
     return summary
 
 
-def keep_only_read_text(ir, outputs, pictures, asset_records, language, renderer, delivered_blocks):
+def picture_title(language, page):
+    return f"Picture, page {page + 1}" if language == "en" else f"第 {page + 1} 頁圖片"
+
+
+def keep_only_read_text(ir, outputs, pictures, asset_records, language, renderer, delivered_blocks, source_pages=None):
     """An unverified picture keeps only the text read off it (the user's choice, 2026-10-08).
 
     The model's description, facts and keywords of a picture review could not confirm
@@ -365,15 +376,31 @@ def keep_only_read_text(ir, outputs, pictures, asset_records, language, renderer
 
     index = read_json(outputs / "documents_index.json", None)
     entries = {entry.get("document_id"): entry for entry in index} if isinstance(index, list) else {}
-    remaining, dropped = {}, set()
+    remaining, dropped, notes = {}, set(), {}
+    from app.pipeline.image_recovery import GAP_KINDS
+
+    def illegible(bid, block, delivered, kept):
+        """The marker for lettering the dropped description says could not be read (rerun 2026-10-16:
+        27 unverified pictures of two reports lost every sign that some of their text went unread)."""
+        origin = block.payload.get("agentic_image_origin") or bid
+        if origin in notes.values() or not any(_ILLEGIBLE_NOTE.search(line) for line in delivered.split("\n")
+                                                if line not in kept):
+            return []
+        pages = (source_pages or {}).get(bid) or block.payload.get("agentic_source_pages") or []
+        notes[bid] = origin
+        # A picture review could not place says so rather than borrow page 1.
+        return [f"〔原文第 {pages[0] + 1} 頁圖片：{GAP_KINDS['illegible']}〕" if pages
+                else f"〔原文圖片：{GAP_KINDS['illegible']}〕"]
+
     for bid in sorted(pictures):
         block, record = ir.get_block(bid), asset_records.get(bid)
         if block.type != BlockType.IMAGE:
             delivered = renderer._block_to_text(block)
             # A repair that kept the delivered text records which of its lines were read off the picture.
             read = block.payload.get("agentic_read_lines")
-            kept = "\n".join(line for line in delivered.split("\n")
-                             if (line in read if read is not None else not _DESCRIPTION_LINE.match(line)))
+            kept = [line for line in delivered.split("\n")
+                    if (line in read if read is not None else not _DESCRIPTION_LINE.match(line))]
+            kept = "\n".join(kept + illegible(bid, block, delivered, kept))
             if kept != delivered:
                 remaining[bid] = kept
             continue
@@ -385,9 +412,12 @@ def keep_only_read_text(ir, outputs, pictures, asset_records, language, renderer
         for line in PackageStage._strip_watermark_lines([str(v).strip() for v in record.get("all_text") or []]):
             if line and line not in lines:
                 lines.append(scrub_transcribed_privacy(line))
+        lines += illegible(bid, block, renderer._block_to_text(block), lines)
         text = "\n".join(([caption] if caption else []) + lines)
         remaining[bid] = text
-        title = caption or (f"Picture, page {block.page_idx + 1}" if language == "en" else f"第 {block.page_idx + 1} 頁圖片")
+        # A Word report is one page of blocks: its pictures are named by the rendered page review placed
+        # them on (57 documents of one report were all 「第 1 頁圖片」).
+        title = caption or picture_title(language, ((source_pages or {}).get(bid) or [block.page_idx])[0])
         asset_records[bid] = {**record, "title": title, "facts": [], "retrieval_text": text}
         if not text:
             path.unlink()
@@ -408,17 +438,24 @@ def keep_only_read_text(ir, outputs, pictures, asset_records, language, renderer
             path.unlink()
             dropped.add(record["asset_id"])
             continue
-        atomic_write_text(path, f"# {record.get('title') or record['asset_id']}\n\n{text}\n")
+        pages = (source_pages or {}).get(pieces[0]) or []
+        title = picture_title(language, pages[0]) if pages and record.get("image_type") == "recovered" else (
+            record.get("title") or record["asset_id"])
+        record["title"] = title
+        if record["asset_id"] in entries:
+            entries[record["asset_id"]]["title"] = title
+        atomic_write_text(path, f"# {title}\n\n{text}\n")
     if isinstance(index, list) and remaining:
         atomic_write_json(outputs / "documents_index.json",
                           [entry for entry in index if entry.get("document_id") not in dropped],
                           ensure_ascii=False, indent=2)
     if remaining and (outputs / "documents" / "main.md").is_file():
-        strip_picture_wording(outputs.parent, remaining, delivered_blocks, renderer)
+        strip_picture_wording(outputs.parent, remaining, delivered_blocks, renderer,
+                              {bid: remaining[bid].split("\n")[-1] for bid in notes})
     return remaining
 
 
-def strip_picture_wording(run_path, remaining, delivered_blocks, renderer):
+def strip_picture_wording(run_path, remaining, delivered_blocks, renderer, markers=None):
     """Drop from main.md the lines of reduced pictures that are not in their remaining text.
 
     main.md words a picture differently from its own document (no summary line, a
@@ -439,9 +476,18 @@ def strip_picture_wording(run_path, remaining, delivered_blocks, renderer):
             if p["file"] == name and p["binding"] in _EXACT_BINDINGS and p["block_ids"]
             and set(p["block_ids"]) <= keep.keys()
             and not any(p["normalized"] in keep[bid] for bid in p["block_ids"])}
-    if drop:
+    # A picture's marker goes after the last line main.md binds to it alone: a 「晴諾米」 several
+    # pictures print bound to all of them.
+    after = {}
+    for bid, marker in (markers or {}).items():
+        bound = [p["line"] for p in excerpts.paragraphs
+                 if p["file"] == name and p["binding"] in _EXACT_BINDINGS and p["block_ids"] == [bid]]
+        if bound:
+            after.setdefault(max(bound), []).append(marker)
+    if drop or after:
         lines = path.read_text(encoding="utf-8").split("\n")
-        atomic_write_text(path, "\n".join(line for number, line in enumerate(lines, 1) if number not in drop))
+        atomic_write_text(path, "\n".join(kept for number, line in enumerate(lines, 1)
+                                          for kept in ([] if number in drop else [line]) + after.get(number, [])))
     return len(drop)
 
 

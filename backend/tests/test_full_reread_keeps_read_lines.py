@@ -132,3 +132,29 @@ def test_a_split_pictures_relations_are_judged_across_its_pieces():
     findings = [_finding("k0", [("r0", "matched", "定位：晴諾米")]), _finding("r0", [])]
     assert relationship_group_issues(reading, findings, delivered, documents=None, chunks=None) == {
         "k0": "Split image relationship coverage is incomplete: r1 not checked."}
+
+
+def test_a_pruned_read_line_stays_delivered_beside_its_marker():
+    """2026-10-16: a verified subset turned two legible slide bullets into a marker over one disputed word."""
+    from app.pipeline.image_refinement import mark_region_omitted
+
+    blocks = [Block(block_id=f"t{i}", type=BlockType.TEXT, page_idx=0, bbox_norm=[0, 0, 1000, 1000], payload={
+        "agentic_image_origin": "b000412", "text": "圖片文字：" + line, "agentic_image_region": [0, i * 100, 1000, i * 100 + 90]})
+        for i, line in enumerate(["晴諾米的橘色取自晴川", "與晴川拼圖統一的品牌體驗"])]
+    for block in blocks:
+        mark_region_omitted(block, "b000412", 48)
+    merged = merge_picture_gaps(blocks, "b000412", 48)
+    assert merged[0].payload["text"].split("\n") == [
+        "〔原文第 49 頁圖片：未納入文字解讀的區域（保留來源圖） 2 處〕",
+        "圖片文字（有疑義，未核對）：晴諾米的橘色取自晴川",
+        "圖片文字（有疑義，未核對）：與晴川拼圖統一的品牌體驗"]
+
+
+def test_a_drafted_line_the_reread_reads_better_with_ocr_is_not_carried_beside_it():
+    """2026-10-16: 「由晴偃恩發佈」 was carried beside the re-read's 「由晴偃思發佈」 with no audit naming it."""
+    parts = _parts(texts=["晴諾米\n由晴偃思發佈 · 6月6日"])
+    _, carried, named, _ = keep_drafted_read_lines(parts, ["由晴偃恩發佈 · 6月6日"], [], ocr_lines=["由晴偃思發佈 · 6月6日"])
+    assert named == ["由晴偃恩發佈 · 6月6日"] and carried == []
+    # Without OCR for the re-read's version, the drafted line stays: two model readings, neither settled.
+    _, carried, named, _ = keep_drafted_read_lines(parts, ["由晴偃恩發佈 · 6月6日"], [], ocr_lines=["晴諾米"])
+    assert carried == ["由晴偃恩發佈 · 6月6日"] and named == []

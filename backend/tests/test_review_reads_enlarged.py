@@ -74,3 +74,15 @@ def test_a_simplified_relationship_quote_is_found_in_the_zh_tw_delivery():
         relation_id="r0", status="matched", delivered_quote="标志位于品牌名上方", direction="none",
         horizontal="unspecified", vertical="unspecified")])
     assert relationship_issue(reading, finding, "晴諾米的標誌位於品牌名上方。") == ""
+
+
+def test_a_table_read_across_its_rows_matches_a_delivery_down_its_columns():
+    """2026-10-16: a 4P/4C table delivered every cell but stayed unverified on line-by-line matching."""
+    delivered = "\n".join(["比較項目", "晴諾米 4P", "晴川 4C", "構成要素", "產品（Product）", "價格（Price）",
+                           "顧客（Customer）", "成本（Cost）"])
+    assert word_picture_issue(_reading("比較項目 晴諾米 4P 晴川 4C\n構成要素 產品（Product） 顧客（Customer）\n"
+                                       "價格（Price） 成本（Cost）"), delivered) == ""
+    # A cell that differs still counts as different wording.
+    assert word_picture_issue(_reading("構成要素 產品（Product） 顧客（Client）"), delivered)
+    # Latin words stay one phrase: their words scattered over the delivery do not make the sentence.
+    assert word_picture_issue(_reading("Customer Product Price"), "Price\nProduct\nCustomer")

@@ -36,7 +36,7 @@ OCR_VOTE_POLICY = (
     "the author's typos and variant spellings: never 'correct' it, and do not fail a block for a spelling OCR "
     "confirms. verdict=delivery settles that line as delivered, even where your own reading of it differs. "
     "OCR is evidence, not certification: still check every other part of the picture against the pixels.")
-REVIEW_VERSION = "document-review-20261015.1-terse-findings-no-layout-relations"
+REVIEW_VERSION = "document-review-20261016.1-pictures-on-white-scoped-excerpts"
 SCHEDULER_VERSION = "tool-scheduler-20260930.1-complete-tool-budget"
 
 

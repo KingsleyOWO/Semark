@@ -21,10 +21,14 @@ def revision_budget(owner, *, propose=True):
 
 def mark_region_omitted(block, origin, page):
     """State an omission without asserting the source pixels are illegible."""
-    from app.pipeline.image_recovery import gap_marker, picture_gap
+    from app.pipeline.image_recovery import READ_LINE_PREFIX, gap_marker, picture_gap
 
     regions = [{"reason": "region_not_interpreted",
                 "image_bbox": block.payload.get("agentic_image_region", [0, 0, 1000, 1000])}]
+    # A line read off the picture that its audit disputes stays delivered, beside the marker: rerun
+    # 2026-10-16, two legible slide bullets vanished over one disputed word each.
+    if (text := block.payload.get("text") or "").startswith(READ_LINE_PREFIX) and not block.payload.get("agentic_gap"):
+        regions[0]["reading"] = text[len(READ_LINE_PREFIX):]
     block.payload.update(text=gap_marker(page, regions),
                          agentic_information_status="uncertain", agentic_region_kind="uncertain")
     block.payload["agentic_gap"] = picture_gap(origin, regions)

@@ -159,6 +159,9 @@ def _closeness(phrase, lines):
 _UNREAD = re.compile(r"\[\?\]|\[[^\[\]\n]{0,24}(?:手寫|簽名|簽章|模糊|無法|不清|illegible|unreadable|handwrit|signature)"
                      r"[^\[\]\n]{0,24}\]|〔無法可靠辨識|模糊|難以?辨|無法(?:可靠|清楚|完整)?(?:辨識|辨認|判讀)|看不清|"
                      r"illegible|unreadable", re.I)
+# Wording that says a reading is uncertain; removing it states the reading as fact.
+_HEDGE = re.compile(r"或(?:相近|類似|近似)|相近字樣|疑似|似乎|看似|推測|可能(?:是|為)|不確定|無法確認|字樣不清|\[\?\]|"
+                    r"\b(?:possibly|probably|likely|uncertain|unclear)\b", re.I)
 # Quoted wording in a relation's statement: 「…」, 『…』, “…” or "…".
 _RELATION_QUOTE = re.compile(r"「([^「」\n]+)」|『([^『』\n]+)』|“([^“”\n]+)”|\"([^\"\n]+)\"")
 
@@ -242,8 +245,19 @@ def apply_edits(delivered, edits, *, transcription, ocr_lines, reading, document
             # The blind reading names a chart's values axis by axis; one of them is no evidence for another
             # axis (a radar chart's 好感度 3.5 was edited from 1.67 to 1.5, another axis's value).
             return text, "a number changes only into one this picture's PaddleOCR reads"
-        if any(_folded(line) in protected for line in _lines(text, start, start + len(edit.quote))):
-            if edit.op == "delete":
+        if _HEDGE.search(edit.quote) and not _HEDGE.search(replacement):
+            # 「NORIA」（或相近字樣） became 「NORIA」: the screen shows "?ORIA", the same logo another
+            # photo reads SORIA. What the hedge held back must be what this picture's PaddleOCR reads.
+            line = "\n".join(_lines(changed, start, start + len(replacement)))
+            words = [next(g for g in m.groups() if g) for m in _RELATION_QUOTE.finditer(line)] or [_new_wording(edit.quote, replacement) or line]
+            if not (ocr and all(_reads(word, ocr) for word in words if normalized_text(word))):
+                return text, "a hedge is removed only when this picture's PaddleOCR reads what it held back"
+        touched = _lines(text, start, start + len(edit.quote))
+        if any(_folded(line) in protected for line in touched):
+            # Nor dropped by a replacement spanning it: 「晴諾米\nBright Forever\n晴川銀行」 became
+            # 「晴諾米\n晴川銀行」 on a remark the badge was no brand; the badge reads "Bright Together".
+            if edit.op == "delete" or (sum(bool(normalized_text(line)) for line in _lines(changed, start, start + len(replacement)))
+                                       < sum(bool(normalized_text(line)) for line in touched)):
                 return text, "a transcription line is never deleted"
             whole = ocr and all(appears_in(line, ocr) for line in _lines(changed, start, start + len(replacement))
                                 if normalized_text(line))
@@ -260,6 +274,12 @@ def apply_edits(delivered, edits, *, transcription, ocr_lines, reading, document
                 return text, "a transcription line changes only into the line PaddleOCR reads"
         elif normalized_text(wording := _new_wording(edit.quote, replacement)) and not _reads(wording, evidence):
             return text, "new wording is in neither PaddleOCR nor the independent reading"
+        elif edit.op == "replace" and (latin := [word for word in _changed_words(changed, start, edit.quote, replacement)
+                                                 if re.search(r"[A-Za-z]", word)]) and not (ocr and all(
+                                                     _reads(word, ocr) for word in latin)):
+            # As in a transcription line, a respelt Latin word needs this picture's OCR: the blind
+            # reading alone turned a label's 「Lumora」, which OCR read 「Lumara」, into 「Lumosa」.
+            return text, "a Latin word changes only into one this picture's PaddleOCR reads"
         elif ocr and _breaks_ocr_wording(text, changed, start, edit.quote, replacement, ocr):
             # The second reading can be the one that is wrong; OCR's wording is never edited away.
             return text, "would change description wording PaddleOCR reads"
@@ -409,6 +429,10 @@ def review_corrections(remarks, delivered, ocr_lines):
     ocr = "\n".join(ocr_lines or [])
     found = {}
     for pair in spelled_out_corrections(remarks) if ocr else []:
+        # One quote inside the other is wording added or dropped, not a misreading: OCR always reads the
+        # shorter, so 「社群策略 建議」, which the picture shows, became 「建議」 (rerun 2026-10-16).
+        if _folded(pair[0]) in _folded(pair[1]) or _folded(pair[1]) in _folded(pair[0]):
+            continue
         for wrong, right in (pair, pair[::-1]):
             occurrences = delivered.count(wrong)
             # A span written several times changes everywhere under the targeted edits' rule: a

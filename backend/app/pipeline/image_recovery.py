@@ -117,11 +117,17 @@ def keep_drafted_read_lines(parts, drafted, issues, ocr_lines=()):
               if not appears_in(next(g for g in m.groups() if g is not None), seen)}
     wrong.discard("")
     disputed = {normalized_text(side) for pair in spelled_out_corrections(issues) for side in pair} - {""}
+    from app.pipeline.image_edits import _misreading
+    reread = [line for item in reread_lines(parts) for line in item.split("\n") if normalized_text(line)]
+    ocr = "\n".join(ocr_lines or [])
     carried, named, contested = [], [], []
     for line in drafted:
         if not normalized_text(line) or appears_in(line, read):
             continue
-        if any(q in normalized_text(line) for q in wrong):
+        # The re-read read the same line better when OCR reads its version and not the drafted one:
+        # 「由晴偃恩發佈」 was carried beside the re-read's 「由晴偃思發佈」 (rerun 2026-10-16).
+        if any(q in normalized_text(line) for q in wrong) or ocr and not appears_in(line, ocr) and any(
+                _misreading(line, other) and appears_in(other, ocr) for other in reread):
             named.append(line)
             continue
         carried.append(line)
@@ -169,8 +175,9 @@ def delivery_patch_statements(state, page, block_id):
     if "reading_disagreement" in kinds:
         verdicts = record.get("line_adjudications", {}).get(block_id) or []
         omitted = [v for v in verdicts if v["verdict"] == "reading" and not v["delivered_line"]]
-        if not omitted or any(v["verdict"] == "unresolved" or v["verdict"] == "reading" and v["delivered_line"]
-                              for v in verdicts):
+        # An omitted line OCR cannot settle is left out, not a reason to leave out those it reads: a slide
+        # grid's tiny print held back every line of its picture (rerun 2026-10-16).
+        if not omitted or any(v["delivered_line"] and v["verdict"] != "delivery" for v in verdicts):
             return []
         statements += ["圖片文字：" + to_taiwan_traditional(v["reading_line"]) for v in omitted]
     return statements
@@ -312,8 +319,12 @@ async def build_targeted_edit_candidate(runner, ir, block, page, region, source,
     edit_evidence = runner.evidence.add(provider="targeted_image_edit", kind="image_edit_record", page=page,
                                         block_id=block.block_id, source=source, content=record)
     from app.pipeline.content_coverage import normalized_text as _normalized
-    read = transcription + [line for line in text.split("\n") if lines and _normalized(line)
-                            and appears_in(line, "\n".join(lines))]
+    from app.pipeline.image_edits import apply_corrections
+    # A drafted line an accepted edit corrected is still a line read off the picture: rerun 2026-10-16,
+    # an unverified radar chart delivered neither 「品牌統御力」 nor 3.33 after both were fixed.
+    replaced = {e["quote"]: e["replacement"] for e in applied if e["op"] == "replace"}
+    read = transcription + [apply_corrections(line, replaced) for line in transcription] + [
+        line for line in text.split("\n") if lines and _normalized(line) and appears_in(line, "\n".join(lines))]
     wording = [e["replacement"] for e in applied if e["op"] == "replace"] + [s.split("：", 1)[-1] for s in statements]
     return kept_text_candidate(runner, ir, block, page, region, source, text, statements, folder, "targeted_edit",
                                evidence_ids=[edit_evidence], read_lines=read, new_wording=wording)
@@ -397,6 +408,8 @@ def picture_identity(block):
 
 
 PENDING_GAP_REASONS = {"image_evidence_budget_deferred", "image_evidence_response_contract_failed"}
+READ_LINE_PREFIX = "圖片文字："
+DISPUTED_LINE_PREFIX = "圖片文字（有疑義，未核對）："
 GAP_KINDS = {"pending": "尚未完成證據核對的文字或必要內容", "illegible": "無法可靠辨識的文字或必要內容",
              "omitted": "未納入文字解讀的區域（保留來源圖）"}
 
@@ -415,8 +428,10 @@ def gap_marker(page, regions):
     from collections import Counter
 
     counts = Counter(_gap_kind(region["reason"]) for region in regions)
-    return (f"〔原文第 {page + 1} 頁圖片："
-            + "、".join(f"{GAP_KINDS[kind]} {counts[kind]} 處" for kind in GAP_KINDS if counts[kind]) + "〕")
+    marker = (f"〔原文第 {page + 1} 頁圖片："
+              + "、".join(f"{GAP_KINDS[kind]} {counts[kind]} 處" for kind in GAP_KINDS if counts[kind]) + "〕")
+    readings = list(dict.fromkeys(region["reading"] for region in regions if region.get("reading")))
+    return "\n".join([marker, *(DISPUTED_LINE_PREFIX + reading for reading in readings)])
 
 
 def picture_gap(origin, regions):

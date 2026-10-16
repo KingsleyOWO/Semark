@@ -880,3 +880,16 @@ def test_a_picture_document_is_one_boundary_in_the_order_check():
     assert boundaries[1][1]["paragraph"] == 0 and boundaries[1][1]["last_paragraph"] == 4
     # Lines of the main document keep their own boundaries: rows stay in sequence.
     assert texts[3:5] == ["Row 1 … Row 1", "Row 2 … Row 2"]
+
+
+@pytest.mark.asyncio
+async def test_page_tools_never_replace_word_text(tmp_path):
+    """Rerun 2026-10-16: none of 8 page reads and rebuilds on two Word reports was right."""
+    ir, _, runner = await setup(tmp_path)
+    block = ir.blocks[0]
+    problem = {"page_idx": 0}
+    assert runner.tool_constraints(problem, [block])["read_source"]["available"]
+    block.payload["word_source"] = {"source": "native_docx", "block_index": 3}
+    constraints = runner.tool_constraints(problem, [block])
+    assert not any(constraints[a]["available"] for a in ("read_source", "read_regions", "reparse_pdf", "rebuild_delivery"))
+    assert constraints["repair_image"]["available"]

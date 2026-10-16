@@ -2,6 +2,7 @@
 import asyncio
 import hashlib
 import json
+import re
 import time
 from pathlib import Path
 from typing import Literal
@@ -36,7 +37,7 @@ OCR_VOTE_POLICY = (
     "the author's typos and variant spellings: never 'correct' it, and do not fail a block for a spelling OCR "
     "confirms. verdict=delivery settles that line as delivered, even where your own reading of it differs. "
     "OCR is evidence, not certification: still check every other part of the picture against the pixels.")
-REVIEW_VERSION = "document-review-20261016.1-pictures-on-white-scoped-excerpts"
+REVIEW_VERSION = "document-review-20261016.2-table-cells-match"
 SCHEDULER_VERSION = "tool-scheduler-20260930.1-complete-tool-budget"
 
 
@@ -201,17 +202,34 @@ def target_block_reviews(review, required_ids, context_ids=()):
     return review.model_copy(update={"blocks": [b for b in review.blocks if b.block_id in required]})
 
 
+# A space beside a non-Latin character separates table cells; Latin words stay one phrase.
+_CELL_BREAK = re.compile(r"(?<=[^\x00-\x7f])\s+|\s+(?=[^\x00-\x7f])")
+
+
+def _line_delivered(line, delivered):
+    """A line as written, or each of its cells: a table read across its rows is delivered down its columns.
+
+    2026-10-16: a 4P/4C table delivered every cell but stayed unverified because the review read
+    「構成要素 產品（Product） 顧客（Customer）」 as one line; so did three other tables.
+    """
+    from app.pipeline.content_coverage import normalized_text
+    from app.pipeline.image_source_review import appears_in
+    if appears_in(line, delivered):
+        return True
+    cells = [cell for cell in _CELL_BREAK.split(line) if normalized_text(cell)]
+    return len(cells) > 1 and all(appears_in(cell, delivered) for cell in cells)
+
+
 def word_picture_issue(reading, delivered):
     """Blind source reading can reject a caption, never certify it on its own."""
     from app.pipeline.content_coverage import normalized_text
-    from app.pipeline.image_source_review import appears_in
     if not reading.complete:
         return "Independent Word image reading is incomplete: " + reading.observation
     if not reading.text.strip():
         return "Independent Word image reading supplied no content; verification is unavailable."
     if reading.kind == "transcription":
         lines = [line for line in reading.text.splitlines() if normalized_text(line)]
-        if not lines or not all(appears_in(line, delivered) for line in lines):
+        if not lines or not all(_line_delivered(line, delivered) for line in lines):
             return "Independent original image wording is absent or different in delivery: " + reading.text[:400]
     return ""
 
@@ -492,7 +510,6 @@ class DocumentReview(AgenticRepair):
         """
         from app.adapters import ocr
         from app.pipeline.content_coverage import normalized_text
-        from app.pipeline.image_source_review import appears_in
         from app.pipeline.line_adjudication import adjudicate
 
         if not ocr.ocr_python():
@@ -505,7 +522,7 @@ class DocumentReview(AgenticRepair):
                 continue
             delivered = self._delivery_cache[0]._block_to_text(block)
             disputed = [line for line in reading.text.splitlines()
-                        if normalized_text(line) and not appears_in(line, delivered)]
+                        if normalized_text(line) and not _line_delivered(line, delivered)]
             if disputed and (lines := await self._ocr_lines(source, inventory)):
                 votes[block.block_id] = adjudicate(disputed, delivered, lines)
         if votes:
@@ -520,11 +537,10 @@ class DocumentReview(AgenticRepair):
         """
         from app.adapters import ocr
         from app.pipeline.content_coverage import normalized_text
-        from app.pipeline.image_source_review import appears_in
         from app.pipeline.line_adjudication import adjudicate
 
         source = getattr(inventory, "word_images", {}).get(block_id)
-        disputed = [line for line in reading.text.splitlines() if normalized_text(line) and not appears_in(line, delivered)]
+        disputed = [line for line in reading.text.splitlines() if normalized_text(line) and not _line_delivered(line, delivered)]
         if source is None or not disputed or not ocr.ocr_python():
             return False
         lines = await self._ocr_lines(source, inventory)

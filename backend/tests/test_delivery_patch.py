@@ -47,6 +47,11 @@ def test_only_a_picture_failing_on_omitted_relationships_or_lines_gets_a_patch()
     misread = {**omitted, "line_adjudications": {"picture": [
         {"reading_line": "PANTONE 1035C", "delivered_line": "pantone1222c", "verdict": "reading"}]}}
     assert delivery_patch_statements({"pages": {"0": misread}}, 0, "picture") == []
+    # An omitted line OCR cannot settle stays out without holding back one it reads (2026-10-16).
+    partly = {**omitted, "line_adjudications": {"picture": [
+        *omitted["line_adjudications"]["picture"],
+        {"reading_line": "晴諾米細字說明", "delivered_line": None, "verdict": "unresolved"}]}}
+    assert delivery_patch_statements({"pages": {"0": partly}}, 0, "picture") == ["圖片文字：值得信任的"]
 
 
 class PatchModel(RecoveryModel):

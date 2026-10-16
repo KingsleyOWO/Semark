@@ -72,6 +72,8 @@ def _parse_word_document(input_path: Path, output_dir: Path) -> WordParseResult:
 
     content_items: list[dict[str, Any]] = []
     markdown_lines: list[str] = []
+    notes = _note_texts(document)
+    note_numbers: dict[tuple[str, str], int] = {}
     paragraph_count = 0
     table_count = 0
     image_count = 0
@@ -95,6 +97,27 @@ def _parse_word_document(input_path: Path, output_dir: Path) -> WordParseResult:
                          **location},
         })
         markdown_lines.extend([f"![{caption}]({image.relative_path})", ""])
+
+    def append_notes(element, block_idx):
+        """The footnotes and endnotes the block cites, after it, as Word numbers them.
+
+        python-docx reads neither: one report's seven source links reached no delivery
+        (spot check 2026-10-16), and only page re-reads, which mangled the paragraphs
+        around them, ever found them.
+        """
+        nonlocal paragraph_count
+        for kind, note_id in _note_refs(element):
+            text = notes.get((kind, note_id))
+            if not text or (kind, note_id) in note_numbers:
+                continue
+            note_numbers[(kind, note_id)] = sum(k == kind for k, _ in note_numbers) + 1
+            label = ("註" if kind == "footnote" else "尾註") + str(note_numbers[(kind, note_id)])
+            content_items.append({
+                "type": "text", "text": f"{label}：{text}", "text_level": 0, "page_idx": 0, "bbox": [0, 0, 0, 0],
+                "metadata": {"source": "native_docx", "block_index": block_idx, kind: note_id},
+            })
+            markdown_lines.extend([f"{label}：{text}", ""])
+            paragraph_count += 1
 
     for block_idx, block in enumerate(_iter_block_items(document)):
         if isinstance(block, Paragraph):
@@ -132,6 +155,7 @@ def _parse_word_document(input_path: Path, output_dir: Path) -> WordParseResult:
 
             for rel_id in _paragraph_image_rel_ids(block):
                 append_image(rel_id, block_idx)
+            append_notes(block._p, block_idx)
             continue
 
 
@@ -172,6 +196,7 @@ def _parse_word_document(input_path: Path, output_dir: Path) -> WordParseResult:
                 append_image(rel_id, block_idx, label, parent_content_index=table_content_index,
                              table_caption=caption, cell_path=cell_path, row_label=row_label,
                              caption_is_context=True)
+            append_notes(block._tbl, block_idx)
 
     if not content_items:
         return WordParseResult(
@@ -203,6 +228,30 @@ def _parse_word_document(input_path: Path, output_dir: Path) -> WordParseResult:
             "image_count": image_count,
         },
     )
+
+
+def _note_texts(document: DocumentType) -> dict[tuple[str, str], str]:
+    """(footnote|endnote, id) -> its text; separators and continuation notices are no notes."""
+    from lxml import etree
+
+    texts = {}
+    for part in document.part.package.iter_parts():
+        kind = {"/word/footnotes.xml": "footnote", "/word/endnotes.xml": "endnote"}.get(str(part.partname))
+        if not kind:
+            continue
+        root = etree.fromstring(part.blob)
+        for note in root.iter(qn(f"w:{kind}")):
+            if note.get(qn("w:type")):
+                continue
+            paragraphs = ["".join(t.text or "" for t in p.iter(qn("w:t"))).strip() for p in note.iter(qn("w:p"))]
+            if text := " ".join(p for p in paragraphs if p):
+                texts[(kind, note.get(qn("w:id")))] = text
+    return texts
+
+
+def _note_refs(element) -> list[tuple[str, str]]:
+    return [("footnote" if ref.tag == qn("w:footnoteReference") else "endnote", ref.get(qn("w:id")))
+            for ref in element.iter(qn("w:footnoteReference"), qn("w:endnoteReference"))]
 
 
 def _unwrap_content_controls(document: DocumentType) -> int:

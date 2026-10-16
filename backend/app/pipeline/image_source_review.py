@@ -210,7 +210,7 @@ def quote_found(quote, text):
     return False
 
 
-def relationship_issue(reading, finding, delivered, *, documents=None, chunks=None):
+def relationship_issue(reading, finding, delivered, *, documents=None, chunks=None, owners=None):
     """Cannot certify absent coverage, unsupported quotations or opposite relations.
 
     A matched status alone is insufficient. Direction fields describe delivery;
@@ -234,7 +234,7 @@ def relationship_issue(reading, finding, delivered, *, documents=None, chunks=No
             return f'Image relationship {check.relation_id} has no grounded quote in its own delivered content.'
         for label, excerpts in [('documents', documents), ('chunks', chunks)]:
             owned = [e.get('text', e.get('content', '')) for e in excerpts or []
-                     if finding.block_id in e.get('block_ids', [e.get('block_id')])]
+                     if set(owners or [finding.block_id]) & set(e.get('block_ids', [e.get('block_id')]))]
             if excerpts is not None and not quote_found(quote, '\n'.join(owned)):
                 return f'Image relationship {check.relation_id} has no owned quote in actual {label}.'
         if relation.kind == 'arrow' and check.direction != relation.direction:
@@ -273,27 +273,39 @@ def inherited_image_readings(blocks, root):
 
 
 def relationship_group_issues(reading, findings, delivered, *, documents, chunks):
-    """A split image must account for each relation exactly once across its children.
+    """A split image must account for each of its relations, judged across all its pieces.
 
-    Each check's quotation still belongs to the child claiming it. Renaming the
-    old image to text blocks cannot make a missing/opposite relationship pass.
+    Renaming the old image to text blocks cannot make a missing/opposite relationship
+    pass: every relation needs a matched check whose quotation the picture delivers. A
+    relation checked on two pieces, or quoted from a sibling piece (an added relation
+    sits in its own statement block), is the same picture's: requiring each check on
+    exactly the piece holding its quote failed 23 repaired pieces whose relations were
+    all delivered (spot check 2026-10-16). A relation no piece checks is reported once.
     """
     expected = {r.relation_id: r for r in reading.relationships}
-    checks = [(finding, check) for finding in findings for check in finding.image_relationship_checks
-              if check.relation_id in expected]
-    ids = [check.relation_id for _, check in checks]
-    if not reading.relationships_complete or len(ids) != len(set(ids)) or set(ids) != set(expected):
+    if not reading.relationships_complete or not findings:
         detail = 'Split image relationship coverage is incomplete, duplicated or has unknown IDs.'
         return {finding.block_id: detail for finding in findings}
+    claims = {}
+    for finding in findings:
+        for check in finding.image_relationship_checks:
+            if check.relation_id in expected:
+                claims.setdefault(check.relation_id, []).append((finding, check))
+    owners = [finding.block_id for finding in findings]
+    picture = '\n'.join(delivered.get(bid, '') for bid in owners)
     issues = {}
-    for finding, check in checks:
-        subset = reading.model_copy(update={'relationships': [expected[check.relation_id]]})
-        checked = finding.model_copy(update={'image_relationship_checks': [check]})
-        issue = relationship_issue(subset, checked, delivered.get(finding.block_id, ''),
-                                   documents=documents, chunks=chunks)
-        if issue:
-            issues[finding.block_id] = issue
-    return issues
+    if missing := sorted(set(expected) - set(claims)):
+        issues[findings[0].block_id] = ['Split image relationship coverage is incomplete: '
+                                        + ', '.join(missing) + ' not checked.']
+    for relation_id, claimed in claims.items():
+        subset = reading.model_copy(update={'relationships': [expected[relation_id]]})
+        results = [relationship_issue(subset, finding.model_copy(update={'image_relationship_checks': [check]}),
+                                      picture, documents=documents, chunks=chunks, owners=owners)
+                   for finding, check in claimed]
+        if all(results):
+            issues.setdefault(claimed[0][0].block_id, []).append(results[0])
+    # A contradiction is never hidden behind a coverage remark on the same piece.
+    return {bid: ' '.join(sorted(found, key=lambda issue: issue.startswith('Split image'))) for bid, found in issues.items()}
 
 
 def apply_group_relationship_review(review, readings, scopes, delivered, *, documents, chunks):

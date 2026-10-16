@@ -354,6 +354,9 @@ class AssetEntry:
     # Low-value icon/blur (叉號/盾牌/下載箭頭…): kept in the index for
     # provenance, but excluded from rag.md weaving and chunk bodies.
     decorative: bool = False
+    # A repaired picture: the blocks that replaced it in the IR, whose delivered text
+    # its document carries as delivered (block_id stays the original picture's).
+    recovered_block_ids: list[str] = field(default_factory=list)
     # Quality flag
     needs_review: bool = False
 
@@ -391,6 +394,8 @@ class AssetEntry:
             result["image_type"] = self.image_type
         if self.decorative:
             result["decorative"] = True
+        if self.recovered_block_ids:
+            result["recovered_block_ids"] = self.recovered_block_ids
         return result
 
 
@@ -4868,6 +4873,8 @@ class PackageStage:
         del source_filename
         language = "en" if semantic_output_language == "en" else "zh-TW"
         title = self._clean_export_title(asset.title.strip() if asset.title else asset.asset_id)
+        if asset.recovered_block_ids:
+            return f"# {title}\n\n{asset.structured_content}\n"
         visual_output = coerce_visual_vlm_output(
             {
                 "image_type": asset.image_type or "figure",
@@ -5112,10 +5119,19 @@ class PackageStage:
             }
 
         # First, process block-level assets
+        recovered_origins: set[str] = set()
         for block in document_ir.blocks:
             enrichment = enrichments.get(block.block_id, {})
             enrichment_output = enrichment.get("output", {})
             enrichment_kind = enrichment.get("kind", "")
+            origin = block.payload.get("agentic_image_origin") or block.payload.get("agentic_replaced_picture")
+            if origin and block.type != BlockType.IMAGE and origin not in recovered_origins:
+                recovered_origins.add(origin)
+                recovered = self._recovered_figure_asset(document_ir, origin, figures_dir, parse_cache_path,
+                                                         semantic_output_language)
+                if recovered is not None:
+                    assets.append(recovered)
+                    asset_map[origin] = recovered
 
             if block.type == BlockType.IMAGE:
                 # Export figure
@@ -5408,6 +5424,52 @@ class PackageStage:
             form_idx += 1
 
         return assets, asset_map
+
+    def _recovered_figure_asset(
+        self,
+        document_ir: DocumentIR,
+        origin: str,
+        figures_dir: Path,
+        parse_cache_path: Path | None,
+        semantic_output_language: str = "zh-TW",
+    ) -> AssetEntry | None:
+        """A repaired picture keeps its own document and file, as before its repair.
+
+        Its blocks became text, and only image blocks exported figures: 16 repaired
+        pictures of one report lost both (spot check 2026-10-16). A page re-read names the
+        picture it replaced, matched by its Word bytes, instead of an origin. The document
+        carries the text the repair delivered; the file is found by the picture's path, or by
+        the Word part's hash for an IR written before the path was recorded.
+        """
+        group = [b for b in document_ir.blocks
+                 if origin in (b.payload.get("agentic_image_origin"), b.payload.get("agentic_replaced_picture"))]
+        if not group or parse_cache_path is None:
+            return None
+        source = None
+        if img_path := next((b.payload["agentic_image_path"] for b in group if b.payload.get("agentic_image_path")), ""):
+            source = self._find_image(img_path, parse_cache_path)
+        sha = next((b.payload.get("image_source_context", {}).get("image_sha256") for b in group
+                    if b.payload.get("image_source_context", {}).get("image_sha256")), None)
+        if source is None and sha:
+            source = next((path for path in sorted(parse_cache_path.rglob("*"))
+                           if path.is_file() and path.suffix.lower() in {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif",
+                                                                          ".tiff", ".webp"}
+                           and hashlib.sha256(path.read_bytes()).hexdigest() == sha), None)
+        if source is None or not source.exists():
+            return None
+        asset_id = "fig-" + hashlib.sha256(origin.encode()).hexdigest()[:16]
+        destination = figures_dir / f"{asset_id}{source.suffix}"
+        shutil.copy2(source, destination)
+        text = "\n".join(line for b in group if (line := b.get_text().strip()))
+        page = group[0].page_idx
+        title = f"Picture, page {page + 1}" if semantic_output_language == "en" else f"第 {page + 1} 頁圖片"
+        return AssetEntry(
+            type="figure_asset", asset_id=asset_id, doc_id=document_ir.doc_id, run_id=document_ir.run_id,
+            title=title, page_idx=page, asset_path=f"assets/figures/{destination.name}", block_id=origin,
+            retrieval_text=text, structured_content=text,
+            all_text=[b.get_text().strip() for b in group
+                      if b.payload.get("agentic_content_kind") == "transcription" and not b.payload.get("agentic_gap")],
+            image_type="recovered", recovered_block_ids=[b.block_id for b in group])
 
     def _find_image(self, img_path: str, parse_cache_path: Path) -> Path | None:
         """Find image file in parse cache."""

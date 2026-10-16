@@ -30,8 +30,16 @@ _EXACT_BINDINGS = {"source_marker", "source_text", "contained_source_text",
                    "ambiguous_source_occurrence", "ambiguous_contained_source_text"}
 
 
+def picture_origin(block):
+    """The picture a block delivers in place of: a repair's origin, or the picture a page re-read
+    replaced (matched by Word bytes); None for anything else."""
+    return block.payload.get("agentic_image_origin") or block.payload.get("agentic_replaced_picture")
+
+
 def is_picture_content(block):
-    return block.type == BlockType.IMAGE or bool(block.payload.get("agentic_image_origin"))
+    """A picture, a repaired picture's pieces, or a page re-read's reading of a picture it replaced,
+    which the picture policy covers alike."""
+    return block.type == BlockType.IMAGE or bool(picture_origin(block))
 
 
 class DeliveredBlockEvidence:
@@ -128,7 +136,7 @@ def build_automatic_delivery(ir, run_path, config, review_summary, ledger, upstr
         if (not good and delivered and valid and source_pages and is_picture_content(block)
                 and not block.payload.get("agentic_gap")):
             # A picture is judged on its own finding, not on its page (decided 2026-10-13).
-            names = {bid, block.payload.get("agentic_image_origin") or bid}
+            names = {bid, picture_origin(block) or bid}
             good = all(picture_content_confirmed(pages.get(index, {}), bid, names, text) for index in source_pages)
         good = good and delivered
         if good:
@@ -198,6 +206,12 @@ def build_automatic_delivery(ir, run_path, config, review_summary, ledger, upstr
     labels = IMAGE_LABELS[language]
     export_reasons.update({bid: "rechunk_content_not_verified" for bid in absent})
     export_reasons.update({bid: "unverified_picture_without_read_text" for bid in nothing_read})
+    # The pieces a repaired picture was split into are one picture: each stays retrievable only
+    # with all of them (closure), but a chunk need not carry its siblings, or a picture of three
+    # 360-token pieces depending on one another never fit a chunk (spot check 2026-10-16).
+    origins = {b.block_id: picture_origin(b) for b in ir.blocks}
+    chunk_closure = {bid: {dep for dep in deps if not (origins.get(bid) and origins.get(dep) == origins[bid])}
+                     for bid, deps in closure.items()}
     if config.package.generate_chunks:
         for group in groups:
             # Supply only verified heading/dependency blocks; never borrow unreviewed metadata.
@@ -209,7 +223,7 @@ def build_automatic_delivery(ir, run_path, config, review_summary, ledger, upstr
             def closed_chunk(ids, heading_path):
                 included = set(ids)
                 while True:
-                    expanded = included | set().union(*(closure[bid] for bid in included))
+                    expanded = included | set().union(*(chunk_closure[bid] for bid in included))
                     if expanded == included:
                         break
                     included = expanded
@@ -257,16 +271,24 @@ def build_automatic_delivery(ir, run_path, config, review_summary, ledger, upstr
     atomic_write_text(outputs / "rag_verified.md", "\n\n".join(c.content for c in chunks))
 
     gaps, reading_copy = [], []
+    # A repaired picture is several blocks: one label per run of its pieces with the same status,
+    # and one link to its source image (one picture carried 19 labels and 11 links).
+    labelled, linked = None, set()
     for block in ir.blocks:
         bid = block.block_id
         text, excluded = rendered[bid]
         if excluded:
             continue
+        origin = picture_origin(block)
+        status = "verified" if bid in eligible else "unverified" if bid in unverified_pictures else None
+        label = labels[status] if status and bid in pictures and (not origin or labelled != (origin, status)) else None
+        labelled = (origin, status) if origin and status else None
         if bid in eligible:
-            reading_copy.append(labels["verified"] + "\n" + text if bid in pictures else text)
+            reading_copy.append(label + "\n" + text if label else text)
         elif bid in unverified_pictures:
             text = read_only.get(bid, text)
-            reading_copy.append(labels["unverified"] + ("\n" + text if text else ""))
+            if shown := "\n".join(part for part in (label, text) if part):
+                reading_copy.append(shown)
             gaps.append({"block_id": bid, "source_pages": records.get(bid, {}).get("source_pages", []),
                          "reason": reasons.get(bid, "not_verified"), "marker": labels["unverified"],
                          "included": True, "evidence": [], "detail": {}})
@@ -280,9 +302,10 @@ def build_automatic_delivery(ir, run_path, config, review_summary, ledger, upstr
             reading_copy.append(marker)
             evidence = [dict(i, url=f"/api/runs/{quote(ir.run_id, safe='')}/processing-evidence?path={quote(i['path'], safe='')}")
                         for index in indices for i in pages.get(index, {}).get("images", [])]
-            if source_image := block.payload.get("agentic_source_image"):
+            if (source_image := block.payload.get("agentic_source_image")) and (origin or bid) not in linked:
                 matching = next((i for i in evidence if i["path"] == source_image), None)
                 if matching:
+                    linked.add(origin or bid)
                     reading_copy.append(f"[來源原圖]({matching['url']})")
             gaps.append({"block_id": bid, "source_pages": indices, "reason": reasons.get(bid, "not_verified"),
                          "marker": marker, "evidence": evidence,
@@ -373,6 +396,19 @@ def keep_only_read_text(ir, outputs, pictures, asset_records, language, renderer
         atomic_write_text(path, f"# {title}\n\n" + "\n".join(lines or [caption]) + "\n")
         if record["asset_id"] in entries:
             entries[record["asset_id"]]["title"] = title
+    # A repaired picture's document is its pieces as main.md delivers them: reduced pieces as reduced.
+    for record in asset_records.values():
+        pieces = [piece for piece in record.get("recovered_block_ids") or [] if ir.get_block(piece) is not None]
+        path = outputs / "documents" / f"{record.get('asset_id')}.md"
+        if not any(piece in remaining for piece in pieces) or not path.is_file():
+            continue
+        text = "\n".join(line for piece in pieces
+                         if (line := remaining.get(piece, renderer._block_to_text(ir.get_block(piece))).strip()))
+        if not text:
+            path.unlink()
+            dropped.add(record["asset_id"])
+            continue
+        atomic_write_text(path, f"# {record.get('title') or record['asset_id']}\n\n{text}\n")
     if isinstance(index, list) and remaining:
         atomic_write_json(outputs / "documents_index.json",
                           [entry for entry in index if entry.get("document_id") not in dropped],
@@ -424,7 +460,7 @@ def index_image_readings(ir, run_path, renderer, pictures, eligible, delivered_b
     index = read_json(outputs / "documents_index.json", None)
     if not isinstance(index, list):
         return
-    origin = {bid: ir.get_block(bid).payload.get("agentic_image_origin") or bid for bid in pictures}
+    origin = {bid: picture_origin(ir.get_block(bid)) or bid for bid in pictures}
 
     def review(ids):
         confirmed = [bid in eligible for bid in ids]

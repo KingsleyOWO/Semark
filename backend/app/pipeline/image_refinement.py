@@ -21,10 +21,13 @@ def revision_budget(owner, *, propose=True):
 
 def mark_region_omitted(block, origin, page):
     """State an omission without asserting the source pixels are illegible."""
-    block.payload.update(text=f"〔此區域未納入文字解讀：原文第 {page + 1} 頁，圖片 {origin}，區塊 {block.block_id}；保留來源圖〕",
+    from app.pipeline.image_recovery import gap_marker, picture_gap
+
+    regions = [{"reason": "region_not_interpreted",
+                "image_bbox": block.payload.get("agentic_image_region", [0, 0, 1000, 1000])}]
+    block.payload.update(text=gap_marker(page, regions),
                          agentic_information_status="uncertain", agentic_region_kind="uncertain")
-    block.payload["agentic_gap"] = {"reason": "region_not_interpreted", "source_id": origin,
-        "image_bbox": block.payload.get("agentic_image_region", [0, 0, 1000, 1000])}
+    block.payload["agentic_gap"] = picture_gap(origin, regions)
 
 
 async def revise_image_regions(runner, candidate, selected, review, source, folder, origin, page):
@@ -110,6 +113,8 @@ async def revise_image_regions(runner, candidate, selected, review, source, fold
             for field in dependency_fields:
                 dependencies = {covered.get(bid, bid) for bid in block.payload.get(field, [])}
                 block.payload[field] = sorted(dependencies - {block.block_id})
+    from app.pipeline.image_recovery import merge_picture_gaps
+    revised.blocks = merge_picture_gaps(revised.blocks, origin, page)
     for order, block in enumerate(revised.blocks):
         block.reading_order = order
     atomic_write_json(folder / "image-region-patch.json", {"status": "candidate_requires_source_audit",

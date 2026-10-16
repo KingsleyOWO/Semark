@@ -125,6 +125,17 @@ def test_a_correction_the_review_spells_out_is_applied_only_where_ocr_reads_it()
     assert spelled_out_corrections([LAYOUT]) == []
 
 
+def test_a_short_misreading_written_several_times_is_corrected_everywhere_but_never_inside_a_word():
+    # No length limit: a three-letter brand misread in every line is a misreading like any other.
+    remark = "The logo reads 'CNL', not 'CML' as delivered."
+    delivered = "標誌為 CML。\nCML 晴諾米\nCML"
+    assert review_corrections([remark], delivered, ["CNL 晴諾米"]) == {"CML": "CNL"}
+    # A span that also sits inside a longer word is not replaced everywhere (「tt」 in Matt).
+    remark = "The label 'tt' should be 'tf'."
+    assert review_corrections([remark], "顏色為 tt。\ntt", ["tf"]) == {"tt": "tf"}
+    assert review_corrections([remark], "顏色為 tt。\nMatt tt", ["tf"]) == {}
+
+
 def test_the_spelled_out_correction_is_tried_before_any_other_method():
     state = {"pages": {"0": _record(MISREAD)}}
     assert next_image_method(state, {"steps": []}, 0, "picture") == "review_correction"

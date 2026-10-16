@@ -203,7 +203,9 @@ async def test_more_than_four_failed_regions_skip_proposal_and_audit_subset_once
     assert await runner.validate(candidate, [0], folder, image_origin='picture')
     assert not model.proposals and len(model.audits) == 2
     gaps = [b for b in candidate.blocks if b.payload.get('agentic_gap')]
-    assert len(gaps) == len({b.get_text() for b in gaps}) == 5
+    # The five pruned regions are one marker that keeps each region (2026-10-16).
+    assert len(gaps) == 1 and len(gaps[0].payload['agentic_gap']['regions']) == 5
+    assert gaps[0].get_text() == '〔原文第 1 頁圖片：未納入文字解讀的區域（保留來源圖） 5 處〕'
 
 
 @pytest.mark.asyncio

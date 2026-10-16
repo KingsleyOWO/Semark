@@ -218,7 +218,10 @@ async def test_image_only_recovery_and_real_delivery_retain_scene_and_exclude_wr
     safe = (tmp_path / 'outputs/rag_chunks.jsonl').read_text()
     assert '貨架' in safe and 'Shop A' not in safe and 'Shop B' not in safe and 'PhantomBrand999' not in safe
     assert 'Unrelated unverified' not in safe
-    assert '此區域未納入文字解讀' in (tmp_path / 'outputs/delivery.md').read_text()
+    # One marker per picture, naming no internal block (2026-10-16).
+    marker = next(line for line in (tmp_path / 'outputs/delivery.md').read_text().splitlines()
+                  if '未納入文字解讀' in line)
+    assert marker == '〔原文第 1 頁圖片：未納入文字解讀的區域（保留來源圖） 1 處〕'
 
 
 def test_verified_explicit_gaps_do_not_trigger_page_rewrites_without_new_evidence():
@@ -251,20 +254,19 @@ def test_image_audit_uses_actual_scoped_spans_without_neighbor_caption_contamina
         image_delivery_excerpts([block], tmp_path, ChunkStage(), chunks_required=True)
 
 
-@pytest.mark.asyncio
-async def test_unreadable_logo_can_finish_as_one_explicit_gap_without_neighbor_contamination(tmp_path):
+async def _repair_disputed_picture(tmp_path, kind):
     from app.pipeline.document_recovery import render_candidate
     from app.pipeline.recovery_models import RecoveryDecision
 
-    class Logo(ImageModel):
+    class Picture(ImageModel):
         async def query(self, task, payload, image, schema):
             if task in {'read_image_parts', 'verify_image_parts'}:
-                return parts('Name A' if task == 'read_image_parts' else 'Name B', 'logo').model_dump(), 10
+                return parts('Name A' if task == 'read_image_parts' else 'Name B', kind).model_dump(), 10
             if task == 'audit_image_parts':
                 assert all('Revenue' not in doc['text'] for doc in payload['delivered_documents'])
                 assert all('Revenue' not in chunk['content'] for chunk in payload['delivered_chunks'])
             return await super().query(task, payload, image, schema)
-    ir, owner, runner = await setup(tmp_path, Logo())
+    ir, owner, runner = await setup(tmp_path, Picture())
     picture = runner.inventory.directory / 'logo.png'
     Image.new('RGB', (200, 140), 'yellow').save(picture)
     ir.blocks.append(Block(block_id='logo', type=BlockType.IMAGE, page_idx=0, reading_order=1,
@@ -276,8 +278,21 @@ async def test_unreadable_logo_can_finish_as_one_explicit_gap_without_neighbor_c
     folder.mkdir()
     result, pages = await runner.repair_image(ir, {'block_id': 'logo', 'page_idx': 0},
         RecoveryDecision(action='repair_image', reason='Read original image.'), folder, 'Read original image.')
+    return runner, result, pages, folder
+
+
+@pytest.mark.asyncio
+async def test_a_reread_that_reads_nothing_new_replaces_nothing(tmp_path):
+    # Rerun 2026-10-15: every placeholder-only candidate failed its audit, after 3-6 minutes each.
+    with pytest.raises(ValueError, match='full_reread_found_nothing_new'):
+        await _repair_disputed_picture(tmp_path, 'logo')
+
+
+@pytest.mark.asyncio
+async def test_a_disputed_sign_becomes_a_gap_and_the_scene_is_audited_without_neighbors(tmp_path):
+    runner, result, pages, folder = await _repair_disputed_picture(tmp_path, 'photo')
     replacements = [b for b in result.blocks if b.payload.get('agentic_image_origin') == 'logo']
-    assert len(replacements) == 1 and replacements[0].payload.get('agentic_gap')
+    assert [bool(b.payload.get('agentic_gap')) for b in replacements] == [False, True]
     assert await runner.validate(result, pages, folder, image_origin='logo')
     assert 'Name A' not in '\n'.join(p.read_text() for p in delivered_documents(folder / 'outputs'))
 

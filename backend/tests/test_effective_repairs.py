@@ -300,3 +300,50 @@ def test_a_remark_saying_mis_recorded_or_mislabelled_spells_out_a_correction():
     """Rerun 2026-10-16: reviews wrote 誤記為 ten times and 誤標為 once; a legend's correction went unseen."""
     assert spelled_out_corrections(["圖例「晴諾米診斷分數」誤記為「晴諾米部分分數」。"]) == [("晴諾米診斷分數", "晴諾米部分分數")]
     assert spelled_out_corrections(["標籤「晴諾米」被誤標為「晴諾來」。"]) == [("晴諾米", "晴諾來")]
+
+
+class ReadingModel(SecondRepairModel):
+    """SecondRepairModel whose two readers read the picture alike, with a line the draft missed."""
+
+    async def query(self, task, payload, image, schema):
+        if task in {"read_image_parts", "verify_image_parts"}:
+            self.tasks.append(task)
+            return {"image_type": "document", "visual_facts": [], "visual_independent_of_text": False,
+                    "text_regions": [{"region_id": "t0", "bbox": [0, 0, 1000, 300], "readable": True,
+                                      "text": "Application"},
+                                     {"region_id": "t1", "bbox": [0, 700, 1000, 1000], "readable": True,
+                                      "text": "LUMIO Brand Guidelines | 07"},
+                                     {"region_id": "t2", "bbox": [0, 400, 1000, 500], "readable": True,
+                                      "text": "Stationery Set"}],
+                    "complete": True, "observation": "Slide heading and footer."}, 10
+        if task == "resolve_image_evidence":
+            self.tasks.append(task)
+            return {"selections": [{"source_ref": ref, "decision": "supported", "reason": "Printed as read."}
+                                   for ref in payload["required_source_refs"]],
+                    "accounted_for": True, "observation": "OCR and the readers agree."}, 10
+        return await super().query(task, payload, image, schema)
+
+
+@pytest.mark.asyncio
+async def test_a_reread_of_a_repaired_picture_keeps_its_relationship_provenance(tmp_path, monkeypatch):
+    """Test run 2026-10-19: an edit attaches the blind reading even when it lists no relationship; the
+    re-read after it did not, and was refused as image_relationship_provenance_lost."""
+    model = ReadingModel(edits=[{"op": "replace", "quote": "LUMIO Brand Guidelines | 87",
+                                 "replacement": "LUMIO Brand Guidelines | 07", "reason": "OCR reads 07."}])
+    record = _record("Footer reads 07, delivery says 87.")
+    record["word_image_readings"] = {"picture": {
+        "source_id": "image0", "text": "Application\nLUMIO Brand Guidelines | 07", "complete": True,
+        "observation": "Slide.", "image_type": "document", "relationships": [], "relationships_complete": True}}
+    ir, owner, runner = await _picture_run(tmp_path, model, record, monkeypatch, actions=3)
+    (tmp_path / "outputs/enrichments.jsonl").write_text(json.dumps({
+        "block_id": "picture", "kind": "figure_description", "output": {
+            "semantic_caption": "晴諾米品牌指南。", "facts": [DESCRIPTION],
+            "all_text": ["Applicatoin", "LUMIO Brand Guidelines | 87"]}}, ensure_ascii=False))
+    await runner.rebuild(ir)
+    await runner.run(ir)
+
+    steps = [(s.get("method"), s["status"], str(s.get("result", ""))) for s in runner.state["steps"]
+             if s["issue_id"] == "image:picture" and s["action"] == "repair_image"]
+    assert steps[0][:2] == ("targeted_edit", "applied")
+    assert all("provenance_lost" not in result for _, _, result in steps), steps
+    assert any(method is None for method, _, _ in steps)  # the re-read ran

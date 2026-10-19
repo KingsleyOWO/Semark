@@ -400,3 +400,15 @@ def test_a_description_respells_a_latin_word_only_into_what_ocr_reads():
                                              reading=_reading("Lumosa"))
     assert text == delivered and not applied
     assert rejected[0]["refused"] == "a Latin word changes only into one this picture's PaddleOCR reads"
+
+
+def test_a_lookalike_letter_of_another_script_is_no_correction():
+    """Test run 2026-10-19: a chat title's 「晴諾茶葉ㄚ倫」 (ㄚ倫, a nickname) became 「…Y倫」 on OCR's reading;
+    the Bopomofo letter and the Latin one print alike."""
+    delivered = "此為對話截圖，對話對象為「晴諾茶葉ㄚ倫」。"
+    edits = [ImageEdit.model_validate({"op": "replace", "quote": "晴諾茶葉ㄚ倫", "replacement": "晴諾茶葉Y倫",
+                                       "reason": "OCR reads Y."})]
+    text, _, applied, rejected = apply_edits(delivered, edits, transcription=set(), ocr_lines=["晴諾茶葉Y倫"],
+                                             reading=_reading("晴諾茶葉Y倫"))
+    assert text == delivered and not applied
+    assert rejected[0]["refused"] == "a lookalike letter of another script is the same print"

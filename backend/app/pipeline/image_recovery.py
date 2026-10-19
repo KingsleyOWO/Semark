@@ -569,9 +569,16 @@ def merge_picture_gaps(blocks, origin, page):
 
 def build_image_parts_candidate(runner, ir, block, page, region, source, parts, evidence_ids, folder,
                                 *, relationship_reading=None, relationship_parents=()):
-    """Materialize source observations for the same ordinary scoped delivery audit."""
+    """Materialize source observations for the same ordinary scoped delivery audit.
+
+    A re-read of a repaired picture keeps the relationship evidence its blocks carry: an edit attaches
+    the blind reading even when it lists no relationship, and a re-read that dropped it was refused as
+    having lost the picture's provenance (test run 2026-10-19).
+    """
+    inherited = any(b.payload.get("agentic_relationship_evidence_id") for b in repaired_parts(ir, block.block_id))
     replacements = build_image_parts_blocks(runner, block, page, region, source, parts, evidence_ids, folder,
-        relationship_reading=relationship_reading, relationship_parents=relationship_parents)
+        relationship_reading=relationship_reading, relationship_parents=relationship_parents,
+        keep_relationship_evidence=inherited)
     return replace_picture(ir, block.block_id, replacements)
 
 
@@ -593,13 +600,14 @@ def distinct_text_regions(regions):
 
 
 def build_image_parts_blocks(runner, block, page, region, source, parts, evidence_ids, folder,
-                             *, relationship_reading=None, relationship_parents=()):
+                             *, relationship_reading=None, relationship_parents=(), keep_relationship_evidence=False):
     """Share scene/text/gap materialization between image and native-page recovery."""
     replacements = []
     prior = (relationship_reading if relationship_reading is not None else runner.owner.state.get(
         "pages", {}).get(str(page), {}).get("word_image_readings", {}).get(block.block_id, {}))
     relationship_evidence = None
-    if "relationships_complete" in prior and (prior.get("relationships") or not prior["relationships_complete"]):
+    if "relationships_complete" in prior and (prior.get("relationships") or not prior["relationships_complete"]
+                                              or keep_relationship_evidence):
         from app.pipeline.image_source_review import WordPictureItem
         prior = WordPictureItem.model_validate(prior).model_dump()
         relationship_evidence = runner.evidence.add(

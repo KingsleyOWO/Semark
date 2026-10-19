@@ -302,11 +302,15 @@ def build_automatic_delivery(ir, run_path, config, review_summary, ledger, upstr
         else:
             record = records.get(bid, {})
             indices = record.get("source_pages", [])
-            location = "、".join(str(p + 1) for p in indices) if indices else "來源頁碼未定位"
-            marker = f"〔內容未確認：原文 {location}，區塊 {bid}〕"
+            location = f"原文第 {'、'.join(str(p + 1) for p in indices)} 頁" if indices else "原文頁碼未定位"
+            # No internal block ID: the reader has no use for one.
+            marker = f"〔內容未確認：{location}〕"
             if block.payload.get("agentic_gap"):
                 marker = text
-            reading_copy.append(marker)
+            # Word's own text is the source, not a reading of it, so it is shown marked rather than held
+            # back: rerun 2026-10-16, a contract number, section headings and whole tables were IDs here.
+            shown = word_text(block) and bid not in pictures and not block.payload.get("agentic_gap") and text.strip()
+            reading_copy.append(marker + "\n" + text if shown else marker)
             evidence = [dict(i, url=f"/api/runs/{quote(ir.run_id, safe='')}/processing-evidence?path={quote(i['path'], safe='')}")
                         for index in indices for i in pages.get(index, {}).get("images", [])]
             if (source_image := block.payload.get("agentic_source_image")) and (origin or bid) not in linked:
@@ -352,6 +356,12 @@ def build_automatic_delivery(ir, run_path, config, review_summary, ledger, upstr
     index_image_readings(ir, run_path, renderer, pictures, eligible,
                          [b for b in ir.blocks if not rendered[b.block_id][1]])
     return summary
+
+
+def word_text(block):
+    """A block whose text is Word's own, not a page or picture reading."""
+    return block.payload.get("word_source", {}).get("source") == "native_docx" and not block.payload.get(
+        "agentic_image_origin") and not block.payload.get("agentic_recovery_tool")
 
 
 def picture_title(language, page):

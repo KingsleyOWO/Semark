@@ -36,6 +36,24 @@ async def test_budget_exhaustion_finishes_without_human_and_exports_verified_sub
 
 
 @pytest.mark.asyncio
+async def test_unverified_word_text_is_shown_marked_and_no_marker_names_a_block(tmp_path):
+    """Rerun 2026-10-16: a contract number, section headings and whole Word tables were 〔…，區塊 b000303〕."""
+    blocks = [Block(block_id=f'b{i}', type=BlockType.TEXT, page_idx=i, reading_order=i,
+                    payload={'text': f'Source page {i + 1}: Revenue 100, cost 80.',
+                             'word_source': {'source': 'native_docx', 'block_index': i}}) for i in range(3)]
+    ir, source = fixture(tmp_path, pages=3, blocks=blocks)
+    cfg = config(max_model_calls=1)
+    model = AuditModel()
+    ir, _ = await DocumentReview(cfg, model, model).run(ir, tmp_path, source_path=source)
+    finalize_delivery(ir, tmp_path, cfg)
+    delivery = (tmp_path / 'outputs/delivery.md').read_text()
+    assert '〔內容未確認：原文第 2 頁〕\nSource page 2: Revenue 100, cost 80.' in delivery
+    assert '區塊' not in delivery and 'b1' not in delivery
+    # Shown for reading, still not in the verified chunks.
+    assert {bid for c in read_chunks(tmp_path) for bid in c['block_ids']} == {'b0'}
+
+
+@pytest.mark.asyncio
 async def test_independent_good_block_survives_partial_page_and_mixed_original_chunk(tmp_path):
     good = Block(block_id='good', type=BlockType.TEXT, page_idx=0, payload={'text': 'Revenue 100.'})
     bad = Block(block_id='bad', type=BlockType.TEXT, page_idx=0, payload={'text': 'Cost 999.'})

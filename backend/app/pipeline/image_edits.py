@@ -135,6 +135,7 @@ def _changed_words(new, start, quote, replacement):
 
 _LATIN_WORD = re.compile(r"[A-Za-z0-9]+(?:[.,/:][0-9]+)*")
 _NUMBER = re.compile(r"[0-9]+(?:[.,/:][0-9]+)*")
+_LABEL = re.compile(r"[^\W\d_]")  # a letter or CJK character: wording beside a number
 
 
 def _reads(word, text):
@@ -245,6 +246,15 @@ def apply_edits(delivered, edits, *, transcription, ocr_lines, reading, document
             # The blind reading names a chart's values axis by axis; one of them is no evidence for another
             # axis (a radar chart's 好感度 3.5 was edited from 1.67 to 1.5, another axis's value).
             return text, "a number changes only into one this picture's PaddleOCR reads"
+        if (edit.op == "replace" and ocr and any(_NUMBER.fullmatch(word) and _reads(word, ocr)
+                                                 for word in _changed_words(text, start, replacement, edit.quote))
+                and not (_LABEL.search(replacement) and appears_in(replacement, ocr))
+                and not all(appears_in(line, ocr) for line in _lines(changed, start, start + len(replacement))
+                            if normalized_text(line))):
+            # A picture printing both numbers backs neither: a slide-thumbnail sheet labelled 54 to 71 had a
+            # description's 「第66頁」 edited to 「第71頁」 on where the model thought the slide sat. OCR reading
+            # the number with its label (「Top 3 0」) or the whole new line does back it.
+            return text, "a number this picture's PaddleOCR also reads changes only where OCR reads it with its label"
         if _HEDGE.search(edit.quote) and not _HEDGE.search(replacement):
             # 「NORIA」（或相近字樣） became 「NORIA」: the screen shows "?ORIA", the same logo another
             # photo reads SORIA. What the hedge held back must be what this picture's PaddleOCR reads.
@@ -365,15 +375,24 @@ def transcription_lines(outputs, block_id):
     return []
 
 
-def known_issues(owner_state, recovery_state, page, block_id):
-    """Every fault any audit named for this picture so far, page review and rejected candidates alike."""
+def known_issues(owner_state, recovery_state, page, block_id, part_ids=()):
+    """Every fault any audit named for this picture so far, page review and rejected candidates alike.
+
+    A repaired picture's are also on the blocks it is delivered as (``part_ids``), and in the
+    page remarks naming them.
+    """
+    from app.pipeline.review_policy import _BLOCK_ID
+
     record = owner_state.get("pages", {}).get(str(page), {})
-    issues = [i["detail"] for i in record.get("image_issues", []) if i["block_id"] == block_id]
-    finding = next((b for b in record.get("review", {}).get("blocks", []) if b["block_id"] == block_id), None)
-    if finding and finding.get("status") != "verified":
-        issues.append(finding.get("observation", ""))
-        issues += [f"Relationship {c['relation_id']} {c['status']}: {c.get('observation', '')}"
-                   for c in finding.get("image_relationship_checks", []) if c.get("status") != "matched"]
+    names = {block_id, *part_ids}
+    issues = [i["detail"] for i in record.get("image_issues", []) if i["block_id"] in names]
+    for finding in record.get("review", {}).get("blocks", []):
+        if finding["block_id"] in names and finding.get("status") != "verified":
+            issues.append(finding.get("observation", ""))
+            issues += [f"Relationship {c['relation_id']} {c['status']}: {c.get('observation', '')}"
+                       for c in finding.get("image_relationship_checks", []) if c.get("status") != "matched"]
+    if part_ids:
+        issues += [i for i in record.get("review", {}).get("issues") or [] if set(_BLOCK_ID.findall(i)) & names]
     for step in recovery_state.get("steps", []):
         if step.get("block_id") == block_id:
             for feedback in step.get("validation_feedback") or []:
@@ -382,8 +401,9 @@ def known_issues(owner_state, recovery_state, page, block_id):
 
 
 # A remark that spells out a correction: 「Talvin」 should be 「Tolvin」, 誤植為「側窗圓弧」，來源為「側前圓弧」.
+# 誤記 and 誤標 too: a radar chart's legend 「貴公司診斷分數」 誤記為 another went unrepaired (rerun 2026-10-16).
 _CORRECTION = re.compile(r"should (?:be|read)|instead of|rather than|delivered as|\bnot\b.{0,40}\bas delivered|"
-                         r"incorrect|misread|mis-?spel|typo|應為|應是|應作|誤植|誤寫|誤讀|讀作|讀為|寫成|讀成|錯寫|而非|有誤",
+                         r"incorrect|misread|mis-?spel|typo|應為|應是|應作|誤植|誤寫|誤讀|誤記|誤標|讀作|讀為|寫成|讀成|錯寫|而非|有誤",
                          re.I)
 _QUOTED = re.compile(r"「([^「」\n]{1,80})」|『([^『』\n]{1,80})』|“([^“”\n]{1,80})”|‘([^‘’\n]{1,80})’|"
                      r"\"([^\"\n]{1,80})\"|'([^'\n]{1,80})'")

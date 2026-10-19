@@ -77,7 +77,7 @@ async def test_a_page_whose_remaining_faults_are_pictures_without_a_re_read_clos
     await runner.run(ir, issue_ids={"page:0"})
 
     issue = runner.state["issues"]["page:0"]
-    assert issue["status"] == "deferred" and "re-read again" in issue["reason"]
+    assert issue["status"] == "deferred" and "no repair method is left" in issue["reason"]
 
 
 @pytest.mark.asyncio

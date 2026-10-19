@@ -52,10 +52,23 @@ def test_description_wording_the_picture_does_not_show_is_deleted():
 def test_a_description_correction_uses_only_wording_an_independent_reader_saw():
     text, _, applied, rejected = _apply({"op": "replace", "quote": "第 06 頁，", "replacement": "第 99 頁，"},
                                         {"op": "replace", "quote": "名片、信封", "replacement": "名片、明信片"},
-                                        {"op": "replace", "quote": "第 06 頁", "replacement": "第 66 頁"})
+                                        {"op": "replace", "quote": "第 06 頁", "replacement": "第 66 頁"},
+                                        ocr=[line for line in OCR if line != "06"])
 
     assert "第 66 頁" in text and "名片、信封" in text
     assert len(applied) == 1 and len(rejected) == 2
+
+
+def test_a_number_the_picture_also_prints_backs_no_change_into_the_other():
+    """Rerun 2026-10-16: a slide-thumbnail sheet printing 54 to 71 had 「第66頁」 edited to 「第71頁」 on where
+    the model thought the slide sat; 66 was right. OCR reading both numbers tells neither apart."""
+    edit = {"op": "replace", "quote": "第 06 頁", "replacement": "第 66 頁"}
+    text, _, applied, rejected = _apply(edit)
+    assert "第 06 頁" in text and not applied
+    assert rejected[0]["refused"].startswith("a number this picture's PaddleOCR also reads")
+    # OCR reading the number with its label, as printed, backs it.
+    text, _, applied, _ = _apply(edit, ocr=OCR + ["第 66 頁"])
+    assert "第 66 頁" in text and len(applied) == 1
 
 
 def test_a_transcription_line_changes_only_into_the_line_ocr_reads():

@@ -39,7 +39,7 @@ from app.pipeline.review_sources import (
     needs_content_recovery,
 )
 
-RECOVERY_VERSION = "document-tools-v16-word-text-stays-repairs-never-drop"
+RECOVERY_VERSION = "document-tools-v17-repaired-pictures-stay-repairable"
 SKILLS = Path(__file__).with_name("recovery_skills")
 TOOL_DESCRIPTIONS = {
     "ocr_image": "Only for small disputed lettering: PaddleOCR on ONE smaller original-image 0..1000 region of one mapped image at scale 2/4, around a line bbox an earlier OCR returned. repair_image already reads the whole picture with PaddleOCR itself, so a whole-image OCR request is run as repair_image. Returns source-bound line IDs, coordinates and scores. No content is published.",
@@ -305,6 +305,18 @@ class RecoveryController:
                     result.append({"id": "image:" + block.block_id, "block_id": block.block_id,
                                    "page_idx": page, "kind": "image", "failure_kind": finding["failure_kind"],
                                    "issues": [finding["detail"]]})
+            if record.get("review"):
+                # A repaired picture its page review still faults stays repairable by its next method.
+                wrong = self.unaccepted_pictures(ir, record)
+                for picture in self.repaired_pictures(ir, page):
+                    if picture.block_id in wrong:
+                        from app.pipeline.image_edits import known_issues
+                        from app.pipeline.image_recovery import picture_part_ids
+                        issues = known_issues(self.owner.state, {}, page, picture.block_id,
+                                              picture_part_ids(ir, picture.block_id))
+                        result.append({"id": "image:" + picture.block_id, "block_id": picture.block_id,
+                                       "page_idx": page, "kind": "image", "failure_kind": "image_content_mismatch",
+                                       "issues": issues[:3]})
             pictures = {b.block_id for b in self.inventory.blocks(page, ir) if b.block_id in texts}
             if (needs_content_recovery(record) and not record.get("image_only_issues")
                     and (not record.get("review") or page_review_problems(record["review"], pictures))):
@@ -413,26 +425,52 @@ class RecoveryController:
 
     def repair_method(self, block_id):
         """Which method repair_image will use next for this picture."""
-        from app.pipeline.image_recovery import next_image_method
-        pages = getattr(getattr(self, "inventory", None), "mapping", {}).get(block_id) or []
+        from app.pipeline.image_recovery import next_image_method, picture_part_ids
+        inventory = getattr(self, "inventory", None)
+        pages = getattr(inventory, "mapping", {}).get(block_id) or []
         if len(pages) != 1:
             return "full"
-        return next_image_method(getattr(self.owner, "state", {}), getattr(self, "state", {}), pages[0], block_id)
+        ir = getattr(inventory, "ir", None)
+        parts = picture_part_ids(ir, block_id) if ir is not None else []
+        return next_image_method(getattr(self.owner, "state", {}), getattr(self, "state", {}), pages[0], block_id, parts)
+
+    def keep_repaired_mapping(self, ir):
+        """A repaired picture keeps its source page under its own ID, the page its blocks map to."""
+        from app.pipeline.image_recovery import repaired_parts
+
+        for origin in self.state.get("repaired_pictures", {}):
+            pages = sorted({p for b in repaired_parts(ir, origin) for p in self.inventory.mapping.get(b.block_id, [])})
+            if pages:
+                self.inventory.mapping[origin] = pages
+
+    def repaired_pictures(self, ir, page):
+        """Pictures of the page delivered as an earlier repair's blocks that a later method can still reach."""
+        from app.pipeline.image_recovery import picture_block
+
+        origins = dict.fromkeys(b.payload.get("agentic_image_origin") for b in self.inventory.blocks(page, ir))
+        return [block for origin in origins if origin and origin in self.state.get("repaired_pictures", {})
+                and self.inventory.mapping.get(origin) == [page]
+                and (origin in self.inventory.word_images or ir.has_physical_pages())
+                and (block := picture_block(self, ir, origin)) is not None]
 
     def image_targets(self, ir, page):
-        """Only existing images with unambiguous source ownership can be patched."""
+        """Pictures with unambiguous source ownership, repaired ones included, that a re-read can still take."""
+        from app.pipeline.image_recovery import LOCAL_EDIT_METHODS
+
         tried = {}
         for step in self.state["steps"]:
-            if step["action"] == "repair_image" and step.get("method") not in {"delivery_patch", "targeted_edit"}:
+            # Only a full re-read counts toward its roles: a rejected review correction is no re-read.
+            if step["action"] == "repair_image" and step.get("method") not in LOCAL_EDIT_METHODS:
                 tried.setdefault(step.get("block_id"), []).append(step.get("model_role", "primary"))
         roles = {"primary", "review"} if self.alternate_available() else {"primary"}
-        return [b for b in self.inventory.blocks(page, ir)
+        pictures = [b for b in self.inventory.blocks(page, ir)
+                    if b.type == BlockType.IMAGE and self.inventory.mapping.get(b.block_id) == [page]]
+        return [b for b in pictures + self.repaired_pictures(ir, page)
                 if len(tried.get(b.block_id, [])) < self.owner.limits.max_attempts_per_block
                 and not roles.issubset(tried.get(b.block_id, []))
-                if b.type == BlockType.IMAGE and self.inventory.mapping.get(b.block_id) == [page]
-                and (b.block_id in self.inventory.word_images or ir.has_physical_pages()
-                     and len(b.bbox_norm) == 4 and b.bbox_norm[0] < b.bbox_norm[2]
-                     and b.bbox_norm[1] < b.bbox_norm[3])]
+                if b.block_id in self.inventory.word_images or ir.has_physical_pages()
+                and len(b.bbox_norm) == 4 and b.bbox_norm[0] < b.bbox_norm[2]
+                and b.bbox_norm[1] < b.bbox_norm[3]]
 
     def unaccepted_pictures(self, ir, record):
         """Pictures a hard remark of the page's last review names; a re-read picture is reviewed as its parts.
@@ -646,7 +684,9 @@ class RecoveryController:
                     "seconds": query_seconds + followup["seconds"] + call_seconds(self.owner.state, "recovery_plan"),
                     "includes_followup": followup_action, "followup_seconds": followup["seconds"]}
         elif action == "ocr_image":
-            targets = ([ir.get_block(problem["block_id"])] if problem.get("block_id") else self.image_targets(ir, page))
+            from app.pipeline.image_recovery import picture_block
+            targets = ([picture_block(self, ir, problem["block_id"])] if problem.get("block_id")
+                       else self.image_targets(ir, page))
             followups = [self.estimate_tool("repair_image", features, ir, {**problem, "block_id": b.block_id})
                          for b in targets if b]
             if not followups:
@@ -670,6 +710,7 @@ class RecoveryController:
             self.state["stop_reason"] = "source_inventory_unavailable"
             self.save()
             return ir
+        self.keep_repaired_mapping(ir)
         from app.pipeline.review_budget import call_seconds
         initial_actions = self.state["actions"]
 
@@ -682,7 +723,8 @@ class RecoveryController:
                 actions = self.state["actions"]
                 for item in self.problems(ir):
                     status = self.state["issues"].get(item["id"], {}).get("status", "pending")
-                    if first or status in {"pending", "unresolved"}:
+                    # An improved picture is listed again only while its page review still faults it.
+                    if first or status in {"pending", "unresolved", "improved"}:
                         yield item
                 first = False
                 if self.state["actions"] == actions or not self.available():
@@ -728,7 +770,9 @@ class RecoveryController:
                         and not any(s["action"] == "inspect_layout" for s in recent)):
                     allowed.insert(0, "inspect_layout")
                 try:
-                    scoped_blocks = ([ir.get_block(problem["block_id"])] if "block_id" in problem else
+                    from app.pipeline.image_recovery import picture_block, repaired_parts
+                    scoped_blocks = ([picture_block(self, ir, problem["block_id"]) if problem.get("kind") == "image"
+                                      else ir.get_block(problem["block_id"])] if "block_id" in problem else
                                      self.inventory.blocks(problem["page_idx"], ir))
                     if any(block is None for block in scoped_blocks):
                         issue["status"] = "superseded"
@@ -748,9 +792,12 @@ class RecoveryController:
                     if (page_scope and not image_targets and current.get("review")
                             and self.picture_only_problems(ir, problem["page_idx"], current)):
                         # Rerun 2026-10-15: page issues kept planning re-reads of pictures already
-                        # repaired (no target left) until their attempts ran out.
-                        issue.update(status="deferred", reason="Only pictures remain wrong on this page and none of "
-                                                               "them can be re-read again")
+                        # repaired (no target left) until their attempts ran out. The reason says which:
+                        # one said none could be re-read while its picture had only been edited (2026-10-16).
+                        issue.update(status="deferred", reason=(
+                            "Only pictures remain wrong on this page and no repair method is left for them"
+                            if unaccepted else
+                            "Only pictures remain on this page and no hard remark names one of them"))
                         break
                     if image_targets:
                         allowed[0:0] = ["ocr_image", "repair_image"]
@@ -854,7 +901,9 @@ class RecoveryController:
                         break
                     if decision.action not in {"resolve_source", "repair_image", "ocr_image"}:
                         decision.block_id = None
-                    scope = [ir.get_block(decision.block_id)] if decision.action in {"repair_image", "ocr_image"} else scoped_blocks
+                    # A repaired picture is the block it replaced and the blocks it is delivered as now.
+                    scope = ([picture_block(self, ir, decision.block_id), *repaired_parts(ir, decision.block_id)]
+                             if decision.action in {"repair_image", "ocr_image"} else scoped_blocks)
                     if decision.action == "resolve_source":
                         selected_id = problem.get("block_id") or decision.block_id
                         if selected_id not in {b.block_id for b in scoped_blocks}:
@@ -996,9 +1045,14 @@ class RecoveryController:
                                     # An infrastructure failure (disk, rebuild crash) still stops the run for resume.
                                     raise
                                 raise RecoveryCommitError("Candidate rebuild failed; previous publication restored") from exc
+                            repaired = self.state.setdefault("repaired_pictures", {})
+                            for old in ir.blocks:
+                                if old.type == BlockType.IMAGE and candidate.get_block(old.block_id) is None:
+                                    repaired[old.block_id] = old.model_dump(mode="json")
                             ir = candidate
                             self.inventory.ir = ir
                             self.inventory.mapping = live_inventory.mapping
+                            self.keep_repaired_mapping(ir)
                             step["status"] = "applied"
                         else:
                             step["status"] = "candidate_only"
@@ -1063,7 +1117,8 @@ class RecoveryController:
                             step.update(status="commit_interrupted", result=str(exc)[:600])
                             raise RecoveryCommitError("Accepted candidate rebuild failed; resume required") from exc
                         step.update(status="rejected", result=(type(exc).__name__ + ": " + str(exc))[:1000])
-                        issue["status"] = "unresolved"
+                        # A rejected later method leaves an earlier kept repair as it was.
+                        issue["status"] = "improved" if issue["status"] == "improved" else "unresolved"
                         if method == "targeted_edit" and edit_disputes_issue(folder):
                             issue["disputed"] = True
                     finally:
@@ -1315,8 +1370,10 @@ class RecoveryController:
 
     async def ocr_image(self, ir, problem, decision, folder, skill):
         from app.adapters.ocr import ocr_runtime_identity, read_ocr
+        from app.pipeline.image_recovery import picture_block
+
         bid = decision.block_id or problem.get("block_id")
-        block = ir.get_block(bid)
+        block = picture_block(self, ir, bid)
         page = problem["page_idx"]
         source = self.inventory.word_images.get(bid)
         if (not block or block.type != BlockType.IMAGE or source is None

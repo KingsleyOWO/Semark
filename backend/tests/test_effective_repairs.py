@@ -186,7 +186,9 @@ async def test_a_targeted_edit_is_kept_when_only_an_older_fault_remains(tmp_path
     result = await runner.run(ir)
 
     steps = [(s.get("method"), s["status"]) for s in runner.state["steps"] if s["issue_id"] == "image:picture"]
-    assert steps == [("targeted_edit", "applied")]
+    # The picture stays repairable (2026-10-16): the eraser is still faulted, so its next method, a full
+    # re-read, is tried; this fixture's model cannot read, and the kept edit stays as it was.
+    assert steps == [("targeted_edit", "applied"), (None, "rejected")]
     assert runner.state["issues"]["image:picture"]["status"] == "improved"
     delivered = "\n".join(b.payload["text"] for b in result.blocks if b.payload.get("agentic_image_origin") == "picture")
     assert "LUMIO Brand Guidelines | 07" in delivered and "橡皮" in delivered
@@ -219,3 +221,82 @@ def test_a_quote_inside_the_other_is_no_misreading():
     """Rerun 2026-10-16: 「社群策略 建議」, which the picture shows, became 「建議」 because OCR reads the shorter."""
     remark = "來源圖片顯示「社群策略 建議」，交付文字誤寫為「建議」。"
     assert review_corrections([remark], "標籤：社群策略 建議\n品牌活動 建議", ["社群策略", "晴諾米", "建議"]) == {}
+
+
+class SecondRepairModel(AuditingModel):
+    """Audits fault the footer while it reads 87, the heading while it is misspelt, and always the eraser."""
+
+    async def query(self, task, payload, image, schema):
+        if task in {"audit_image_parts", "audit_page"}:
+            self.tasks.append(task)
+            text = json.dumps(payload.get("blocks"), ensure_ascii=False)
+            faults = [INVENTED] + (["Footer reads 07, delivery says 87."] if "| 87" in text else []) + (
+                ["The heading 'Applicatoin' should be 'Application'."] if "Applicatoin" in text else [])
+            return {"blocks": [{"block_id": bid, "status": "needs_review", "context_complete": False,
+                                "observation": " ".join(faults), "image_relationship_checks": []}
+                               for bid in payload["required_block_ids"]],
+                    "source_complete": False, "reading_order_correct": True,
+                    "observation": "Source and delivery compared.", "issues": faults}, 10
+        return await super().query(task, payload, image, schema)
+
+
+@pytest.mark.asyncio
+async def test_a_repaired_picture_is_repaired_again_by_its_next_method(tmp_path, monkeypatch):
+    """Rerun 2026-10-16: 13 of 30 repaired pictures kept faults their next audit spelled out, because a
+    committed repair turned the picture into text no method could reach. A radar chart kept a wrong
+    completion date; a certificate a company name one character off."""
+    model = SecondRepairModel(edits=[{"op": "replace", "quote": "LUMIO Brand Guidelines | 87",
+                                      "replacement": "LUMIO Brand Guidelines | 07", "reason": "OCR reads 07."}])
+    ir, owner, runner = await _picture_run(tmp_path, model, _record("Footer reads 07, delivery says 87."),
+                                           monkeypatch, actions=3)
+    (tmp_path / "outputs/enrichments.jsonl").write_text(json.dumps({
+        "block_id": "picture", "kind": "figure_description", "output": {
+            "semantic_caption": "晴諾米品牌指南。", "facts": [DESCRIPTION],
+            "all_text": ["Applicatoin", "LUMIO Brand Guidelines | 87"]}}, ensure_ascii=False))
+    await runner.rebuild(ir)
+    result = await runner.run(ir)
+
+    steps = [(s.get("method"), s["status"]) for s in runner.state["steps"] if s["issue_id"] == "image:picture"]
+    # The edit fixes the footer; the heading's correction, spelled out only by the audit after it, is
+    # applied to the repaired picture; the eraser no method removes faults neither. The re-read that
+    # comes next cannot read in this fixture and leaves both repairs as they were.
+    assert steps[:2] == [("targeted_edit", "applied"), ("review_correction", "applied")]
+    assert runner.state["issues"]["image:picture"]["status"] == "improved"
+    delivered = "\n".join(b.payload["text"] for b in result.blocks if b.payload.get("agentic_image_origin") == "picture")
+    assert "LUMIO Brand Guidelines | 07" in delivered and "Application" in delivered
+    assert "| 87" not in delivered and "Applicatoin" not in delivered
+    # Nothing read off the picture is lost on the way, and the picture keeps its file and page.
+    read = [line for b in result.blocks if b.payload.get("agentic_image_origin") == "picture"
+            for line in b.payload["agentic_read_lines"]]
+    assert {"Application", "LUMIO Brand Guidelines | 07"} <= set(read)
+    assert runner.state["repaired_pictures"]["picture"]["type"] == "image"
+    assert runner.inventory.mapping["picture"] == [0]
+    assert result.get_block("picture") is None
+
+
+def test_an_edit_of_a_repaired_picture_keeps_its_gap_marker_and_a_reread_replaces_it():
+    from app.models.document_ir import DocumentIR, EngineInfo, SourceInfo
+    from app.pipeline.image_recovery import replace_picture
+
+    def text(bid, origin="picture", **payload):
+        return Block(block_id=bid, type=BlockType.TEXT, page_idx=0,
+                     payload={"text": bid, "agentic_image_origin": origin, **payload})
+    ir = DocumentIR(doc_id="d", run_id="r", source=SourceInfo(path="d.docx", ext="docx", sha256="abc", size_bytes=1),
+                    engine=EngineInfo(backend="pipeline", method="auto"), blocks=[
+        text("before", origin=None), text("k0"),
+        text("g0", agentic_gap={"reason": "image_text_unreadable"}, agentic_depends_on_block_ids=["k0"]),
+        text("k1"), text("after", origin=None)])
+    new = [text("n0"), text("n1")]
+    edited = replace_picture(ir, "picture", new, keep_gaps=True)
+    assert [b.block_id for b in edited.blocks] == ["before", "n0", "n1", "g0", "after"]
+    assert edited.get_block("g0").payload["agentic_depends_on_block_ids"] == ["n0"]
+    reread = replace_picture(ir, "picture", new)
+    assert [b.block_id for b in reread.blocks] == ["before", "n0", "n1", "after"]
+    assert [b.reading_order for b in reread.blocks] == [0, 1, 2, 3]
+    assert ir.get_block("k0") is not None  # the IR itself is left as it was
+
+
+def test_a_remark_saying_mis_recorded_or_mislabelled_spells_out_a_correction():
+    """Rerun 2026-10-16: reviews wrote 誤記為 ten times and 誤標為 once; a legend's correction went unseen."""
+    assert spelled_out_corrections(["圖例「晴諾米診斷分數」誤記為「晴諾米部分分數」。"]) == [("晴諾米診斷分數", "晴諾米部分分數")]
+    assert spelled_out_corrections(["標籤「晴諾米」被誤標為「晴諾來」。"]) == [("晴諾米", "晴諾來")]

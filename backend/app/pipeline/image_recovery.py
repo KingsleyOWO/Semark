@@ -14,8 +14,33 @@ from app.pipeline.image_source_review import appears_in
 from app.pipeline.review_policy import dependency_closed_subset
 
 
+def repaired_parts(ir, block_id):
+    """The blocks a repaired picture is now delivered as, in order; none while the picture is in the IR."""
+    if ir.get_block(block_id) is not None:
+        return []
+    return [b for b in ir.blocks if b.payload.get("agentic_image_origin") == block_id]
+
+
+def picture_block(runner, ir, block_id):
+    """The picture to repair: its IR block, or for a repaired picture the block its first repair replaced.
+
+    Rerun 2026-10-16: a committed repair turned the picture into text blocks no method could
+    reach again, so 13 of 30 repaired pictures kept faults their next audit spelled out (a
+    radar chart's completion date, a certificate's company name one character off).
+    """
+    block = ir.get_block(block_id)
+    if block is None and repaired_parts(ir, block_id):
+        stored = runner.state.get("repaired_pictures", {}).get(block_id)
+        return Block.model_validate(stored) if stored else None
+    return block
+
+
+def picture_part_ids(ir, block_id):
+    return [b.block_id for b in repaired_parts(ir, block_id)]
+
+
 async def repair_image(runner, ir, problem, decision, folder, skill):
-    block = ir.get_block(problem.get("block_id") or decision.block_id)
+    block = picture_block(runner, ir, problem.get("block_id") or decision.block_id)
     page = problem["page_idx"]
     if not block or block.type != BlockType.IMAGE or runner.inventory.mapping.get(block.block_id) != [page]:
         raise ValueError("Image recovery requires one mapped source image on one physical page")
@@ -38,7 +63,8 @@ async def repair_image(runner, ir, problem, decision, folder, skill):
     if source != original:
         shutil.copy2(original, source)
     prior = runner.owner.state.get("pages", {}).get(str(page), {}).get("word_image_readings", {}).get(block.block_id, {})
-    method = next_image_method(runner.owner.state, runner.state, page, block.block_id)
+    part_ids = picture_part_ids(ir, block.block_id)
+    method = next_image_method(runner.owner.state, runner.state, page, block.block_id, part_ids)
     if method == "delivery_patch":
         statements = delivery_patch_statements(runner.owner.state, page, block.block_id)
         return build_delivery_patch_candidate(runner, ir, block, page, region, source, statements, folder), [page]
@@ -59,11 +85,11 @@ async def repair_image(runner, ir, problem, decision, folder, skill):
     parts, evidence_ids = await resolve_image_evidence(runner, block, page, source, primary, independent,
                                                        prior, parts, folder, model_role=decision.model_role)
     from app.adapters import ocr
-    from app.pipeline.image_edits import known_issues, transcription_lines
-    drafted = transcription_lines(runner.root / "outputs", block.block_id)
+    from app.pipeline.image_edits import known_issues
+    drafted = [line.removeprefix(READ_LINE_PREFIX) for line in picture_read_lines(runner, ir, block)]
     lines = await runner.owner._ocr_lines(original, runner.inventory) if drafted and ocr.ocr_python() else None
     parts, carried, named, contested = keep_drafted_read_lines(
-        parts, drafted, known_issues(runner.owner.state, runner.state, page, block.block_id), lines)
+        parts, drafted, known_issues(runner.owner.state, runner.state, page, block.block_id, part_ids), lines)
     atomic_write_json(folder / "image-parts.json", {
         "source_block_id": block.block_id, "source_sha256": sha,
         "primary": primary.model_dump(), "independent": independent.model_dump(),
@@ -218,36 +244,68 @@ EDITABLE_FAILURES = {"image_relationship_mismatch", "reading_disagreement", "ima
 # Methods that keep the delivered text and change only what they name.
 LOCAL_EDIT_METHODS = {"delivery_patch", "targeted_edit", "review_correction"}
 # The last of them, which also carries the review's spelled-out corrections, is accepted when its audit
-# finds nothing wrong in the wording it brought in, older faults left as they were: once committed the
-# picture is text and no later method can reach it, so an earlier method must leave nothing hard behind.
+# finds nothing wrong in the wording it brought in, older faults left as they were; an earlier method
+# must leave nothing hard behind. Any of them on a picture already repaired is judged the same way,
+# its older faults known when that repair was kept (agentic_improves_repair).
 IMPROVING_METHODS = {"targeted_edit"}
 
 
-def next_image_method(owner_state, recovery_state, page, block_id):
+def next_image_method(owner_state, recovery_state, page, block_id, part_ids=()):
     """Cheapest untried method first, each once: apply corrections a review spelled out, add
     omissions, fix named spans, then re-read.
 
-    A picture that is only unreadable has nothing an edit could fix.
+    A picture that is only unreadable has nothing an edit could fix. A repaired picture's
+    remarks are on the blocks it is delivered as (``part_ids``); any hard one is editable.
     """
     from app.pipeline.image_edits import known_issues, spelled_out_corrections
 
-    if (spelled_out_corrections(known_issues(owner_state, recovery_state, page, block_id))
+    if (spelled_out_corrections(known_issues(owner_state, recovery_state, page, block_id, part_ids))
             and not method_attempted(recovery_state, block_id, "review_correction")):
         return "review_correction"
     if (delivery_patch_statements(owner_state, page, block_id)
             and not method_attempted(recovery_state, block_id, "delivery_patch")):
         return "delivery_patch"
-    issues = owner_state.get("pages", {}).get(str(page), {}).get("image_issues", [])
-    if (any(i["block_id"] == block_id and i["failure_kind"] in EDITABLE_FAILURES for i in issues)
-            and not method_attempted(recovery_state, block_id, "targeted_edit")):
+    record = owner_state.get("pages", {}).get(str(page), {})
+    editable = any(i["block_id"] == block_id and i["failure_kind"] in EDITABLE_FAILURES
+                   for i in record.get("image_issues", []))
+    if part_ids:
+        from app.pipeline.review_policy import picture_problems
+
+        editable = editable or bool(picture_problems(record.get("review", {}), part_ids))
+    if editable and not method_attempted(recovery_state, block_id, "targeted_edit"):
         return "targeted_edit"
     return "full"
 
 
-def delivered_picture_text(runner, block):
-    """The picture's real delivered text; a "[Image]" placeholder would replace content."""
+def picture_read_lines(runner, ir, block):
+    """The lines read off the picture as delivered now: its draft's, or for a repaired picture the
+    read lines of the blocks it is delivered as, written as they are delivered."""
+    from app.pipeline.image_edits import transcription_lines
+
+    parts = repaired_parts(ir, block.block_id)
+    if not parts:
+        return transcription_lines(runner.root / "outputs", block.block_id)
+    lines = []
+    for part in parts:
+        if part.payload.get("agentic_gap"):
+            continue
+        if "agentic_read_lines" in part.payload:
+            lines += part.payload["agentic_read_lines"]
+        elif part.payload.get("agentic_content_kind") == "transcription":
+            lines += part.get_text().split("\n")
+    return [line for line in lines if line.strip()]
+
+
+def delivered_picture_text(runner, block, ir=None):
+    """The picture's real delivered text; a "[Image]" placeholder would replace content.
+
+    A repaired picture's is the text of the blocks it is delivered as, its gap marker aside:
+    the marker stays a marker.
+    """
     from app.pipeline.stages.chunk import ChunkStage
 
+    if ir is not None and (parts := repaired_parts(ir, block.block_id)):
+        return "\n".join(b.get_text() for b in parts if not b.payload.get("agentic_gap")).strip()
     renderer = ChunkStage(runner.owner.config)
     renderer._asset_text = renderer._load_asset_retrieval_text(runner.root / "outputs")
     return renderer._asset_text.get(block.block_id, "").strip()
@@ -260,14 +318,13 @@ def build_delivery_patch_candidate(runner, ir, block, page, region, source, stat
     original delivery untouched (no pruning to gaps), and the next attempt is a
     different method, not this again.
     """
-    delivered = delivered_picture_text(runner, block)
+    delivered = delivered_picture_text(runner, block, ir)
     if not delivered:
         raise ValueError("delivery_patch_requires_delivered_picture_text")
     atomic_write_json(folder / "delivery-patch.json", {"source_block_id": block.block_id, "statements": statements,
                                                        "kept_delivered_text": delivered}, ensure_ascii=False, indent=2)
-    from app.pipeline.image_edits import transcription_lines
     return kept_text_candidate(runner, ir, block, page, region, source, delivered, statements, folder, "delivery_patch",
-                               read_lines=transcription_lines(runner.root / "outputs", block.block_id),
+                               read_lines=picture_read_lines(runner, ir, block),
                                new_wording=[s.split("：", 1)[-1] for s in statements])
 
 
@@ -281,19 +338,18 @@ async def build_targeted_edit_candidate(runner, ir, block, page, region, source,
         apply_edits,
         known_issues,
         review_corrections,
-        transcription_lines,
     )
     from app.pipeline.image_source_review import WordPictureItem
     from app.pipeline.semantic.language import resolve_semantic_output_language
 
-    delivered = delivered_picture_text(runner, block)
+    delivered = delivered_picture_text(runner, block, ir)
     if not delivered:
         raise ValueError("targeted_edit_requires_delivered_picture_text")
     raw = runner.owner.state.get("pages", {}).get(str(page), {}).get("word_image_readings", {}).get(block.block_id)
     reading = WordPictureItem.model_validate(raw) if raw else None
     lines = await runner.owner._ocr_lines(original, runner.inventory) if ocr.ocr_python() else None
-    transcription = transcription_lines(runner.root / "outputs", block.block_id)
-    issues = known_issues(runner.owner.state, runner.state, page, block.block_id)
+    transcription = picture_read_lines(runner, ir, block)
+    issues = known_issues(runner.owner.state, runner.state, page, block.block_id, picture_part_ids(ir, block.block_id))
     language = resolve_semantic_output_language(runner.owner.config.package.semantic_output_language.value, ir)
     payload = {"delivered_text": delivered, "transcription_lines": transcription, "known_issues": issues,
                "independent_reading": {"text": reading.text, "relationships": [r.model_dump() for r in reading.relationships]}
@@ -333,13 +389,13 @@ async def build_targeted_edit_candidate(runner, ir, block, page, region, source,
 async def build_review_correction_candidate(runner, ir, block, page, region, source, original, folder):
     """Apply the corrections a review spelled out and PaddleOCR confirms; no model call writes text."""
     from app.adapters import ocr
-    from app.pipeline.image_edits import apply_corrections, known_issues, review_corrections, transcription_lines
+    from app.pipeline.image_edits import apply_corrections, known_issues, review_corrections
 
-    delivered = delivered_picture_text(runner, block)
+    delivered = delivered_picture_text(runner, block, ir)
     if not delivered:
         raise ValueError("review_correction_requires_delivered_picture_text")
     lines = await runner.owner._ocr_lines(original, runner.inventory) if ocr.ocr_python() else None
-    issues = known_issues(runner.owner.state, runner.state, page, block.block_id)
+    issues = known_issues(runner.owner.state, runner.state, page, block.block_id, picture_part_ids(ir, block.block_id))
     corrections = review_corrections(issues, delivered, lines or [])
     if not corrections:
         raise ValueError("review_correction_found_no_confirmed_edit")
@@ -349,7 +405,7 @@ async def build_review_correction_candidate(runner, ir, block, page, region, sou
     atomic_write_json(folder / "review-correction.json", record, ensure_ascii=False, indent=2)
     evidence = runner.evidence.add(provider="review_correction", kind="image_edit_record", page=page,
                                    block_id=block.block_id, source=source, content=record)
-    read = [apply_corrections(line, corrections) for line in transcription_lines(runner.root / "outputs", block.block_id)]
+    read = [apply_corrections(line, corrections) for line in picture_read_lines(runner, ir, block)]
     return kept_text_candidate(runner, ir, block, page, region, source, text, [], folder, "review_correction",
                                evidence_ids=[evidence], read_lines=read, new_wording=list(corrections.values()))
 
@@ -380,6 +436,9 @@ def kept_text_candidate(runner, ir, block, page, region, source, kept, statement
         common["agentic_relationship_evidence_id"] = relationship_evidence
     read = {normalized_text(line) for line in read_lines if normalized_text(line)}
     common["agentic_new_wording"] = [w for w in dict.fromkeys(new_wording) if w.strip()]
+    if repaired_parts(ir, block.block_id):
+        # The faults an earlier repair left were known when it was kept; this edit is judged on its own change.
+        common["agentic_improves_repair"] = True
 
     def piece_payload(text):
         lines = [line for line in text.split("\n")
@@ -392,9 +451,38 @@ def kept_text_candidate(runner, ir, block, page, region, source, kept, statement
         replacements.append(Block(block_id=f"recovery_{folder.name}_image_r0", type=BlockType.TEXT,
                                   page_idx=block.page_idx, bbox_norm=region,
                                   payload=piece_payload("\n".join(statements))))
+    return replace_picture(ir, block.block_id, replacements, keep_gaps=True)
+
+
+DEPENDENCY_FIELDS = ("agentic_depends_on_block_ids", "agentic_source_depends_on_block_ids",
+                     "agentic_review_depends_on_block_ids")
+
+
+def replace_picture(ir, block_id, replacements, *, keep_gaps=False):
+    """A copy of the IR with the picture replaced, or a repaired picture's blocks.
+
+    An edit of a repaired picture keeps its gap marker as it was, since an edit leaves what
+    it does not name alone; a re-read replaces the marker as well. A kept marker's links to
+    replaced blocks point at the first replacement.
+    """
     candidate = ir.model_copy(deep=True)
-    index = next(i for i, old in enumerate(candidate.blocks) if old.block_id == block.block_id)
-    candidate.blocks[index:index + 1] = replacements
+    removed = ({block_id} if candidate.get_block(block_id) is not None else
+               {b.block_id for b in candidate.blocks if b.payload.get("agentic_image_origin") == block_id
+                and not (keep_gaps and b.payload.get("agentic_gap"))})
+    if not removed:
+        raise ValueError("picture_has_no_delivered_block_to_replace")
+    index = next(i for i, b in enumerate(candidate.blocks) if b.block_id in removed)
+    candidate.blocks = [*candidate.blocks[:index], *replacements,
+                        *(b for b in candidate.blocks[index:] if b.block_id not in removed)]
+    first = replacements[0].block_id if replacements else None
+    added = {b.block_id for b in replacements}
+    for item in candidate.blocks:
+        if item.payload.get("agentic_image_origin") != block_id or item.block_id in added:
+            continue
+        for field in DEPENDENCY_FIELDS:
+            if set(item.payload.get(field) or []) & removed:
+                item.payload[field] = sorted({first if bid in removed else bid for bid in item.payload[field]}
+                                             - {None, item.block_id})
     for order, item in enumerate(candidate.blocks):
         item.reading_order = order
     return candidate
@@ -484,12 +572,7 @@ def build_image_parts_candidate(runner, ir, block, page, region, source, parts, 
     """Materialize source observations for the same ordinary scoped delivery audit."""
     replacements = build_image_parts_blocks(runner, block, page, region, source, parts, evidence_ids, folder,
         relationship_reading=relationship_reading, relationship_parents=relationship_parents)
-    candidate = ir.model_copy(deep=True)
-    index = next(i for i, old in enumerate(candidate.blocks) if old.block_id == block.block_id)
-    candidate.blocks[index:index + 1] = replacements
-    for order, item in enumerate(candidate.blocks):
-        item.reading_order = order
-    return candidate
+    return replace_picture(ir, block.block_id, replacements)
 
 
 def distinct_text_regions(regions):
@@ -580,14 +663,17 @@ async def validate_image_parts(runner, candidate, pages, folder, origin, *, allo
     from app.pipeline.document_review import PageReview, target_block_reviews
     from app.pipeline.stages.chunk import ChunkStage
 
-    old = runner.inventory.ir.get_block(origin)
+    old = picture_block(runner, runner.inventory.ir, origin)
     selected = [b for b in candidate.blocks if b.payload.get("agentic_image_origin") == origin]
     if not old or old.type != BlockType.IMAGE or not selected or pages != runner.inventory.mapping.get(origin):
         raise ValueError("Image candidate does not match its source scope")
-    before = {b.block_id: b.model_dump(exclude={"reading_order"}) for b in runner.inventory.ir.blocks if b.block_id != origin}
+    # The picture is its block, or for a repaired one the blocks it is delivered as now.
+    outside = [b for b in runner.inventory.ir.blocks
+               if b.block_id != origin and b.payload.get("agentic_image_origin") != origin]
+    before = {b.block_id: b.model_dump(exclude={"reading_order"}) for b in outside}
     after = {b.block_id: b.model_dump(exclude={"reading_order"}) for b in candidate.blocks if b not in selected}
     remaining_order = [b.block_id for b in candidate.blocks if b not in selected]
-    if (before != after or remaining_order != [b.block_id for b in runner.inventory.ir.blocks if b.block_id != origin]
+    if (before != after or remaining_order != [b.block_id for b in outside]
             or len({b.block_id for b in candidate.blocks}) != len(candidate.blocks)):
         raise ValueError("Image candidate changed unrelated source content/order or duplicated block IDs")
     paths = {b.payload.get("agentic_source_image") for b in selected}
@@ -724,7 +810,8 @@ def repaired_picture_problems(review, blocks, *, unattributed=True):
     from app.pipeline.review_policy import picture_problems
 
     readable = {b.block_id for b in blocks if not b.payload.get("agentic_gap")}
-    improving = any(b.payload.get("agentic_image_repair_method") in IMPROVING_METHODS for b in blocks)
+    improving = any(b.payload.get("agentic_image_repair_method") in IMPROVING_METHODS
+                    or b.payload.get("agentic_improves_repair") for b in blocks)
     wording = [w for b in blocks for w in b.payload.get("agentic_new_wording", [])] if improving else []
     return picture_problems(review, readable, new_wording=wording, unattributed=unattributed)
 

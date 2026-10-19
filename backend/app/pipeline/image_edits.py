@@ -13,6 +13,7 @@ same per-image and page audits then decide.
 """
 import json
 import re
+import unicodedata
 from difflib import SequenceMatcher
 from typing import Literal
 
@@ -136,6 +137,12 @@ def _changed_words(new, start, quote, replacement):
 _LATIN_WORD = re.compile(r"[A-Za-z0-9]+(?:[.,/:][0-9]+)*")
 _NUMBER = re.compile(r"[0-9]+(?:[.,/:][0-9]+)*")
 _LABEL = re.compile(r"[^\W\d_]")  # a letter or CJK character: wording beside a number
+# Bopomofo letters printed like a Latin letter or a CJK character.
+_LOOKALIKES = str.maketrans({"ㄚ": "Y", "ㄒ": "T", "ㄨ": "X", "ㄧ": "一", "ㄇ": "冂", "ㄈ": "匚", "ㄏ": "厂", "ㄩ": "凵"})
+
+
+def _lookalike(text):
+    return unicodedata.normalize("NFKC", text).translate(_LOOKALIKES)
 
 
 def _reads(word, text):
@@ -323,6 +330,11 @@ def apply_edits(delivered, edits, *, transcription, ocr_lines, reading, document
         if edit.op == "replace" and edit.replacement == edit.quote:
             # Replayed, 75 proposed edits repeated their quote and 20 only turned zh-TW glyphs simplified.
             refuse(edit, "the edit changes nothing but the script")
+            continue
+        if edit.op == "replace" and _lookalike(edit.quote) == _lookalike(edit.replacement):
+            # A chat partner's 「晴諾茶葉ㄚ倫」 (ㄚ倫, a nickname) became 「…Y倫」 on OCR's reading: the two
+            # glyphs print alike, so neither the readers nor OCR can tell them apart (test run 2026-10-19).
+            refuse(edit, "a lookalike letter of another script is the same print")
             continue
         starts = [match.start() for match in re.finditer(re.escape(edit.quote), text)]
         # An edit names what was delivered, never what another edit of the same proposal wrote.

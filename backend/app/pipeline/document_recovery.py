@@ -39,7 +39,7 @@ from app.pipeline.review_sources import (
     needs_content_recovery,
 )
 
-RECOVERY_VERSION = "document-tools-v17-repaired-pictures-stay-repairable"
+RECOVERY_VERSION = "document-tools-v18-rereads-keep-provenance-disputes-stay"
 SKILLS = Path(__file__).with_name("recovery_skills")
 TOOL_DESCRIPTIONS = {
     "ocr_image": "Only for small disputed lettering: PaddleOCR on ONE smaller original-image 0..1000 region of one mapped image at scale 2/4, around a line bbox an earlier OCR returned. repair_image already reads the whole picture with PaddleOCR itself, so a whole-image OCR request is run as repair_image. Returns source-bound line IDs, coordinates and scores. No content is published.",

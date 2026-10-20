@@ -146,14 +146,19 @@ def keep_drafted_read_lines(parts, drafted, issues, ocr_lines=()):
     from app.pipeline.image_edits import _misreading
     reread = [line for item in reread_lines(parts) for line in item.split("\n") if normalized_text(line)]
     ocr = "\n".join(ocr_lines or [])
+    draft = "\n".join(drafted)
     carried, named, contested = [], [], []
     for line in drafted:
         if not normalized_text(line) or appears_in(line, read):
             continue
         # The re-read read the same line better when OCR reads its version and not the drafted one:
-        # 「由晴偃恩發佈」 was carried beside the re-read's 「由晴偃思發佈」 (rerun 2026-10-16).
+        # 「由晴偃恩發佈」 was carried beside the re-read's 「由晴偃思發佈」 (rerun 2026-10-16). A piece
+        # of a drafted line, or another line the draft has, is no other version of it: an award wall
+        # lost 「THE COMMUNICATOR AWARDS」 to OCR's 「COMMUNICATOR」 and 「GEWINNER」 to the
+        # 「BERLINER」 of another logo (test run 2026-10-19).
         if any(q in normalized_text(line) for q in wrong) or ocr and not appears_in(line, ocr) and any(
-                _misreading(line, other) and appears_in(other, ocr) for other in reread):
+                _misreading(line, other) and appears_in(other, ocr) and not appears_in(other, draft)
+                for other in reread):
             named.append(line)
             continue
         carried.append(line)

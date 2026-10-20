@@ -255,38 +255,3 @@ async def test_local_improvement_failure_preserves_already_verified_partial_deli
     assert '黃色拼圖' not in (folder / 'outputs/chunks.jsonl').read_text()
     assert len(model.audits) == (2 if failure == 'audit_rejection' else 1)
     assert not (folder / 'verified-subset').exists()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize('ocr_reads', [None, '晴諾米拼圖工作室'])
-async def test_a_line_read_differently_is_not_covered_away_without_ocr(tmp_path, monkeypatch, ocr_reads):
-    """Test run 2026-10-19: region revision dropped a drafted 「晴偃澧」 as covered by the re-read's 「晴偃澹」 on
-    the audit's word alone. Two readings of one line neither OCR settles both stay, the other one disputed."""
-    class Covered(RegionModel):
-        async def query(self, task, payload, images, schema):
-            if task == 'revise_image_regions':
-                self.proposals.append(payload)
-                target = payload['targets'][0]
-                return {'regions': [{'block_id': target['block_id'], 'region_kind': 'text', 'covered_by': 'sign',
-                    'evidence_ids': [target['source_evidence_id']], 'reason': 'Same lettering as sign.'}]}, 10
-            return await super().query(task, payload, images, schema)
-    model = Covered('reject')
-    _, owner, runner, candidate, folder = await local_candidate(tmp_path, model)
-    icon = candidate.get_block('icon')
-    icon.payload.pop('agentic_gap')
-    icon.payload.update(text='圖片文字：晴諾來拼圖工作室', agentic_image_region=[350, 125, 650, 175])
-    from app.adapters import ocr
-    monkeypatch.setattr(ocr, 'ocr_python', lambda: '/usr/bin/python3' if ocr_reads else None)
-
-    async def lines(*_):
-        return [ocr_reads]
-    owner._ocr_lines = lines
-    await runner.validate(candidate, [0], folder, image_origin='picture')
-    assert len(model.proposals) == 1
-    assert json.loads((folder / 'image-region-patch.json').read_text())['proposal']['regions'][0]['covered_by'] == 'sign'
-    # What the revision delivered, before any later audit of it.
-    revised = (folder / 'region-revision/outputs/chunks.jsonl').read_text()
-    if ocr_reads:
-        assert '晴諾來' not in revised
-    else:
-        assert '圖片文字（有疑義，未核對）：晴諾來拼圖工作室' in revised and '晴諾米拼圖工作室' in revised

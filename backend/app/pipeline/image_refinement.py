@@ -8,7 +8,6 @@ from app.pipeline.image_reading import (
     overlap,
     read_contract,
 )
-from app.pipeline.image_source_review import appears_in
 from app.pipeline.recovery_models import ImageRegionPatch
 from app.pipeline.review_budget import call_seconds
 from app.pipeline.semantic.language import resolve_semantic_output_language
@@ -33,35 +32,6 @@ def mark_region_omitted(block, origin, page):
     block.payload.update(text=gap_marker(page, regions),
                          agentic_information_status="uncertain", agentic_region_kind="uncertain")
     block.payload["agentic_gap"] = picture_gap(origin, regions)
-
-
-def another_reading(block, other):
-    """The line a read block holds when the block covering it reads that line differently, else None."""
-    from app.pipeline.image_recovery import READ_LINE_PREFIX
-
-    text = block.payload.get("text") or ""
-    if block.payload.get("agentic_gap") or not text.startswith(READ_LINE_PREFIX):
-        return None
-    line = text[len(READ_LINE_PREFIX):]
-    return None if appears_in(line, other.get_text()) else line
-
-
-def settled_by_ocr(line, other, ocr_lines):
-    """PaddleOCR reads the covering version of a line and not this one."""
-    from app.pipeline.image_recovery import READ_LINE_PREFIX
-
-    ocr = "\n".join(ocr_lines or [])
-    parts = [part.removeprefix(READ_LINE_PREFIX) for part in other.split("\n")]
-    return bool(ocr) and not appears_in(line, ocr) and any(appears_in(part, ocr) for part in parts if part.strip())
-
-
-async def picture_ocr_lines(runner, origin):
-    from app.adapters import ocr
-
-    original = runner.inventory.word_images.get(origin)
-    if original is None or not ocr.ocr_python():
-        return []
-    return await runner.owner._ocr_lines(original, runner.inventory) or []
 
 
 async def revise_image_regions(runner, candidate, selected, review, source, folder, origin, page):
@@ -97,8 +67,7 @@ async def revise_image_regions(runner, candidate, selected, review, source, fold
         raise ReadingFormatError("image_region_patch_unowned_source_evidence")
     retained = {b.block_id: b for b in selected if b not in targets}
     target_boxes = {s["block_id"]: s["bbox"] for s in specs}
-    covered, disputed = {}, set()
-    ocr_lines = None
+    covered = {}
     for item in proposal.regions:
         if not item.covered_by:
             continue
@@ -106,23 +75,12 @@ async def revise_image_regions(runner, candidate, selected, review, source, fold
         if (other is None or not overlap(target_boxes[item.block_id],
                 other.payload.get("agentic_image_region", [0, 0, 1000, 1000]))):
             raise ReadingFormatError("image_region_patch_invalid_coverage_link")
-        line = another_reading(candidate.get_block(item.block_id), other)
-        if line is not None:
-            if ocr_lines is None:
-                ocr_lines = await picture_ocr_lines(runner, origin)
-            if not settled_by_ocr(line, other.get_text(), ocr_lines):
-                # A read line the covering one reads differently is a dispute, not a duplicate: a drafted
-                # 「晴偃澧」 went for the re-read's 「晴偃澹」 on the audit's word (test run 2026-10-19).
-                disputed.add(item.block_id)
-                continue
         covered[item.block_id] = item.covered_by
     revised = candidate.model_copy(deep=True)
     for item in proposal.regions:
         block = revised.get_block(item.block_id)
         block.payload.pop("agentic_gap", None)
-        if item.block_id in disputed:
-            mark_region_omitted(block, origin, page)
-        elif item.covered_by:
+        if item.covered_by:
             pass  # Only the independently audited variant may remove this duplicate.
         elif item.region_kind == "uncertain":
             mark_region_omitted(block, origin, page)
@@ -142,7 +100,7 @@ async def revise_image_regions(runner, candidate, selected, review, source, fold
             content=item.model_dump(), parents=item.evidence_ids,
             metadata={"model_config_sha256": VLMAdapter.compute_config_hash(runner.owner.config.vlm)})
         original_refs = set(block.payload.get("agentic_evidence_ids", []))
-        if item.block_id in covered:
+        if item.covered_by:
             block = revised.get_block(item.covered_by)
         block.payload["agentic_evidence_ids"] = sorted(original_refs | set(block.payload.get("agentic_evidence_ids", []))
                                                       | set(item.evidence_ids) | {eid})

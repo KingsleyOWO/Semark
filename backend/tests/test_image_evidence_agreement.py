@@ -97,3 +97,33 @@ async def test_a_table_keeps_its_supported_cells_beside_one_disputed_cell(tmp_pa
     assert [r["text"] for r in candidate["text_regions"]] == ["晴諾米"]
     assert [g["reason"] for g in candidate["gaps"]] == ["image_text_readings_conflict"]
     assert candidate["text_dependent"] and not candidate["visual_facts"]
+
+
+@pytest.mark.asyncio
+async def test_an_ocr_line_no_model_reads_is_not_delivered(tmp_path):
+    """Test run 2026-10-19: the adjudication supported OCR's 「Publlc」 because 「Public」 was printed there,
+    and the re-read delivered OCR's spelling. Only a line a model also reads is delivered."""
+    class Select(RecoveryModel):
+        async def query(self, task, payload, image, schema):
+            rows = [{"source_ref": c["source_ref"], "decision": "supported", "reason": "Pixels"}
+                    for c in payload["candidates"]]
+            return {"selections": rows, "accounted_for": True, "observation": "Needs source audit"}, 10
+
+    ir, _, runner = await setup(tmp_path, Select())
+    block = ir.blocks[0]
+    source = runner.inventory.image(0)
+    runner.evidence.add(provider="paddleocr", kind="transcription", page=0, block_id=block.block_id,
+                        source=source, content={"region": [0, 0, 1000, 1000], "scale": 2, "lines": [
+                            {"line_id": "line0", "text": "晴諾米", "score": .9, "bbox": [0, 300, 1000, 500]},
+                            {"line_id": "line1", "text": "Publlc", "score": .8, "bbox": [0, 600, 200, 650]},
+                            {"line_id": "line2", "text": "Traffle y laBon", "score": .7, "bbox": [0, 800, 400, 900]}]})
+    regions = [{"region_id": "name", "bbox": [0, 300, 1000, 500], "readable": True, "text": "晴諾米"},
+               {"region_id": "society", "bbox": [0, 600, 1000, 700], "readable": True, "text": "Public Relations"}]
+    primary = parts(kind="table", text_regions=regions)
+    independent = parts(kind="table", text_regions=regions)
+    candidate, _ = await resolve_image_evidence(runner, block, 0, source, primary, independent, {},
+                                                reconcile_image_parts(primary, independent), tmp_path)
+    assert sorted(r["text"] for r in candidate["text_regions"]) == ["Public Relations", "晴諾米"]
+    # Print only OCR saw, where no delivered reading is, stays marked unread.
+    assert [(g["bbox"], g["reason"]) for g in candidate["gaps"]] == [
+        ([0, 800, 400, 900], "image_text_unresolved_after_evidence_review")]

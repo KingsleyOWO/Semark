@@ -153,7 +153,9 @@ async def test_source_adjudication_can_replace_wrong_prior_but_cannot_invent_ids
             await resolve()
     else:
         candidate, ids = await resolve()
-        assert [t['text'] for t in candidate['text_regions']] == ['Correct'] and not candidate['gaps']
+        # What only OCR reads is not delivered in OCR's spelling (test run 2026-10-19); the region stays unread.
+        assert not candidate['text_regions']
+        assert [g['reason'] for g in candidate['gaps']] == ['image_text_unresolved_after_evidence_review']
         assert all(runner.evidence.get(eid)['status'] == 'observation' for eid in ids)
         assert json.loads((tmp_path / 'evidence-resolution.json').read_text())['status'] == 'candidate_requires_source_audit'
 
@@ -287,7 +289,9 @@ async def test_resolution_links_different_detector_boxes_without_duplicate_gap(t
             await resolve()
     else:
         candidate,_ = await resolve()
-        assert not candidate['gaps'] and candidate['text_regions'][0]['text']=='Correct'
+        # One gap for the linked boxes; OCR's 'Correct', which no model reads, is not delivered.
+        assert not candidate['text_regions']
+        assert [g['bbox'] for g in candidate['gaps']] == [[300,100,700,250]]
 
 
 def test_final_audit_rejection_returns_bounded_actionable_feedback(tmp_path):

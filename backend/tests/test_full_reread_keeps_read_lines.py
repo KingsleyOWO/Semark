@@ -158,3 +158,13 @@ def test_a_drafted_line_the_reread_reads_better_with_ocr_is_not_carried_beside_i
     # Without OCR for the re-read's version, the drafted line stays: two model readings, neither settled.
     _, carried, named, _ = keep_drafted_read_lines(parts, ["由晴偃恩發佈 · 6月6日"], [], ocr_lines=["晴諾米"])
     assert carried == ["由晴偃恩發佈 · 6月6日"] and named == []
+
+
+def test_a_piece_of_a_drafted_line_or_another_drafted_line_is_no_other_version_of_it():
+    """Test run 2026-10-19: an award wall lost 「THE COMMUNICATOR AWARDS」 to OCR's 「COMMUNICATOR」 and
+    「GEWINNER」 to the 「BERLINER」 of another logo, both read as better versions of the drafted lines."""
+    drafted = ["THE COMMUNICATOR AWARDS", "GEWINNER", "BERLINER TYPE AWARD", "由晴偃恩發佈"]
+    parts = _parts(texts=["COMMUNICATOR", "BERLINER", "BERLINER TYPE AWARD", "由晴偃思發佈"])
+    _, carried, named, _ = keep_drafted_read_lines(parts, drafted, [],
+                                                   ocr_lines=["COMMUNICATOR", "BERLINER", "由晴偃思發佈"])
+    assert carried == ["THE COMMUNICATOR AWARDS", "GEWINNER"] and named == ["由晴偃恩發佈"]

@@ -55,7 +55,11 @@ async def resolve_image_evidence(runner, block, page, source, primary, independe
                 or not overlap(available[selection.source_ref]["bbox"], available[selection.covered_by]["bbox"])):
             raise ReadingFormatError("image_resolution_invalid_region_link")
     decisions = {s.source_ref: s for s in resolution.selections}
-    retained, disputed = select_agreeing_readings(selected)
+    # An OCR line still disputes the reading it overlaps, but is delivered only where a model reads it too.
+    unconfirmed = ocr_lines_no_reader_reads(selected, candidates, prior)
+    _, disputed = select_agreeing_readings(selected)
+    retained = [item for item in select_agreeing_readings([c for c in selected if c not in unconfirmed])[0]
+                if not any(overlap(item["bbox"], bbox) >= 0.5 for bbox in disputed)]
     # Replace only gaps for source regions that have now been directly resolved.
     gaps = protocol_gaps + [g for g in parts["gaps"] if g["reason"] not in {
         "image_text_unreadable_or_disputed", "image_text_not_accounted_for_by_both_readers",
@@ -74,6 +78,10 @@ async def resolve_image_evidence(runner, block, page, source, primary, independe
         if selection.decision == "uncertain" and not selection.covered_by and not any(overlap(item["bbox"], s["bbox"]) >= 0.5 for s in retained):
             if not any(overlap(item["bbox"], gap["bbox"]) >= 0.5 for gap in gaps):
                 gaps.append({"bbox": item["bbox"], "reason": "image_text_unresolved_after_evidence_review"})
+    for item in unconfirmed:
+        # Print only OCR saw is marked unread where no delivered reading touches it.
+        if not any(overlap(item["bbox"], s["bbox"]) for s in retained) and not any(overlap(item["bbox"], g["bbox"]) for g in gaps):
+            gaps.append({"bbox": item["bbox"], "reason": "image_text_unresolved_after_evidence_review"})
     if not resolution.accounted_for and not protocol_gaps:
         gaps.append({"bbox": [0, 0, 1000, 1000], "reason": "image_evidence_coverage_incomplete"})
     text_dependent = parts["text_dependent"]
@@ -121,6 +129,21 @@ def one_ocr_observation(observations, source_sha):
 def _folded(text):
     from app.pipeline.zh_text import to_taiwan_traditional
     return normalized_text(to_taiwan_traditional(text))
+
+
+def ocr_lines_no_reader_reads(selected, candidates, prior):
+    """Supported PaddleOCR lines whose words no model reading of the picture has.
+
+    PaddleOCR is evidence, not a reader. The adjudication supports a line by the
+    word it sees there, not by OCR's spelling: in three test runs (2026-10-16/19)
+    78 supported OCR lines no model read were nearly all misspelt 「Publlc」,
+    「Traffle y laBon」, 「消费苦對加工」, and audits failed the re-reads for them.
+    """
+    texts = [c["text"] for c in candidates if c["provider"] != "paddleocr"]
+    if isinstance((prior or {}).get("text"), str):
+        texts.append(prior["text"])
+    read = "\n".join(_folded(text) for text in texts)
+    return [c for c in selected if c["provider"] == "paddleocr" and _folded(c["text"]) not in read]
 
 
 def select_agreeing_readings(selected):

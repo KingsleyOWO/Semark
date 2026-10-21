@@ -98,7 +98,7 @@ async def repair_image(runner, ir, problem, decision, folder, skill):
     }, ensure_ascii=False, indent=2)
     # Audits of such candidates were spent on what was already delivered, on gaps, or on a line
     # the same audits would fault again.
-    if not named and not any(not appears_in(line, "\n".join(drafted)) for line in reread_lines(parts)):
+    if not named and not any(not read_whole(line, "\n".join(drafted)) for line in reread_lines(parts)):
         raise ValueError("full_reread_found_nothing_new")
     if contested:
         raise ValueError("full_reread_could_not_settle_a_disputed_line")
@@ -112,6 +112,53 @@ def reread_lines(parts):
 # A remark saying quoted wording is not in the picture at all, as opposed to omitted or misplaced.
 _NOT_IN_PICTURE = re.compile(r"不存在|並未出現|未出現在|虛構|捏造|無中生有|憑空|"
                              r"not (?:present|visible|shown|found) in|does not (?:appear|exist)|hallucin|fabricat|invent", re.I)
+
+
+def _kind(char):
+    return "digit" if char.isascii() and char.isdigit() else "letter" if char.isascii() and char.isalpha() else None
+
+
+def _letters(text):
+    """normalized_text's characters, each with whether a space or punctuation mark comes before it
+    ('.', ',', '/' or ':' between two digits joins one number, as in 3.33)."""
+    from app.pipeline.content_coverage import plain_text
+
+    text = plain_text(text)
+    chars, cuts, cut = [], [], True
+    for index, char in enumerate(text):
+        if re.match(r"\w", char):
+            for folded in char.casefold():
+                chars.append(folded)
+                cuts.append(cut)
+                cut = False
+        elif not (char in ".,/:" and 0 < index < len(text) - 1 and text[index - 1].isdigit()
+                  and text[index + 1].isdigit()):
+            cut = True
+    return "".join(chars), cuts
+
+
+def read_whole(line, text):
+    """appears_in, but never as part of a longer Latin word or number, nor as a number joined across a
+    break the line does not have. Test run 2026-10-21: 「Active」 counted as re-read inside 「Attractive」
+    and a count 「×5」 inside 「15」, so neither was carried; 「12」 is not 「1 2」. Other breaks are line
+    wrapping or spacing (「TAIWANDESIGN」 is 「TAIWAN DESIGN」)."""
+    from app.pipeline.zh_text import to_taiwan_traditional
+
+    for convert in (str, to_taiwan_traditional):
+        piece, piece_cuts = _letters(convert(line))
+        if not piece:
+            return True
+        body, body_cuts = _letters(convert(text))
+        start = body.find(piece)
+        while start >= 0:
+            end = start + len(piece)
+            if not ((start > 0 and not body_cuts[start] and _kind(body[start - 1]) == _kind(piece[0]) is not None)
+                    or (end < len(body) and not body_cuts[end] and _kind(body[end]) == _kind(piece[-1]) is not None)
+                    or any(body_cuts[i] and not piece_cuts[i - start] and _kind(body[i - 1]) == _kind(body[i]) == "digit"
+                           for i in range(start + 1, end))):
+                return True
+            start = body.find(piece, start + 1)
+    return False
 
 
 def keep_drafted_read_lines(parts, drafted, issues, ocr_lines=()):
@@ -149,7 +196,7 @@ def keep_drafted_read_lines(parts, drafted, issues, ocr_lines=()):
     draft = "\n".join(drafted)
     carried, named, contested = [], [], []
     for line in drafted:
-        if not normalized_text(line) or appears_in(line, read):
+        if not normalized_text(line) or read_whole(line, read):
             continue
         # The re-read read the same line better when OCR reads its version and not the drafted one:
         # 「由晴偃恩發佈」 was carried beside the re-read's 「由晴偃思發佈」 (rerun 2026-10-16). A piece
@@ -592,16 +639,19 @@ def distinct_text_regions(regions):
 
     Readers return a block and then its lines, or a line and a phrase inside it: one
     table shipped 「Customer\\nCost…」 and each word again, a photo ten nested regions.
-    A region whose text another one contains (an equal one: a later one) adds nothing.
+    A region whose text another one contains (an equal one: a later one) adds nothing, but
+    a word is not inside a longer one: a whiteboard lost 「Active」 to 「Attractive」 (test run 2026-10-21).
     """
     from app.pipeline.content_coverage import normalized_text
     from app.pipeline.zh_text import to_taiwan_traditional
 
-    texts = [normalized_text(to_taiwan_traditional(item["text"])) for item in regions]
+    texts = [to_taiwan_traditional(item["text"]) for item in regions]
+    keys = [normalized_text(text) for text in texts]
     return [item for index, item in enumerate(regions)
-            if texts[index] and not any(other != index and texts[index] in texts[other]
-                                        and (len(texts[other]) > len(texts[index]) or other < index)
-                                        for other in range(len(regions)))]
+            if keys[index] and not any(other != index and keys[index] in keys[other]
+                                       and (len(keys[other]) > len(keys[index]) or other < index)
+                                       and read_whole(texts[index], texts[other])
+                                       for other in range(len(regions)))]
 
 
 def build_image_parts_blocks(runner, block, page, region, source, parts, evidence_ids, folder,

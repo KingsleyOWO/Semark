@@ -2,659 +2,104 @@
 
 [English](README.md) | **繁體中文**
 
-> 面向 RAG 的 Semantic Markdown 文件結構化工具：將 PDF、Office、HTML、圖片轉成 RAG-ready Markdown、chunks、source maps 與自動分檔輸出。
+> 把 PDF、Word、投影片與圖片轉成 RAG 可用的 Markdown，逐頁對照原文核對，並標明哪些內容已核對、哪些沒有。
 
-**Semark** 是一套開源 Semantic Markdown / 文件語意結構化工具，目標是把 PDF、Office、HTML、圖片等文件轉成可直接用於 RAG、知識庫匯入與大模型問答的 Markdown、結構化 chunks、來源對照與可下載輸出。當長文件中包含多個表單、表格、流程圖、圖示或附件時，系統可以自動拆成主文與獨立語意文件，方便後續資料整理、檢索與匯入知識庫。系統以 MinerU 作為版面、OCR 與文件解析 evidence，並可接入本地或雲端 VLM/LLM 進行表單抽取、流程圖理解、視覺語意補強、最終輸出審核修復與品質檢查。
+Semark 是可自行架設的文件處理服務。它用 MinerU 與 Word 原生解析取出文字、表格與圖片，再交給你指定的視覺模型（本機 Ollama，或任何 OpenAI 相容 API），讀懂表單、流程圖、圖表與操作截圖。最後把每一頁和原文對照，產出可以直接匯入知識庫的 Markdown 與 chunks。
 
-## 軟體目的
+![Semark 把截圖轉成可檢索的語意內容](docs/assets/outreach/semark-vlm-screenshot-before-after.png)
 
-很多文件處理工具只能輸出 OCR 純文字或鬆散的版面結果，對 RAG 來說通常不夠用，因為表格、表單、勾選欄位、流程圖、簽核路徑、注意事項與法律依據很容易失去語意關係。Semark 的重點不是只做 OCR，而是把文件整理成「大模型容易讀、容易召回、容易回答問題」的語意化結構文本。
+## 和一般 PDF 轉 Markdown 工具的差別
 
-適合使用 Semark 的情境：
+- **原文不漏字。** 交付前，逐段檢查原文的文字是否都出現在交付的文件與 chunks 裡，結果寫進品質報告；缺的內容會在審查階段補回或明確標出，不會悄悄消失。
+- **看得懂圖。** 表單、流程圖、圖表、軟體操作截圖會轉成可檢索的文字：欄位、分支條件、紅框標示、選單路徑都留下來。解析器把表格欄位併在一起時，會從表格圖片重建格線。
+- **逐頁核對，誠實標示。** 模型逐頁比對原圖與交付內容，發現錯誤就修正並重新核對。看不清的地方標「無法可靠辨識」，不猜；沒能核對的圖片只保留從圖上讀到的字，並在閱讀版標「未核對」。
+- **資料留在你手上。** 可以完全在本機或內網執行，沒有設定雲端端點就不會把文件送出去。
 
-- 將 PDF、Office、HTML、圖片轉成 RAG-ready Markdown。
-- 使用 MinerU 做文件解析，但需要更完整的 UI/API 與輸出管理。
-- 針對表單、圖表、流程圖、圖片型文件接入 VLM 做語意理解。
-- 表格修復：解析器把整列的欄位邊界併成一格時，重新讀取表格圖片並還原格線，讓欄位在輸出中維持分開。
-- 以螢幕截圖為主的教學／操作說明文件：截圖會被轉成語意描述、選單與按鈕路徑、畫面上的文字，而不是檢索不到的圖片。
-- 自動分檔長文件中的表單、表格、流程圖、圖示或附件，形成主文與可獨立檢索的子文件。
-- 只下載主文：下載選單可以只匯出主文（與文件檢視顯示的內容一致），支援 MD/DOCX/TXT。
-- 遮蔽個人資訊：OCR/VLM 轉錄截圖時容易帶出的個人內容，可在輸出前確定性遮蔽。
-- 支援英文與繁體中文輸出，專有名詞可保留英文。
-- 希望文件留在本機或內網處理，模型端點可自行選擇本地 Ollama 或雲端 OpenAI-compatible API。
+## 看看效果
 
-## Demo Preview
-
-每個 demo 都把「真實的公開來源頁面」與「產出的 RAG-ready semantic Markdown」放在一起，而且各自對準一個具體痛點。完整檔案（主文、圖片語意文件、chunks、品質報告）位於 `examples/demos/`。
+每個 demo 都把公開的來源頁面和 Semark 的輸出並排比較，完整說明在 [docs/DEMOS.zh-TW.md](docs/DEMOS.zh-TW.md)，檔案在 `examples/demos/`。
 
 | 痛點 | Semark 的做法 | Demo |
 | --- | --- | --- |
-| 教學手冊裡的 UI 截圖對檢索是隱形的——選單名稱、紅框標示、欄位提示都只是像素 | 截圖轉成語意描述、選單／按鈕路徑、與畫面文字比對過的可檢索內容 | [繁中截圖教學](#繁體中文截圖教學國庫繳款書列印) |
-| 流程圖一變成文字就失去決策邏輯 | 條件、分支、負責單位寫成結構化 Markdown | [繁中流程圖](#繁體中文流程圖性騷擾申訴對象標準作業流程) |
-| 截圖為主的版面容易被解析器誤判，OCR 雜訊直接流進知識庫 | Reviewer 模型重建成乾淨的分步指南，裝飾性圖示自動過濾 | [英文截圖教學](#英文截圖教學va-入口網登入) |
-| 表單 OCR 出來是一鍋欄位湯，沒有可用結構 | 用途、填寫規則、欄位分組、法律聲明整理成固定 RAG 模板 | [英文表單](#英文表單uscis-g-1145) |
+| 操作手冊裡的截圖對檢索是隱形的：選單名稱、紅框、欄位提示都只是像素 | 截圖轉成語意描述、選單／按鈕路徑，以及和畫面文字比對過的內容 | [繁中截圖教學](docs/DEMOS.zh-TW.md#繁體中文截圖教學國庫繳款書列印) |
+| 流程圖一變成文字，判斷邏輯就不見了 | 條件、分支、負責單位寫成結構化 Markdown | [繁中流程圖](docs/DEMOS.zh-TW.md#繁體中文流程圖性騷擾申訴對象標準作業流程) |
+| 截圖為主的頁面被誤判，OCR 雜訊直接進知識庫 | 重建成乾淨的分步指南，裝飾性圖示自動過濾 | [英文截圖教學](docs/DEMOS.zh-TW.md#英文截圖教學va-入口網登入) |
+| 表單 OCR 出來是一堆沒有結構的欄位 | 用途、填寫規則、欄位分組、法律聲明整理成固定格式 | [英文表單](docs/DEMOS.zh-TW.md#英文表單uscis-g-1145) |
 
-> **關於個人資訊**：以上截圖 demo 的來源都是公開文件，不含個人資訊。實際使用時，「遮蔽個人資訊」預設開啟，會把截圖轉錄常見的個人內容（信件主旨與寄件人、網域帳號工號、email 帳號數字）在輸出前確定性遮蔽；但遮蔽是樣式比對的最後防線——如果你完全不希望個人資訊出現在文檔裡，最可靠的做法是**準備截圖時就不要納入個人資訊**（先蓋掉或模糊化再截圖）。詳見[截圖文件與個人資訊](#截圖文件與個人資訊)。
+## 快速開始
 
-### 繁體中文截圖教學：國庫繳款書列印
-
-**痛點：** 截圖型手冊裡真正重要的資訊——點哪個選單、哪個選項被紅框標示、每個欄位要填什麼——都在圖片裡，純 OCR 管線檢索不到。
-
-**來源頁面**（第 2 頁，資料登打畫面）
-
-![國庫繳款書操作說明來源頁](examples/demos/zh-screenshot-guide-01/source-page-2.png)
-
-**只做解析／OCR 的管線會得到什麼**——這是解析層對兩頁的「完整」原始輸出（[raw-parse.md](examples/demos/zh-screenshot-guide-01/raw-parse.md)）：
-
-```markdown
-列印國庫繳款書操作說明  
-![](images/3501ffcf4badafeb0891e3722c14444ba46ea14600b95ba58ebbf80e14e515ca.jpg)
-
-版權所有©中華民國109年，財政部國庫署，建議解析度1024×768以上。客服電話:02-2395-7500#325,#32920160302-1517
-
-【說明】
-
-請使用 Google chrome 瀏覽器，連結至「國庫收支書表條碼化 web 版」首頁」（http://veb.nta.gov.tw/），點選畫面左上角「繳款書(01)條碼化作業」，進入資料登打畫面。
-
-![](images/f93289d3a314f46910d41d95a3175e6bea439cd6b9d11ce84166e60d877ac1b4.jpg)
-
-## 【說明】
-
-1. 請依紅框說明文字輸入相關資訊後，點選右上角「列印」即可產製國庫繳款書（為利條碼讀取，請以雷射印表機列印）。
-
-2. 備註欄案號，請填法院裁定遺管人之案號(如：台北地院108年度司繼字第0號)。
-```
-
-整個資料登打畫面——每個欄位、每個提示值、所有紅框——就是那一行死圖連結。對這份輸出做 RAG，關於表單的任何問題都答不出來。
-
-**Semark 產出的 semantic Markdown**（主文節錄，[完整主文](examples/demos/zh-screenshot-guide-01/output.md)）
-
-```markdown
-# 列印國庫繳款書操作說明
-
-頂部導航欄包含四個條碼化作業選項：繳款書(01)、支出收回書(02)、收入退還書(03) 和 轉正通知書(05/04)。
-「繳款書(01)條碼化作業」選項被紅框特別標示。
-
-【說明】
-請使用 Google chrome 瀏覽器，連結至「國庫收支書表條碼化 web 版」首頁」（http://veb.nta.gov.tw/），點選畫面左上角「繳款書(01)條碼化作業」，進入資料登打畫面。
-
-頁面標題為 VEB001R 繳款書(01)條碼化作業。
-收入科目代號需輸入「12171002103」。
-收入科目名稱需輸入「其他雜項收入」。
-收入機關代號與對帳機關代號均需輸入「1710003」。
-填發機關、收入機關名稱及對帳機關名稱均需輸入「國庫署」。
-繳款人欄位提示格式為「遺管人○○○繳納被繼承人○○○賸餘現金」。
-備註欄位需輸入聯絡電話及案號。
-
-## 【說明】
-1. 請依紅框說明文字輸入相關資訊後，點選右上角「列印」即可產製國庫繳款書（為利條碼讀取，請以雷射印表機列印）。
-2. 備註欄案號，請填法院裁定遺管人之案號(如：台北地院108年度司繼字第0號)。
-```
-
-截圖裡的紅框標示與欄位提示全部變成可檢索的純文字——對 RAG 系統問「收入科目代號要填什麼」，它可以拿這一頁當來源回答「12171002103」。
-
-### 繁體中文流程圖：性騷擾申訴對象標準作業流程
-
-**痛點：** 流程圖的決策邏輯（適用哪部法、誰調查、期限多久）在圖片被丟棄或攤平成 OCR 的那一刻就消失了。
-
-**來源頁面**
-
-![Traditional Chinese flowchart source page](examples/demos/zh-flowchart-01/source-page.png)
-
-**完整語意化 Markdown**
-
-```markdown
-# 不同性騷擾申訴對象標準作業流程圖
-
-版本日期：1130801製（民國113年8月1日）
-
-適用目的：規範被害人提出性騷擾申訴後，依事件場域及當事人身分關係判斷適用法律，並啟動相應調查或處理程序之標準作業流程。
-
-## 一、適用法律判斷基準
-
-依性騷擾事件發生之場域及當事人之身分關係，判斷適用以下法律：
-
-### 《性別平等工作法》適用情形
-
-- 執行職務或求職時遭受性騷擾。
-- 於非工作時間遭受所屬機關（學校）之同一人，為持續性性騷擾。
-- 於非工作時間遭受不同機關學校，具共同作業或業務往來關係之同一人，為持續性性騷擾。
-
-### 《性別平等教育法》適用情形
-
-- 不論發生在上、下課期間或校內、外，事件之一方為學生，另一方為校長、教師、職員、工友或學生，即屬校園性別事件。
-
-### 《性騷擾防治法》適用情形
-
-- 非屬《性別平等工作法》及《性別平等教育法》適用對象時。
-
-## 二、申訴處理流程與調查程序
-
-起點：被害人提出申訴 → 判斷適用法律 → 依行為人身分啟動對應程序。
-
-### （一）適用《性別平等工作法》或《性別平等教育法》
-
-- 行為人是機關人員：依機關內部規定啟動調查程序。
-- 行為人是學校人員：依學校內部規定啟動調查程序。
-
-### （二）適用《性騷擾防治法》（依行為人身分分流）
-
-行為人是機關人員／學校人員：
-
-- 判斷是否有不予受理之情形？
-- 是：移送本府社會處確認 → 認應續行調查 → 函復調查單位續行調查。
-- 否：回歸依機關／學校內部規定啟動調查程序。
-
-行為人無雇主、身分不明、不知道是誰或找不到：
-
-- 向性騷擾事件發生地之警察機關提出申訴。
-
-## 三、填寫與處理說明
-
-- 本流程圖為標準作業指引，各機關（學校）應依內部規定配合執行調查程序。
-- 涉及移送社會處確認或警察機關申訴之案件，應保留完整紀錄並函復相關調查單位。
-```
-
-### 英文截圖教學：VA 入口網登入
-
-**痛點：** 文字與 UI 截圖混排的頁面常被誤判成可填寫表單，產出不是模板噪音就是原始 OCR。這份 demo 中 reviewer 修復把頁面重建回它真正的樣子——一份分步指南。
-
-**來源頁面**（第 1 頁，Authorized Use 對話框）
-
-![VA 入口網指南來源頁](examples/demos/en-screenshot-guide-01/source-page-1.png)
-
-**只做解析／OCR 的管線會得到什麼**（原始輸出節錄，[raw-parse.md](examples/demos/en-screenshot-guide-01/raw-parse.md)）：
-
-```markdown
-![](images/ad9812033c62175142ad60e21944a961cce1451dd0cc4e2c9b49f6885afd327b.jpg)
-
-![](images/840bd0d482fed59b2cb8354121663026b1fe2c13f489952db74f61d881ce9538.jpg)
-
-## 1. After reading the Authorized Use Only, click “I Agree”.
-
-## AAuthorized Use Only
-
-• Deny access to this system
-
-![](images/50898e8b5a1d79fb899f60735826565bca2af476bcae51dcd3735ee9c387cb18.jpg)
-```
-
-截圖全是死圖連結（入口網面板上的 VA10091、SAM.gov、聯絡資訊在文字層完全不存在），OCR 錯字「AAuthorized」被升級成章節標題，操作步驟也變成了標題。
-
-**Semark 產出的 semantic Markdown**（主文節錄，[完整主文](examples/demos/en-screenshot-guide-01/output.md)）
-
-```markdown
-# Welcome to the VA Customer Engagement Portal (CEP)
-
-After logging in through **ID.me**, the **Customer Engagement Portal** home page will appear. On the home page, locate the **Vendor Account Setup and Updates** "Login" button.
-
-## Things you will need to get started
-*   Your current banking information where you want your payments to go to.
-*   If this is an update to a previous enrollment, you will need your previous banking information.
-
-## Time to complete
-Completing the webform should take **5 to 20 minutes**. Once you start your form, you cannot save your progress or information to go back to later.
-
-## Instructions
-
-### 1. Accept Terms of Use
-After reading the **Authorized Use Only** notice, click "**I Agree**".
-
-### 2. Navigate to Vendor Setup
-Click the "**Login**" button under the **Vendor Account Setup and Updates** header.
-
-> **Note:** Do not click on the "**Claim/Invoice Status**" Login button as it will direct you to the part of the Customer Engagement Portal for that activity.
-
-## Vendor File Form (VA10091) Details
-The Customer Engagement Portal Vendor File Form has 5 specific sections:
-1.  Tax ID Information
-2.  Payee Information
-3.  Address/Bank Information
-4.  Add Authorized Representative Contact/s
-5.  Review
-```
-
-裝飾性的警告小圖示被自動過濾，有意義的截圖各自成為帶接地語意的圖片文件，「不要按錯 Login 按鈕」的警告變成檢索得到的明確指示。
-
-### 英文表單：USCIS G-1145
-
-**痛點：** 政府表單 OCR 出來是一鍋沒有結構的欄位湯；要回答「這張表單做什麼、怎麼填」，需要用途、規則與欄位分組。
-
-**來源頁面**
-
-![USCIS G-1145 source page](examples/demos/en-g1145-01/source-page.png)
-
-**完整語意化 Markdown**
-
-```markdown
-# USCIS Form G-1145: e-Notification of Application/Petition Acceptance
-
-## Identity & Purpose
-- **Form ID:** G-1145 (09/26/14Y)
-- **Agency:** U.S. Citizenship and Immigration Services (USCIS), Department of Homeland Security
-- **Purpose:** Request an electronic notification (e-Notification) via email and/or text message when USCIS accepts your immigration application or petition filed at a Lockbox facility. This service is provided as a convenience and does not grant any status or benefit.
-
-## Instructions for Completion & Submission
-- Complete this form and clip it to the first page of your application package.
-- You will receive one e-Notification per form filed.
-- **Delivery Timeline:** Notifications are sent within 24 hours after USCIS accepts the application.
-- **Recipient Rules:**
-  - Domestic customers: Email and/or text message.
-  - Overseas customers: Email only.
-- **Important Notes:** Undeliverable e-Notifications cannot be resent. The notification will display your receipt number and a link to check case status, but will not contain personal information. USCIS will also mail a physical receipt notice (I-797C) within 10 days of acceptance.
-
-## Required Fields
-Grouped by meaning for completion:
-- **Applicant/Petitioner Identification:**
-  - `Applicant/Petitioner Full Last Name`
-  - `Applicant/Petitioner Full First Name`
-  - `Applicant/Petitioner Full Middle Name`
-- **Contact Information:**
-  - `Email Address` (Required for all)
-  - `Mobile Phone Number (Text Message)` (Required for domestic text notifications)
-
-## Privacy Act Statement & Legal Disclosures
-- **Authorities:** Collected pursuant to section 103(a) of the Immigration and Nationality Act (INA).
-- **Purpose:** To request electronic notification upon USCIS acceptance of immigration forms.
-- **Disclosure:** Provision is voluntary. Failure to provide information may prevent receipt of text/email notifications.
-- **Routine Uses:** Information will be used/disclosed to DHS personnel and contractors per approved system of records notices [DHS/USCIS-007 & DHS/USCIS-001]. May also be shared for law enforcement or national security purposes.
-
-## RAG Query Anchors
-- Form G-1145 e-Notification purpose, Lockbox filing instructions, 24-hour notification timeline, domestic vs overseas delivery rules, I-797C receipt notice mailing timeframe, Privacy Act authorities and routine uses, field completion requirements.
-```
-
-## Demo 模型說明
-
-目前 curated demo snapshots 是在測試環境中使用本地 Ollama 模型 `qwen3.6:35b-a3b-q8_0` 產生，該模型同時作為 enrichment 與 reviewer model。若改用更強的 vision model 或 reviewer model，理論上在語意修復、視覺理解、欄位分組與流程判讀上會有更好的效果。因此 demo 展示的是目前 pipeline 的輸出形態，不代表模型能力上限。
-
-## 截圖文件與個人資訊
-
-Semark 把「截圖為主的文件」（軟體操作手冊、內部教學、新人上手指南）當成一級輸入來處理：
-
-- **截圖理解**：UI 截圖會被轉成語意描述——畫面在顯示什麼、哪個選單或按鈕被標示、畫面上看得到的文字——即使來源是圖片，操作步驟仍然可以被檢索。描述會與文件中實際出現的文字做比對（grounding），抑制幻覺出來的產品或廠商名稱；裝飾性圖示與無法辨識的裁切圖會自動從 RAG 輸出與 chunks 中過濾。
-- **只下載主文**：如果交付成果不需要圖片附件，下載選單可以只匯出主文，內容與文件檢視畫面顯示的完全一致。
-- **個人資訊遮蔽**：真實截圖常常帶出與教學無關的內容（信箱的信件主旨與寄件人、網域帳號工號如 `CORP\x12345`、個人 email 帳號數字）。「遮蔽個人資訊」**預設開啟**（可在設定的「輸出封裝」中關閉），開啟時這些樣式會在所有交付輸出（Markdown、分檔文件、chunks）中被確定性遮蔽，而帳號格式說明這類教學本體會保留。
-
-要提醒的是：遮蔽是針對常見樣式的最後防線，不是保證。如果個人化的圖片或資訊完全不應該出現在文檔上，請在處理前就先把來源截圖中的個人內容蓋掉或模糊化——沒有上傳的內容才是真正不會外流的內容。
-
-## 從這裡開始
-
-- 第一次完整安裝：[從 GitHub 快速啟動](#從-github-快速啟動)。
-- Docker 與 MinerU：[Docker Quickstart](#docker-quickstart)。
-- 本機或雲端模型端點：[VLM Enrichment and Review](#vlm-enrichment-and-review)。
-- 內建範例與可選 public corpus 下載：[Demo Samples](#demo-samples)。
-- 不跑模型也能先看預期輸出：[Demo Preview](#demo-preview)。
-- 這一版改了什麼：[Release Notes 2026-08-12（v0.3.1）](RELEASE_NOTES_20260812.zh-TW.md)。
-
-## 大致運作方式
-
-1. **文件匯入**：透過 UI/API 上傳 PDF、Office、HTML 或圖片。
-2. **MinerU 解析**：抽取 OCR 文字、版面、表格、頁面影像與文件區塊。
-3. **標準化 IR**：後端建立統一的 document IR，保留頁碼、來源 block 與 source map。
-4. **VLM 語意補強**：可選擇對表單、圖片、流程圖、圖表進行視覺理解與欄位抽取；解析器失去欄位邊界的表格，會重新讀取表格裁切圖並還原格線。
-5. **語意包裝與自動分檔**：規則式結構化輸出搭配 reviewer model，產生最後的 RAG-ready Markdown，並將獨立表單、表格、流程圖、圖示或附件拆成子文件。
-6. **品質檢查**：檢查語言一致性、空輸出、錯誤分檔、流程/表單結構與修復結果。
-7. **輸出使用**：可在 Viewer 檢視、下載主文、分檔語意文件、Markdown/chunks/assets 與品質報告，也可直接匯入 RAG 或知識庫系統。
-
-## 支援輸入與輸出
-
-支援輸入：
-
-- PDF
-- DOC/DOCX、PPT/PPTX、XLS/XLSX
-- ODT/ODP/ODS
-- HTML/HTM
-- PNG/JPG/JPEG
-
-DOCX 優先使用原生結構解析；解析失敗時，會自動透過 LibreOffice 轉成 PDF，再執行既有的 PDF 解析流程。原始 Word 會保留，轉出的 PDF 會用於頁面預覽與文字補充。若轉檔回報圖片或版面異常，品質報告會標示 `needs_review`，並在 `parse_report.json` 記錄備援原因與警告。此備援需要 LibreOffice（完整 Docker 映像已包含）。
-
-產出內容包含主文文件，以及在偵測到獨立檢索單元時自動產生的子文件。例如一份長 PDF 可以輸出 `main.md` 作為主文，並另外產生表單、表格、流程圖、圖示、附件或其他結構化區塊的語意 Markdown 檔。
-
-## 從 GitHub 快速啟動
-
-最短的完整功能路徑是 Docker Compose：
+需要 Docker。要用本機模型的話，先在主機上安裝 Ollama 並拉好模型：
 
 ```bash
 git clone https://github.com/KingsleyOWO/Semark.git
 cd Semark
 
-# 可選：如果要接本機 Ollama vision model。
-# Ollama 若尚未啟動，請在另一個 shell 啟動，並先拉取你要使用的模型。
-ollama pull your-vision-model
-
 export SEMARK_VLM_BASE_URL=http://host.docker.internal:11434/v1
 export SEMARK_VLM_API_KEY=ollama
 export SEMARK_VLM_MODEL=your-vision-model
-export SEMARK_REVIEW_VLM_BASE_URL=http://host.docker.internal:11434/v1
-export SEMARK_REVIEW_VLM_API_KEY=ollama
-export SEMARK_REVIEW_VLM_MODEL=your-review-model
 
 docker compose up --build
 ```
 
-打開 `http://localhost:5070`。上傳 PDF、Office、HTML 或圖片，在文件清單勾選上傳的文件，然後使用 `accurate` 執行 MinerU 加上已設定的 VLM/LLM enrichment。`fast` 適合做不跑模型的輕量 smoke test。
+打開 `http://localhost:5070`，上傳文件，勾選後用 `accurate` 執行。完成後在 `Viewer` 對照原頁與輸出，在 `文件管理` 下載 Markdown、DOCX 或 TXT。
 
-在 Linux/WSL 上，如果 container 透過 `host.docker.internal` 連不到主機上的 Ollama，改用 host-network compose：
+- Linux／WSL 的容器若連不到主機上的 Ollama，改用 `docker compose -f docker-compose.full.host.yml up --build`。
+- 改用雲端模型：把 `SEMARK_VLM_BASE_URL` 與 API key 換成服務商提供的值。核對用的模型可以另外指定更強的（`SEMARK_REVIEW_VLM_*`），沒指定就沿用同一個。
+- 本機安裝、常駐 MinerU、連接埠與主機名稱、內建範例等，見 [docs/INSTALL.zh-TW.md](docs/INSTALL.zh-TW.md)。
 
-```bash
-export SEMARK_VLM_MODEL=your-vision-model
-export SEMARK_REVIEW_VLM_MODEL=your-review-model
-docker compose -f docker-compose.full.host.yml up --build
-```
+> **你的資料存在 Docker volume 裡。** `docker compose down -v` 會永久刪除所有上傳文件與處理結果；升級時用不帶 `-v` 的 `docker compose down`。
 
-任務成功後，進入 `Viewer` 檢查來源頁面、語意 Markdown、chunks、quality metadata 與分檔文件；進入 `文件管理` 可以批次下載或單獨下載產出的 Markdown/DOCX/TXT 文件。
+## 運作方式
 
-## 會下載哪些檔案
+1. **解析**：PDF 與圖片交給 MinerU 取出文字、版面與表格；Word 直接讀原生結構（失敗時才轉 PDF）。
+2. **視覺補強**：視覺模型讀表單、流程圖、圖表與截圖；欄位併在一起的表格從圖片重建格線。
+3. **打包分檔**：產出主文與可獨立檢索的子文件（表單、表格、流程圖、圖片），附 chunks 與來源對照。
+4. **逐頁核對**：每一頁都列入清單，模型比對原頁與實際交付內容；有問題時選擇工具修正（重讀圖片、局部改字、補回漏掉的內容），修正後重新產出並再核對一次。
+5. **最終驗證**：檢查原文覆蓋、核對紀錄與交付內容一致，才發布這一版結果。
 
-- `git clone` 只會下載原始碼、文件、synthetic samples 與小型 curated demo snapshots。
-- `docker compose up --build` 會下載 OS packages、Python wheels、npm packages、MinerU dependencies、PyMuPDF、LibreOffice、CJK fonts，以及完整 parser image 所需的 runtime dependencies。
-- 第一次執行 MinerU 時，可能會依 MinerU 上游行為與授權下載 parser/model cache。Docker 會把這些 cache 放在 named volumes，不會進 Git。
-- Semark 不會內建 Ollama models、雲端模型權重、API keys、私人文件、generated outputs 或本機 cache。若使用本機 Ollama，請先在主機上執行 `ollama pull model-name`。
-- `scripts/fetch_demo_corpus.sh` 會把可選的 public test files 下載到 `workspace/demo-corpus/`，該目錄已被 Git 忽略。
+細節與設定見 [backend/docs/agentic-processing.md](backend/docs/agentic-processing.md)。
 
-## Runtime Modes
+## 輸出內容
 
-MinerU 可用三種部署方式執行：
+- `documents/`：匯入 RAG 用的整包文件，包括主文 `main.md` 與各張圖、表、表單的子文件。這裡的文字保持乾淨，核對狀態另外記在 metadata。
+- `chunks.jsonl`：切好的 chunks，每段都帶來源區塊編號。
+- `delivery.md`：給人閱讀的版本，每張圖前面標出核對狀態。
+- 品質與覆蓋報告：哪些頁已核對、哪些待確認，原文文字是否完整交付。
 
-- Simple mode：不設定 `SEMARK_MINERU_API_URL`。`mineru` CLI 會在每次解析時自動啟動暫時的本地 API，最容易使用也最可攜。
-- Service mode：在本機預先啟動常駐 `mineru-api`，並設定 `SEMARK_MINERU_API_URL`，例如 `http://127.0.0.1:8601`。這樣可以避免每次任務重新載入解析資源。
-- Remote mode：將 `SEMARK_MINERU_API_URL` 指向另一台機器上的 MinerU API/router，通常是 GPU 主機。
+閱讀版裡會看到的標示：
 
-如果設定的 MinerU API URL 無法連線，系統會 fallback 到 simple mode，避免 warm service 暫時不可用就讓解析直接失敗。
+| 標示 | 意思 |
+| --- | --- |
+| 〔圖片內容：自動辨識，已核對〕 | 模型讀出的圖片內容，已和原圖比對過 |
+| 〔圖片內容：自動辨識，未核對〕 | 沒能完成比對，只保留從圖上讀到的字 |
+| 〔原文第 N 頁圖片：無法可靠辨識的文字或必要內容〕 | 圖上這部分看不清，留空而不是猜 |
+| 〔內容可能不完整：原文第 N 頁仍有未核對範圍〕 | 這一頁還有沒核對到的部分 |
 
-## Full Feature Quickstart
+英文輸出使用對應的英文標示，例如 `[Image content: automatic reading, verified]`。
 
-如果你要完整功能，也就是 MinerU 解析加上可選的 VLM 語意補強，使用這個安裝流程：
+## 處理時間與限制
 
-```bash
-./scripts/install_full_local.sh
-```
+- **逐頁核對很花時間。** 每份文件預設的處理時間上限是 6 小時（含初稿），時間到就停止核對。舉例：一份 97 頁、圖片很多的 Word 報告，在一台 DGX Spark 上用 27B 的本機視覺模型，初稿約 2 小時、核對約 4.3 小時。要更快，可以縮短時間上限，或在建立工作時把 `agentic.mode` 設成 `off`（見[說明](backend/docs/agentic-processing.md)）。
+- **不保證每頁都核對通過。** 同一份報告 97 頁中有 57 頁完整核對通過，其餘頁面記為待確認或未核對，不會算成通過；時間用完時沒輪到的頁面也一樣。
+- **結果受模型影響。** 圖片的描述句（例如把甜甜圈說成泡芙）不一定擋得下來；圖上的字和數字有比較嚴格的檢查。
+- **OCR 證據是選配的。** 環境裡有 PaddleOCR 時（`SEMARK_OCR_PYTHON_PATH` 指向裝了 `paddleocr` 的 Python），修正圖片時會拿它當第二份證據；預設的 Docker 映像不含 PaddleOCR。
+- **截圖可能帶出個人資訊。** 「遮蔽個人資訊」預設開啟，但它是樣式比對的最後防線；最可靠的做法是上傳前先把個人內容蓋掉。詳見 [docs/DEMOS.zh-TW.md](docs/DEMOS.zh-TW.md#截圖文件與個人資訊)。
 
-這會安裝：
+## 支援格式
 
-- Backend Python dependencies。
-- PyMuPDF，用於 PDF/image 處理。
-- MinerU pipeline dependencies，透過 `mineru` optional dependency group 安裝。
-- Frontend npm dependencies。
+PDF、DOC／DOCX、PPT／PPTX、XLS／XLSX、ODT／ODP／ODS、HTML、PNG／JPG。輸出語言可設為 `auto`、`zh-TW` 或 `en`，專有名詞可保留英文。
 
-如果要在本機轉換 HTML、DOC、PPT、ODT 或 ODP，請另外安裝 LibreOffice：
+## 安全性
 
-```bash
-sudo apt install libreoffice
-```
+這個服務設計給本機或可信任的內網使用，API 沒有登入驗證，請勿直接開放到網際網路。其他設定見 [docs/INSTALL.zh-TW.md](docs/INSTALL.zh-TW.md)。
 
-若要啟用模型補強，請在 `backend/.env` 設定 VLM。Enrichment model 用於表單抽取與視覺理解；Reviewer model 用於最後 quality gate 的審核與受控修復。若 reviewer model 未設定，會沿用 enrichment model。
+## 授權
 
-```env
-SEMARK_VLM_BASE_URL=http://127.0.0.1:11434/v1
-SEMARK_VLM_API_KEY=ollama
-SEMARK_VLM_MODEL=your-vision-model
+本專案原始碼以 Apache License 2.0 發布，見 `LICENSE`。第三方元件維持各自授權：PyMuPDF／MuPDF 為 AGPL-3.0 或商業授權，MinerU、模型權重與雲端服務請依各自條款，詳見 [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)。
 
-SEMARK_REVIEW_VLM_BASE_URL=http://127.0.0.1:11434/v1
-SEMARK_REVIEW_VLM_API_KEY=ollama
-SEMARK_REVIEW_VLM_MODEL=your-stronger-review-model
-```
+## 更多文件
 
-啟動服務：
-
-```bash
-cd backend
-.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8585
-```
-
-```bash
-cd frontend
-npm run dev
-```
-
-打開 `http://localhost:5070`，上傳文件，並選擇 `accurate` profile 執行 MinerU + VLM enrichment。
-
-檢查完整本地環境：
-
-```bash
-./scripts/check_full_stack.sh
-```
-
-## Manual Local Quickstart
-
-Backend：
-
-```bash
-cd backend
-python3 -m venv .venv
-.venv/bin/python -m pip install -U pip
-.venv/bin/python -m pip install -e ".[dev,mineru]"
-cp .env.example .env
-.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8585
-```
-
-Frontend：
-
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
-如果要從區網連線，將 backend/frontend 綁定到 `0.0.0.0`，並開啟對應防火牆連接埠。
-
-## Docker Quickstart
-
-預設 Docker 路徑就是完整功能。`docker compose up --build` 會用 full backend 建置，包含 MinerU、PyMuPDF、LibreOffice、中文 CJK fonts，以及實際文件處理需要的轉檔與解析依賴。Repository 提供的是可重現的設定檔與安裝流程；不會 commit 或內建 model weights、API keys、私人文件、generated outputs 或本機 cache 檔案。
-
-如果使用 Docker Desktop，或主機環境中 container 可以透過 `host.docker.internal` 連到本機 Ollama：
-
-```bash
-export SEMARK_VLM_BASE_URL=http://host.docker.internal:11434/v1
-export SEMARK_VLM_API_KEY=ollama
-export SEMARK_VLM_MODEL=your-vision-model
-export SEMARK_REVIEW_VLM_BASE_URL=http://host.docker.internal:11434/v1
-export SEMARK_REVIEW_VLM_API_KEY=ollama
-export SEMARK_REVIEW_VLM_MODEL=your-stronger-review-model
-
-docker compose up --build
-```
-
-開啟：
-
-- Frontend：`http://localhost:5070`
-- Backend health：`http://localhost:8585/api/health`
-
-在 Linux/WSL 上，Docker bridge networking 不一定能透過 `host.docker.internal` 連到主機上的 Ollama。如果 Settings -> VLM model probe timeout，請改用 host-network compose，讓容器直接用 `127.0.0.1:11434` 呼叫 Ollama：
-
-```bash
-export SEMARK_VLM_MODEL=your-vision-model
-export SEMARK_REVIEW_VLM_MODEL=your-stronger-review-model
-
-docker compose -f docker-compose.full.host.yml up --build
-```
-
-如果 `5070` 或 `8585` 已被占用，可以同時覆寫 host-network compose 的前後端 port：
-
-```bash
-SEMARK_FRONTEND_PORT=35070 SEMARK_PORT=38585 \
-  docker compose -f docker-compose.full.host.yml up --build
-```
-
-用 IP 位址或 `localhost` 開啟前端一律可行。如果想透過**具名主機**（例如內部 DNS 名稱）存取，需要明確加入允許清單——其他 Host header 會被拒絕，避免 DNS rebinding 攻擊打到無認證的後端：
-
-```bash
-SEMARK_FRONTEND_ALLOWED_HOSTS=semark.internal,docs.example.lan \
-  docker compose up --build
-```
-
-如果使用雲端或遠端 OpenAI-compatible provider，就把兩組模型 endpoint 指到對方服務，而不是 Ollama：
-
-```bash
-export SEMARK_VLM_BASE_URL=https://your-provider.example/v1
-export SEMARK_VLM_API_KEY=your-api-key
-export SEMARK_VLM_MODEL=your-vision-model
-export SEMARK_REVIEW_VLM_BASE_URL=https://your-provider.example/v1
-export SEMARK_REVIEW_VLM_API_KEY=your-api-key
-export SEMARK_REVIEW_VLM_MODEL=your-stronger-review-model
-
-docker compose up --build
-```
-
-Full image 會安裝 backend `.[mineru]`、PyMuPDF、LibreOffice、中文 CJK fonts、MinerU pipeline extras、受限制版本的 PyTorch 2.6/2.7 與 torchvision，以及 MinerU pipeline backend 需要的 `six`。它會提供 `mineru` CLI，並把 workspace 與 MinerU/model cache 放在 Docker volume。第一次 MinerU/model setup 可能依照 MinerU 上游行為與授權下載 cache 檔案。Full image 較大是正常的，因為 MinerU runtime 需要 PyTorch。
-
-`SEMARK_VLM_*` 用於 extraction/enrichment；`SEMARK_REVIEW_VLM_*` 用於最後 audit/repair checks，也可以指向更強的模型。若省略 reviewer 設定，會 fallback 到 enrichment model。若啟用 visual enrichment，所選模型必須支援 image input。
-
-舊版 `DOC_PARSER_*` 環境變數仍會被接受以維持相容性，但新的文件與 Docker 設定都以 `SEMARK_*` 為主。
-
-API-only development Docker 仍然保留，但它刻意不包含完整 MinerU/LibreOffice processing stack，不建議作為一般使用者的主要路徑：
-
-```bash
-docker compose -f docker-compose.api-only.yml up --build
-```
-
-Compose files 會把 backend workspace 放在 named Docker volume，並預設關閉 local path ingestion。重新散布 image 或推薦模型下載前，請先閱讀 `THIRD_PARTY_LICENSES.md`。
-
-> **警告——你的資料存放在 Docker volumes 裡。** 所有上傳的文件、處理紀錄與設定都存在 named volumes `doc-parser-workspace` 和 `mineru-cache`。執行 `docker compose down -v`（或 `docker volume rm`）會**永久刪除全部資料**。重建/升級請用不帶 `-v` 的 `docker compose down`——volume 會保留。進行有風險的操作前，建議先備份：
->
-> ```bash
-> docker run --rm -v doc-parser-workspace:/data -v "$(pwd)":/backup alpine \
->   tar czf /backup/semark-workspace-backup.tar.gz -C /data .
-> ```
-
-## Demo Samples
-
-Repository 內含 `examples/samples/` synthetic samples，讓 demo 不依賴私人檔案、客戶資料或授權不明的文件：
-
-- `synthetic_invoice.html`：英文 invoice metadata 與 line-item table。
-- `synthetic_form.html`：英文表單欄位與 approval checklist。
-- `synthetic_process_brief.html`：英文流程區塊與 responsibility matrix。
-- `synthetic_zh_purchase_request.html`：繁體中文採購申請單，包含欄位與明細。
-- `synthetic_zh_meeting_minutes.html`：繁體中文會議紀錄，包含決議與待辦事項。
-
-對已啟動的 backend 執行本地 synthetic demo：
-
-```bash
-scripts/run_demo_corpus.sh --profile fast
-```
-
-`fast` 可用於不跑 VLM 的 smoke test，但仍會通過相同 API 與解析 pipeline。若要把已設定的 VLM semantic enrichment 納入 demo，使用 `accurate`：
-
-```bash
-scripts/run_demo_corpus.sh --profile accurate --wait
-```
-
-可選的 public corpus 下載刻意放在 Git 之外的 `workspace/demo-corpus/`：
-
-```bash
-SEC_USER_AGENT="Your Name your.email@example.com" scripts/fetch_demo_corpus.sh
-scripts/run_demo_corpus.sh --include-public --profile fast
-```
-
-Public corpus script 會下載：
-
-- IRS Form W-9 PDF：`https://www.irs.gov/pub/irs-pdf/fw9.pdf`，適合 PDF forms 與 OCR 檢查。
-- SEC EDGAR submissions API 找到的最新 Apple 10-K HTML，適合長文件與表格密集文件測試。
-
-下載的 public files 只用於本地測試，不會 commit。若要重新散布下載檔案，請自行確認來源目前條款。
-
-Curated output snapshots 放在 `examples/demos/`。這些範例展示來源頁面、產出的 semantic Markdown、chunks 與 quality gate metadata，讓使用者不跑模型也能先檢查預期的 RAG-ready output。
-
-## Optional Warm MinerU Service
-
-在 `backend/` 安裝依賴後執行：
-
-```bash
-.venv/bin/mineru-api --host 127.0.0.1 --port 8601
-```
-
-然後在 `backend/.env` 設定：
-
-```env
-SEMARK_MINERU_API_URL=http://127.0.0.1:8601
-```
-
-到 Settings -> VLM 模型 -> MinerU 連線設定，可檢查 CLI version 與設定的 MinerU API URL 是否可連線。
-
-## VLM Enrichment and Review
-
-App-level VLM 是可選功能，但對複雜表單、圖表、流程圖、diagram 與表格建議啟用。Adapter 使用 OpenAI-compatible chat-completions interface，可接 Ollama、OpenAI、vLLM、LMDeploy 或其他相容 provider。請設定 backend process 能連到的 endpoint：
-
-```env
-SEMARK_VLM_BASE_URL=http://127.0.0.1:11434/v1
-SEMARK_VLM_API_KEY=ollama
-SEMARK_VLM_MODEL=your-vision-model
-```
-
-Ollama 請使用 `/v1` endpoint，例如 `http://127.0.0.1:11434/v1`，並設定 `SEMARK_VLM_API_KEY=ollama`。Cloud OpenAI-compatible API 則填入 provider base URL、API key 與 model name。若啟用 visual enrichment，所選模型必須支援設定的 `image_mode` 所使用的 image input format。
-
-支援兩種模型角色：
-
-- `SEMARK_VLM_*`：extraction/enrichment model，用於 Enrich stage 的表單、圖表、diagram 與可選表格處理。
-- `SEMARK_REVIEW_VLM_*`：reviewer model，用於最後 quality gate 審核產出的 semantic output，並輔助受控 repair checks。若未設定，reviewer 會 fallback 到 `SEMARK_VLM_*`。
-
-預設沒有任何指令會把文件送到雲端模型；remote endpoints 必須由使用者明確設定才會啟用。
-
-### Collapsed Table Repair（表格崩欄修復）
-
-表格修復與表格語意補強是兩個獨立的開關。`vlm_enrich_tables` 是為「解析正常的表格」加摘要；`vlm_repair_collapsed_tables`（`PipelineConfig` 欄位，預設開啟，沒有對應的環境變數）只處理「欄位邊界被解析器併成一格」的表格——參考語料中 128 張表裡的 26 張——並從表格圖片還原格線，所以成本與解析壞掉的程度成正比，不會擴散到整份文件。
-
-原始解析結果會以 `table_body_mineru` 一併保留，而且所有防護都是 fail closed：格線數量不齊的結果、或轉錄字數不到印出字數 60% 的結果，一律拒收並沿用原始解析。沒有裁切圖的表格不列入處理範圍。由於這條路徑以圖片為準，模型讀錯的表格會被換成「錯的格線」而不是「糊掉的格線」——上述防護就是這兩者之間唯一的界線。
-
-### Semantic Output Language
-
-介面語言與產出的 semantic document language 是分開設定。在 Settings -> Profiles -> Output Package 中，Semantic output language 可設定為：
-
-- `auto`：依文件內容與 enrichment text 自動判斷輸出語言。
-- `zh-TW`：強制使用繁體中文 semantic section titles 與 summaries。
-- `en`：強制使用英文 semantic section titles 與 summaries。
-
-英文 demo 文件建議用 `en`，繁體中文 corpus 建議用 `zh-TW`，混合 corpus 可用 `auto`。此設定會記錄在每次 run manifest 的 `pipeline_config.package.semantic_output_language`。
-
-## 常見搜尋關鍵詞 / GEO Terms
-
-`Semark`、`Semark 文件解析`、`Semantic Markdown for RAG`、`RAG 文件解析工具`、`PDF 轉語意 Markdown`、`PDF 轉 Markdown`、`RAG-ready Markdown`、`LLM-ready Markdown`、`AI 文件解析`、`MinerU UI`、`MinerU Docker`、`VLM 文件理解`、`自動文件分檔`、`表單抽取 RAG`、`流程圖轉 Markdown`、`表格轉 Markdown`、`OCR 轉結構化文本`、`繁體中文文件解析`、`英文 PDF 語意化`、`本地端 RAG 文件匯入`、`OpenWebUI 文件處理流程`、`LlamaIndex 文件匯入`、`LangChain 文件匯入`。
-
-建議 GitHub topics：`rag`、`pdf-to-markdown`、`semantic-markdown`、`document-ai`、`mineru`、`vlm`、`ocr`、`llm`、`knowledge-base`、`ollama`、`openai-compatible`、`traditional-chinese`。
-
-## License
-
-本 repository 自有原始碼預計以 Apache License 2.0 發布，詳見 `LICENSE`。
-
-第三方元件維持各自授權與條款。特別是 PyMuPDF/MuPDF 上游為 AGPL-3.0 或 commercial license，MinerU 使用所選版本的上游 license，VLM model weights 或 remote API provider 也需要依實際模型/供應商確認。發布或重新散布前請閱讀 `THIRD_PARTY_LICENSES.md`。
-
-## Security Boundary
-
-本服務設計給本機或可信任內網使用。API 沒有內建 authentication，請勿直接暴露到 public internet。除非所有 API client 都可信任，請維持 `SEMARK_ENABLE_LOCAL_PATH_INGEST=false`，因為 local path ingestion 會允許 client 要求 backend host 讀取本機檔案。開源預設建議維持 `SEMARK_CORS_ALLOW_PRIVATE_LAN=false`，並明確列出允許的 origins。
-
-## GitHub Release Dry Run
-
-發布前請用 clean clone 測試，而不是只測工作目錄：
-
-```bash
-scripts/smoke_clone.sh --repo https://github.com/OWNER/REPO.git
-```
-
-包含預設完整 Docker 檢查：
-
-```bash
-scripts/smoke_clone.sh --repo https://github.com/OWNER/REPO.git --docker
-```
-
-包含 API-only development Docker 檢查：
-
-```bash
-scripts/smoke_clone.sh --repo https://github.com/OWNER/REPO.git --api-only-docker
-```
-
-此 script 會安裝 full backend dependencies，包括 MinerU，執行 backend tests/lint、frontend lint/build，並可選擇驗證 Docker Compose health endpoints。預設 Docker 檢查也會確認 `mineru --version` 能在 backend container 內正常執行。
-
-## Notes For Publishing
-
-- GitHub repository root 應使用 `doc1/`，不是外層 workspace。
-- 對 GitHub URL 執行 `scripts/smoke_clone.sh` 後再公開宣布 repo。
-- `docker-compose.yml`、`docker-compose.full.host.yml` 與 `scripts/install_full_local.sh` 是 MinerU + VLM demo 的主要 full-feature setup path。
-- `docker-compose.api-only.yml` 是 lightweight development/API smoke path，不是一般使用者的主要路徑。
-- 不要 commit `backend/.env`、`backend/workspace/`、generated outputs 或 local model caches。
-- `backend/.env.example` 是可攜的設定模板，應保留在 repository。
-- 請確認 `THIRD_PARTY_LICENSES.md` 中 PyMuPDF、MinerU 與 VLM model/provider 的授權義務。
-- 只使用 synthetic 或 public sample documents。
-
-### 來源審查與最終交付驗證
-
-新工作預設啟用有界來源審查。每個來源頁面都列入清單，包括解析器未產生區塊的頁面；風險規則只決定優先順序。審查核對實際文件與 chunks，修復後重新產出並驗收，未核對部分不能算作通過。既有完成產物維持原狀；off／shadow／apply 模式、共享預算、覆蓋紀錄與限制見 [操作說明](backend/docs/agentic-processing.md)。
+- [安裝、設定與部署](docs/INSTALL.zh-TW.md)
+- [Demo 對照](docs/DEMOS.zh-TW.md)
+- [逐頁核對與修復流程](backend/docs/agentic-processing.md)
+- [Release Notes 2026-08-12（v0.3.1）](RELEASE_NOTES_20260812.zh-TW.md)

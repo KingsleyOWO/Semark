@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 from app.models.document_ir import Block, BlockType
 from app.pipeline.image_recovery import (
+    distinct_text_regions,
     gap_marker,
     keep_drafted_read_lines,
     merge_picture_gaps,
@@ -168,3 +169,21 @@ def test_a_piece_of_a_drafted_line_or_another_drafted_line_is_no_other_version_o
     _, carried, named, _ = keep_drafted_read_lines(parts, drafted, [],
                                                    ocr_lines=["COMMUNICATOR", "BERLINER", "由晴偃思發佈"])
     assert carried == ["THE COMMUNICATOR AWARDS", "GEWINNER"] and named == ["由晴偃恩發佈"]
+
+
+def test_a_drafted_word_or_count_inside_a_longer_one_is_not_read():
+    """Test run 2026-10-21: 「Active」 counted as re-read inside 「Attractive」 and was dropped; so would a
+    count 「×5」 inside 「15」. A line the re-read wraps differently is still read."""
+    parts = _parts(texts=["Accurate", "Advanced", "Attractive", "15", "如果沒有經歷失敗", "表示你還不夠創新"])
+    drafted = ["Active", "Attractive", "×5", "如果沒有經歷失敗，表示你還不夠創新"]
+    _, carried, named, _ = keep_drafted_read_lines(parts, drafted, [])
+    assert carried == ["Active", "×5"] and named == []
+    _, carried, _, _ = keep_drafted_read_lines(_parts(texts=["① Active", "x5", "Location Traffic Share"]),
+                                               ["Active", "×5", "Traffic"], [])
+    assert carried == []
+
+
+def test_a_word_inside_a_longer_one_is_its_own_region():
+    """Test run 2026-10-21: a whiteboard's 「Active」 was merged away into 「Attractive」 in three runs."""
+    regions = [{"text": t} for t in ["Active", "Attractive", "承", "傳承", "9.6", "9.61", "Active"]]
+    assert [r["text"] for r in distinct_text_regions(regions)] == ["Active", "Attractive", "傳承", "9.6", "9.61"]

@@ -1382,15 +1382,16 @@ class EnrichStage:
         filename = Path(source_path).stem.lower()
         terms = [term for pattern in self.FORM_PATTERNS for term in pattern.split("|")]
         terms += [str(pattern or "").strip() for pattern in self.enrich_config.form_filename_patterns]
-        return any(term and self._filename_has(term, filename) for term in terms)
+        return any(term and self._has_term(term, filename) for term in terms)
 
     @staticmethod
-    def _filename_has(term: str, filename: str) -> bool:
-        """A Latin term counts as a whole word only: a user guide named 「Vendor-WebForm-Guide」 had
-        its screenshot page made a form (demo run 2026-10-21), as 'information' or 'first' (irs) would."""
+    def _has_term(term: str, text: str) -> bool:
+        """A Latin term counts as a whole word only (text lower-cased): a user guide named
+        「Vendor-WebForm-Guide」 had its screenshot page made a form, as 'information' or 'first' (irs)
+        would, and its legal notice counted 「authorized」 as 'authorize' (demo runs 2026-10-21/22)."""
         if term.isascii():
-            return re.search(rf"(?<![a-z0-9]){re.escape(term.lower())}(?![a-z0-9])", filename) is not None
-        return term in filename
+            return re.search(rf"(?<![a-z0-9]){re.escape(term.lower())}(?![a-z0-9])", text) is not None
+        return term in text
 
     @staticmethod
     def _grid_to_html(
@@ -2370,7 +2371,7 @@ class EnrichStage:
             "☑",
         ]
         lower_text = text.lower()
-        hits = sum(1 for term in form_terms if term in text or term.lower() in lower_text)
+        hits = sum(1 for term in form_terms if self._has_term(term, lower_text))
         has_table = any(block.type == BlockType.TABLE for block in page_blocks)
         return hits >= (3 if has_table else 3)
 

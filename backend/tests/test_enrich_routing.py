@@ -156,3 +156,16 @@ def test_a_latin_filename_term_counts_only_as_a_whole_word(tmp_path):
     assert stage._is_form_document("fw9-tax-form.pdf") is True
     assert stage._is_form_document("leave_application_form.docx") is True
     assert stage._is_form_document("請假單申請.docx") is True
+
+
+def test_a_legal_notice_in_a_guide_is_no_form_but_a_form_still_is():
+    """Demo run 2026-10-22: a guide's 「Authorized Use Only」 notice hit 'authorize', 'name' and
+    'consent' and its page became a form; 「authorized」 is not the cue 'authorize'."""
+    stage = EnrichStage(db=None, config=PipelineConfig())
+    guide = [Block(block_id="b0", type=BlockType.TEXT, page_idx=0, payload={"text": (
+        "VA systems are intended to be used by authorized VA network users. All access constitutes "
+        "unconditional consent to review. Have your banking information (i.e. name, account number) ready.")})]
+    form = [Block(block_id="b1", type=BlockType.TEXT, page_idx=0, payload={"text": (
+        "Name: ____ Phone number: ____ Signature: ____ Date signed: ____")})]
+    assert stage._page_has_form_cues(guide) is False
+    assert stage._page_has_form_cues(form) is True

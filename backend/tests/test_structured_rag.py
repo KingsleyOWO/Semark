@@ -2949,3 +2949,20 @@ def test_icon_sized_figure_caption_is_not_flagged_too_short():
 
 # 主文下載已改為直接供應 documents/main.md(與檢視器同一份);
 # 其行為契約由 tests/test_download_naming.py 的 main_text 測試釘住。
+
+
+def test_a_form_guide_lists_only_sections_the_form_prints():
+    """Demo run 2026-10-21: a one-page notification form got 「Basic Information - Entry Details - Approval」,
+    a default structure with an approval section the form does not have."""
+    from app.pipeline.structured_rag import _build_form_semantic_guide
+
+    fields = [{"name": "Email Address", "requirement": "required"}]
+    for language, heading in (("en", "Form Structure"), ("zh-TW", "表單結構")):
+        guide = "\n".join(_build_form_semantic_guide(
+            title="e-Notification", source_path="form.png", sections=[], fields=fields, notes=[],
+            approval_fields=[], semantic_output_language=language))
+        assert heading not in guide and "Approval" not in guide and "簽核\n" not in guide and "- 簽核" not in guide
+    guide = "\n".join(_build_form_semantic_guide(
+        title="e-Notification", source_path="form.png", sections=["一、申請人資料"], fields=fields, notes=[],
+        approval_fields=[], semantic_output_language="zh-TW"))
+    assert "## 表單結構\n- 一、申請人資料" in guide

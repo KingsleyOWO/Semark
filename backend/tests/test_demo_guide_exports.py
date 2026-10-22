@@ -140,3 +140,16 @@ def test_split_main_body_strips_trailing_orphan_open_quote():
 
     assert body.count("國庫署") == 2
     assert "」 「" not in body
+
+
+def test_a_flowchart_path_is_no_title_and_a_short_list_item_stays():
+    """Demo run 2026-10-21: a one-page flowchart was headed by one of its paths, and its only
+    role 「- 被害人」 was deleted as a short hyphenated OCR token."""
+    from app.pipeline.stages.package import PackageStage
+
+    stage = PackageStage()
+    source_md = ("### 申訴流程\n\n**詳細流程路徑**\n"
+                 "- 判斷適用法律 > 性騷擾防治法 > 行為人是機關人員 > 依機關內部規定啟動調查程序\n")
+    assert " > " not in stage._infer_source_title(source_md, "/x/flow.png")
+    assert not PackageStage._is_low_value_visual_ocr_line("- 被害人")
+    assert PackageStage._is_low_value_visual_ocr_line("- St-1")

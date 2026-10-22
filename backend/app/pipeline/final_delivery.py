@@ -61,6 +61,18 @@ def expected_blocks(ir: DocumentIR, outputs: Path, config: PipelineConfig | None
             yield block, text, "" if text.strip() else "no_transcribed_content"
 
 
+def missing_part(text: str, delivered: list[str]) -> str:
+    """The lines of a block the delivery lacks, or the whole block when those lines alone leave it short.
+
+    Demo run 2026-10-21: a flowchart's main document lacked one opening sentence of its picture
+    text, and the whole flow (about 40 lines) was appended a second time. A line counts as
+    delivered by the same rule as the block.
+    """
+    coverage = TextCoverage(delivered)
+    part = "\n".join(line for line in text.split("\n") if not coverage.covers(line)).strip()
+    return part if part and TextCoverage([*delivered, part]).covers(text) else text
+
+
 def preserve_document_content(ir: DocumentIR, run_path: Path, config: PipelineConfig | None = None) -> int:
     """Retain source blocks not represented in any delivered child/main file."""
     outputs = run_path / "outputs"
@@ -79,8 +91,10 @@ def preserve_document_content(ir: DocumentIR, run_path: Path, config: PipelineCo
 
     heading = SUPPLEMENT_HEADINGS[ChunkStage(config, ir).table_language]
     additions = [f"\n\n## {heading}\n"]
+    delivered = [path.read_text(encoding="utf-8") for path in files]
     for block, text in missing:
-        additions.append(f"<!-- source-block:{block.block_id} -->\n{text}\n")
+        additions.append(f"<!-- source-block:{block.block_id} -->\n{missing_part(text, delivered)}\n")
+        delivered.append(additions[-1])
     atomic_write_text(main, main.read_text(encoding="utf-8") + "\n".join(additions))
     return len(missing)
 

@@ -1885,8 +1885,9 @@ def _build_form_semantic_guide(
     language = resolve_semantic_output_language(semantic_output_language)
     pack = get_form_language_pack(language)
     source_name = Path(source_path).name
-    base_sections = sections or ["基本資料", "填寫內容", "簽核"]
-    section_names = [display_form_section(section, language) for section in base_sections]
+    # Only sections the form prints. A default 基本資料／填寫內容／簽核 gave a one-page
+    # notification form an approval section it does not have (demo run 2026-10-21).
+    section_names = [display_form_section(section, language) for section in sections]
     grouped_fields = _group_field_dicts_by_section(fields)
     conditional_fields = [
         field for field in fields
@@ -1900,10 +1901,9 @@ def _build_form_semantic_guide(
             "",
             f"## {pack.use_cases}",
             f"Retrieve this document when users ask about the purpose, completion method, fields, approval flow, or notes for \"{title}\".",
-            "",
-            f"## {pack.form_structure}",
         ]
-        guide_parts.extend(f"- {section}" for section in section_names[:12])
+        if section_names:
+            guide_parts.extend(["", f"## {pack.form_structure}", *(f"- {section}" for section in section_names[:12])])
 
         if grouped_fields:
             guide_parts.extend(["", f"## {pack.filling_guidance}"])
@@ -1945,10 +1945,9 @@ def _build_form_semantic_guide(
         "",
         f"## {pack.use_cases}",
         f"當使用者需要查詢「{title}」的用途、填寫方式、欄位內容、簽核流程或注意事項時，應召回本文件。",
-        "",
-        f"## {pack.form_structure}",
     ]
-    guide_parts.extend(f"- {section}" for section in section_names[:12])
+    if section_names:
+        guide_parts.extend(["", f"## {pack.form_structure}", *(f"- {section}" for section in section_names[:12])])
 
     if grouped_fields:
         guide_parts.extend(["", f"## {pack.filling_guidance}"])
@@ -2703,7 +2702,7 @@ def _infer_form_sections(rows: list[list[str]]) -> list[str]:
             text = cell.strip()
             if re.match(r"^[一二三四五六七八九十]+[、．.]", text):
                 sections.append(text[:80])
-    return _dedupe_strings(sections) or ["基本資料", "填寫內容", "簽核"]
+    return _dedupe_strings(sections)
 
 
 def _infer_form_fields(rows: list[list[str]]) -> list[dict[str, Any]]:
@@ -3389,7 +3388,7 @@ def _ensure_form_semantic_guide(
     synthetic = _build_form_semantic_guide(
         title=form_name,
         source_path=source_path,
-        sections=_dedupe_strings([str(field.get("section") or "表單欄位") for field in field_dicts]) or ["基本資料", "填寫內容", "簽核"],
+        sections=_dedupe_strings([str(field.get("section") or "表單欄位") for field in field_dicts]),
         fields=field_dicts,
         notes=[],
         approval_fields=signature_fields,

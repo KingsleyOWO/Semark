@@ -3379,7 +3379,9 @@ class PackageStage:
         # schedule cell). Their Markdown bullet is not an OCR artefact.
         if re.match(r"^\s*[-*+]\s+[^:：\n]+[:：]\s*\S", line or ""):
             return False
-        compact = re.sub(r"\s+", "", line or "")
+        # Judge a list item by its text: the bullet's own hyphen made 「- 被害人」 a short hyphenated
+        # token, and a flowchart's only role was deleted from the main document (demo run 2026-10-21).
+        compact = re.sub(r"\s+", "", re.sub(r"^\s*[-*+]\s+", "", line or ""))
         if not compact:
             return False
         lower_compact = compact.lower().strip(".")
@@ -4004,6 +4006,10 @@ class PackageStage:
         if re.fullmatch(r"[【\[（(][一-鿿]{1,4}[】\]）)]", compact):
             return True
         if re.fullmatch(r"\d+", compact):
+            return True
+        # A path line (「判斷適用法律 > … > 依機關內部規定啟動調查程序」) is one route through a
+        # flowchart, not the document's name; it headed a one-page flowchart (demo run 2026-10-21).
+        if " > " in str(title):
             return True
         if re.fullmatch(r"[A-Za-z]*Figure\d*|Table\d*|Form(?:Page)?\d*|Form\d+", compact, re.IGNORECASE):
             return True

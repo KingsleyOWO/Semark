@@ -145,3 +145,14 @@ def test_configured_english_form_filename_pattern_is_used():
 
     assert stage._is_form_document("sample-transcript-request.pdf") is True
 
+
+
+def test_a_latin_filename_term_counts_only_as_a_whole_word(tmp_path):
+    """Demo run 2026-10-21: the guide 「VA-CEP-Vendor-WebForm-Guide」 had its screenshot page made a form."""
+    stage = EnrichStage(db=None, config=PipelineConfig())
+    assert stage._is_form_document("VA-CEP-Vendor-WebForm-Guide-p2-3.pdf") is False
+    assert stage._is_form_document("Information Security Policy.pdf") is False
+    assert stage._is_form_document("first-quarter-report.pdf") is False
+    assert stage._is_form_document("fw9-tax-form.pdf") is True
+    assert stage._is_form_document("leave_application_form.docx") is True
+    assert stage._is_form_document("請假單申請.docx") is True

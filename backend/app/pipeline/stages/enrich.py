@@ -1380,14 +1380,17 @@ class EnrichStage:
     def _is_form_document(self, source_path: str) -> bool:
         """Check if document appears to be a form based on filename."""
         filename = Path(source_path).stem.lower()
-        for pattern in self.FORM_PATTERNS:
-            if re.search(pattern, filename, re.IGNORECASE):
-                return True
-        for pattern in self.enrich_config.form_filename_patterns:
-            value = str(pattern or "").strip()
-            if value and re.search(re.escape(value), filename, re.IGNORECASE):
-                return True
-        return False
+        terms = [term for pattern in self.FORM_PATTERNS for term in pattern.split("|")]
+        terms += [str(pattern or "").strip() for pattern in self.enrich_config.form_filename_patterns]
+        return any(term and self._filename_has(term, filename) for term in terms)
+
+    @staticmethod
+    def _filename_has(term: str, filename: str) -> bool:
+        """A Latin term counts as a whole word only: a user guide named 「Vendor-WebForm-Guide」 had
+        its screenshot page made a form (demo run 2026-10-21), as 'information' or 'first' (irs) would."""
+        if term.isascii():
+            return re.search(rf"(?<![a-z0-9]){re.escape(term.lower())}(?![a-z0-9])", filename) is not None
+        return term in filename
 
     @staticmethod
     def _grid_to_html(

@@ -373,7 +373,7 @@ class DocumentReview(AgenticRepair):
             raise ValueError("source_image_unavailable")
         key = (str(run_path.resolve()), bundle, digest(input_identity(ir)))
         if getattr(self, "_delivery_cache_key", None) != key:
-            renderer = ChunkStage(self.config)
+            renderer = ChunkStage(self.config, ir)
             renderer._asset_text = renderer._load_asset_retrieval_text(run_path / "outputs")
             self._delivery_cache = (renderer, DeliveryExcerpts(run_path, content_blocks(ir)))
             self._delivery_cache_key = key
@@ -842,7 +842,7 @@ class DocumentReview(AgenticRepair):
         from app.pipeline.document_recovery import regions
         from app.pipeline.stages.chunk import ChunkStage
 
-        renderer = ChunkStage(self.config)
+        renderer = ChunkStage(self.config, ir)
         renderer._asset_text = renderer._load_asset_retrieval_text(run_path / "outputs")
         excerpts = DeliveryExcerpts(run_path, content_blocks(ir))
         cores = regions("horizontal4")

@@ -43,11 +43,11 @@ def delivered_documents(outputs: Path) -> list[Path]:
     return paths
 
 
-def expected_blocks(ir: DocumentIR, outputs: Path):
+def expected_blocks(ir: DocumentIR, outputs: Path, config: PipelineConfig | None = None):
     from app.pipeline.agentic_content import replacement_text
     from app.pipeline.stages.chunk import ChunkStage
 
-    renderer = ChunkStage()
+    renderer = ChunkStage(config, ir)
     renderer._asset_text = renderer._load_asset_retrieval_text(outputs)
     for block in ir.blocks:
         if is_non_content(block):
@@ -61,22 +61,23 @@ def expected_blocks(ir: DocumentIR, outputs: Path):
             yield block, text, "" if text.strip() else "no_transcribed_content"
 
 
-def preserve_document_content(ir: DocumentIR, run_path: Path) -> int:
+def preserve_document_content(ir: DocumentIR, run_path: Path, config: PipelineConfig | None = None) -> int:
     """Retain source blocks not represented in any delivered child/main file."""
     outputs = run_path / "outputs"
     files = delivered_documents(outputs)
     if not files:
         return 0
     coverage = TextCoverage(path.read_text(encoding="utf-8") for path in files)
-    missing = [(block, text) for block, text, reason in expected_blocks(ir, outputs)
+    missing = [(block, text) for block, text, reason in expected_blocks(ir, outputs, config)
                if not reason and not coverage.covers(text)]
     if not missing:
         return 0
     main = outputs / "documents/main.md"
     if main not in files:
         raise ValueError("A delivery with missing content needs a main document")
-    english = not any("\u4e00" <= c <= "\u9fff" for _, text in missing for c in text[:100])
-    heading = SUPPLEMENT_HEADINGS["en" if english else "zh-TW"]
+    from app.pipeline.stages.chunk import ChunkStage
+
+    heading = SUPPLEMENT_HEADINGS[ChunkStage(config, ir).table_language]
     additions = [f"\n\n## {heading}\n"]
     for block, text in missing:
         additions.append(f"<!-- source-block:{block.block_id} -->\n{text}\n")
@@ -93,7 +94,7 @@ def finalize_delivery(ir: DocumentIR, run_path: Path, config: PipelineConfig) ->
     doc_coverage = TextCoverage(path.read_text(encoding="utf-8") for path in docs)
     chunk_coverage = TextCoverage(str(c.get("content") or "") for c in chunks)
     ledger = []
-    for block, text, reason in expected_blocks(ir, outputs):
+    for block, text, reason in expected_blocks(ir, outputs, config):
         ledger.append({
             "block_id": block.block_id, "page_idx": block.page_idx,
             "type": block.type.value, "excluded_reason": reason or None,

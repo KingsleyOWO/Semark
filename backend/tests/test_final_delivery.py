@@ -100,3 +100,29 @@ def test_changed_word_agent_evidence_prevents_publication(tmp_path):
     evidence.write_bytes(b"different page")
     with pytest.raises(ValueError, match="changed after validation"):
         publish_revision(root, revision)
+
+
+def test_an_english_source_table_is_checked_and_restored_in_english(tmp_path):
+    """Demo run 2026-10-21: an English form's source table was expected in 「第 1 列」 labels, so the
+    English table document never covered it and main.md gained a Chinese copy under 「補充原文內容」."""
+    from app.pipeline.package_utils import semantic_table_to_text
+
+    html = ('<table data-source-grid="1"><tr><td>Email Address</td><td>Mobile Phone Number</td></tr>'
+            '<tr><td>a@example.com</td><td>555-0100</td></tr></table>')
+    ir = DocumentIR(doc_id="doc", run_id="run",
+        source=SourceInfo(path="form.pdf", ext="pdf", sha256="source", size_bytes=1),
+        engine=EngineInfo(backend="pipeline", method="auto"), pages=[PageInfo(page_idx=0)],
+        blocks=[Block(block_id="grid", type=BlockType.TABLE, page_idx=0, payload={"table_body": html})])
+    config = PipelineConfig.model_validate({"package": {"semantic_output_language": "en"}})
+    write_outputs(tmp_path, "# Form", [])
+    (tmp_path / "outputs/documents/tbl0000.md").write_text(semantic_table_to_text(html, semantic_output_language="en"))
+    atomic_write_json(tmp_path / "outputs/documents_index.json", [
+        {"document_id": "main", "file": "main.md"}, {"document_id": "tbl0000", "file": "tbl0000.md"}])
+    assert preserve_document_content(ir, tmp_path, config) == 0
+
+    (tmp_path / "outputs/documents/tbl0000.md").unlink()
+    atomic_write_json(tmp_path / "outputs/documents_index.json", [{"document_id": "main", "file": "main.md"}])
+    assert preserve_document_content(ir, tmp_path, config) == 1
+    main = (tmp_path / "outputs/documents/main.md").read_text()
+    assert "## Additional Source Content" in main and "Row 1:" in main
+    assert "補充原文內容" not in main and "第 1 列" not in main

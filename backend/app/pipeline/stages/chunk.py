@@ -125,9 +125,12 @@ class ChunkStage:
     Output: chunks.jsonl
     """
 
-    def __init__(self, config: PipelineConfig | None = None):
+    def __init__(self, config: PipelineConfig | None = None, document_ir: DocumentIR | None = None):
         self.config = config or PipelineConfig()
         self.package_config = self.config.package
+        # Source tables are written in the document's output language, as the package
+        # stage writes them: an English report's chunks read 「第 1 列」 (demo run 2026-10-21).
+        self.table_language = self._output_language(document_ir)
         # block_id -> figure retrieval text, loaded per run from assets_index.jsonl
         # so image blocks chunk as searchable text instead of a bare placeholder.
         self._asset_text: dict[str, str] = {}
@@ -162,6 +165,7 @@ class ChunkStage:
                 )
 
             chunks: list[Chunk] = []
+            self.table_language = self._output_language(document_ir)
 
             # Figure enrichment text (written by the package stage before chunking)
             # so image blocks become searchable body text, not a bare placeholder.
@@ -264,6 +268,16 @@ class ChunkStage:
                               "part_index": index + 1, "part_count": len(parts)},
                 ))
         return bounded
+
+    def _output_language(self, document_ir: DocumentIR | None) -> str:
+        from app.pipeline.package_utils import _resolve_render_language
+        from app.pipeline.semantic.language import resolve_semantic_output_language
+
+        selection = getattr(self.package_config.semantic_output_language, "value",
+                            self.package_config.semantic_output_language)
+        if document_ir is None:
+            return _resolve_render_language(selection)
+        return resolve_semantic_output_language(selection, document_ir)
 
     def _load_asset_retrieval_text(self, outputs_dir: Path) -> dict[str, str]:
         """Map block_id -> figure retrieval text from assets_index.jsonl.
@@ -690,7 +704,7 @@ class ChunkStage:
         elif block.type == BlockType.TABLE:
             caption = coerce_payload_text(block.payload.get("table_caption"))
             from app.pipeline.table_structure import canonical_table_html
-            body = _table_body_to_markdown(canonical_table_html(block))
+            body = _table_body_to_markdown(canonical_table_html(block), self.table_language)
             footnote = block.payload.get("table_footnote")
             if isinstance(footnote, str):
                 footnote = [footnote]
@@ -784,7 +798,7 @@ def _strip_html_tags(html: str) -> str:
     return " ".join(re.sub(r"<[^>]+>", " ", html).split())
 
 
-def _table_body_to_markdown(body: str) -> str:
+def _table_body_to_markdown(body: str, language: str = "zh-TW") -> str:
     """
     Convert an HTML table to a markdown pipe table.
 
@@ -802,7 +816,7 @@ def _table_body_to_markdown(body: str) -> str:
     if 'data-source-grid="1"' in body:
         # A pipe table promotes row 1 to a header. Preserve explicit row roles instead.
         from app.pipeline.package_utils import semantic_table_to_text
-        return semantic_table_to_text(body)
+        return semantic_table_to_text(body, semantic_output_language=language)
 
     parser = _HTMLTableParser()
     try:

@@ -243,8 +243,12 @@ _TABLE_HTML = (
 )
 
 
+_ZH = PipelineConfig.model_validate({"package": {"semantic_output_language": "zh-TW"}})
+
+
 def test_table_html_becomes_source_grid_semantic_rows(tmp_path):
-    chunks = _run_chunks(tmp_path, [_table_block("t0", _TABLE_HTML)])
+    # A table-only fixture has too few characters for auto to pick zh-TW; tables follow the document language.
+    chunks = _run_chunks(tmp_path, [_table_block("t0", _TABLE_HTML)], _ZH)
 
     assert len(chunks) == 1
     content = chunks[0].content
@@ -262,7 +266,7 @@ def test_table_rowspan_colspan_preserve_source_anchors(tmp_path):
         "<tr><td>丙</td><td>丁</td></tr></table>"
     )
 
-    chunks = _run_chunks(tmp_path, [_table_block("t0", html)])
+    chunks = _run_chunks(tmp_path, [_table_block("t0", html)], _ZH)
 
     content = chunks[0].content
     assert "第 1 列：第 1 欄：假別；第 2–3 欄：說明" in content

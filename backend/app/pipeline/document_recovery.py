@@ -1265,7 +1265,7 @@ class RecoveryController:
                 shutil.copy2(source, target)
         docs = TextCoverage(p.read_text() for p in delivered_documents(folder / "outputs"))
         chunks = TextCoverage(c.get("content", "") for c in read_jsonl(folder / "outputs/chunks.jsonl"))
-        for _, text, reason in expected_blocks(candidate, folder / "outputs"):
+        for _, text, reason in expected_blocks(candidate, folder / "outputs", self.owner.config):
             if not reason and (not docs.covers(text) or
                                self.owner.config.package.generate_chunks and not chunks.covers(text)):
                 return False

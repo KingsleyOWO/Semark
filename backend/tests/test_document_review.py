@@ -39,7 +39,7 @@ def write_delivery(root, ir):
     output = root / "outputs"
     (output / "documents").mkdir(parents=True, exist_ok=True)
     from app.pipeline.stages.chunk import ChunkStage
-    renderer = ChunkStage()
+    renderer = ChunkStage(document_ir=ir)  # tables in the document's language, as the chunk stage writes them
     def text(b):
         return renderer._block_to_text(b) if b.type == BlockType.TABLE else b.get_text()
     (output / "documents/main.md").write_text("\n\n".join(text(b) for b in ir.blocks))

@@ -101,7 +101,7 @@ def build_automatic_delivery(ir, run_path, config, review_summary, ledger, upstr
     records = {b["block_id"]: b for b in report.get("blocks", [])}
     pages = {p["page_idx"]: p for p in report.get("pages", [])}
     coverage = {b["block_id"]: b for b in ledger}
-    rendered = {b.block_id: (text, reason) for b, text, reason in expected_blocks(ir, outputs)}
+    rendered = {b.block_id: (text, reason) for b, text, reason in expected_blocks(ir, outputs, config)}
     valid = (review_summary.get("evidence_valid", False) and review_summary.get("inventory_complete")
              and config.agentic.mode != "off" and not upstream_veto)
     eligible, reasons, dependencies, recorded = set(), {}, {}, {}
@@ -165,7 +165,7 @@ def build_automatic_delivery(ir, run_path, config, review_summary, ledger, upstr
     unverified_pictures &= retained
     eligible &= retained
 
-    renderer = ChunkStage(config)
+    renderer = ChunkStage(config, ir)
     renderer._asset_text = renderer._load_asset_retrieval_text(outputs)
     asset_records = {item.get("block_id"): item for item in read_jsonl(outputs / "assets_index.jsonl")}
     from app.pipeline.semantic.language import resolve_semantic_output_language

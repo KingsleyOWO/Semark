@@ -531,7 +531,7 @@ class AgenticRepair:
         from app.pipeline.stages.chunk import ChunkStage
         from app.pipeline.stages.package import PackageStage
 
-        chunk_renderer = ChunkStage(self.config)
+        chunk_renderer = ChunkStage(self.config, working)
         chunk_renderer._asset_text = chunk_renderer._load_asset_retrieval_text(run_path / "outputs")
         package_renderer = PackageStage(self.config)
         for issue in issues:

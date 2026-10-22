@@ -757,7 +757,7 @@ class PackageStage:
 
             from app.pipeline.final_delivery import preserve_document_content
 
-            retained_count = preserve_document_content(document_ir, run_path)
+            retained_count = preserve_document_content(document_ir, run_path, self.config)
             quality_gate.stats["preserved_source_blocks"] = retained_count
             write_quality_gate(quality_gate, outputs_dir)
             self._write_llm_vlm_outputs(

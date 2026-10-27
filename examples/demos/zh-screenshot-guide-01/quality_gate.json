@@ -1,22 +1,117 @@
 {
-  "status": "pass",
-  "score": 1.0,
-  "issues": [],
+  "status": "needs_review",
+  "score": 0.63,
+  "issues": [
+    {
+      "code": "structured_output_empty",
+      "severity": "high",
+      "message": "來源已有可解析內容，但 structured_rag / structured_chunks 為空，最終語意輸出不可用。",
+      "page_idx": null,
+      "block_id": null,
+      "document_id": null,
+      "evidence": {
+        "source_text_length": 1237,
+        "structured_document_type": "generic_document",
+        "record_count": 0,
+        "chunk_count": 0,
+        "has_table_or_image": true,
+        "structure_signals": [
+          "enriched_image_block",
+          "form_page_enrichment"
+        ]
+      }
+    },
+    {
+      "code": "authored_text_dropped",
+      "severity": "medium",
+      "message": "來源有 2/5 段作者撰寫文字未出現在最終語意輸出，可能在渲染時被靜默丟棄。",
+      "page_idx": null,
+      "block_id": null,
+      "document_id": null,
+      "evidence": {
+        "survival_ratio": 0.6,
+        "missing_count": 2,
+        "checked_count": 5,
+        "missing_samples": [
+          "版權所有 中華民國 109 年，財政部國庫署，建議解析度 1024×768 以上。客服電話:02-2395-7500#3",
+          "請使用 Google chrome 瀏覽器，連結至「國庫收支書表條碼化 web 版」首頁」(http://veb.nta"
+        ]
+      }
+    }
+  ],
   "vlm_audit_candidates": [],
   "vlm_audits": [],
   "stats": {
-    "issue_count": 0,
-    "issues_by_severity": {},
-    "issues_by_code": {},
+    "issue_count": 2,
+    "issues_by_severity": {
+      "high": 1,
+      "medium": 1
+    },
+    "issues_by_code": {
+      "structured_output_empty": 1,
+      "authored_text_dropped": 1
+    },
     "vlm_audit_candidate_count": 0,
     "vlm_audit_count": 0,
     "structured_document_type": "generic_document",
     "structured_record_count": 0,
     "semantic_quality": {
-      "correctness_score": 1.0,
+      "correctness_score": 0.8,
       "rag_readiness_score": 1.0,
-      "recommended_repairs": []
+      "recommended_repairs": [
+        "generate_structured_semantic_output"
+      ]
     },
-    "semantic_output_language": "zh-TW"
+    "semantic_output_language": "zh-TW",
+    "preserved_source_blocks": 0,
+    "upstream_auto_rag_veto": false,
+    "auto_rag_ready": false,
+    "final_delivery_checked": true,
+    "agentic_review": {
+      "mode": "apply",
+      "total_pages": 2,
+      "total_blocks": 10,
+      "inventory_complete": true,
+      "verified_pages": 2,
+      "verified_blocks": 10,
+      "needs_review_pages": 0,
+      "needs_review_blocks": 0,
+      "not_reviewed_pages": 0,
+      "not_reviewed_blocks": 0,
+      "complete": true,
+      "evidence_valid": true,
+      "reason": "source_review_complete"
+    },
+    "automatic_delivery": {
+      "schema_version": 1,
+      "status": "partial",
+      "requires_human_review": false,
+      "verified_blocks": 10,
+      "excluded_blocks": 0,
+      "gap_count": 0,
+      "rag_ready": true,
+      "rag_chunks": 6,
+      "rag_blocks": 10,
+      "rag_file": "rag_chunks.jsonl",
+      "reading_file": "delivery.md",
+      "delivery_sha256": "b2d5abfbf2719661c2399f30d161deb88698d9d54fe436999cfb15e74596d295",
+      "upstream_veto": false
+    },
+    "partial_rag_ready": true,
+    "agentic_recovery": {
+      "applied": 0,
+      "rejected": 0,
+      "resolved": 0,
+      "unresolved": 0,
+      "budget_exhausted": 0,
+      "stopped_by_budget": 0,
+      "attempts": 0,
+      "deferred": 0
+    },
+    "final_coverage": {
+      "expected_blocks": 10,
+      "missing_documents": 0,
+      "missing_chunks": 0
+    }
   }
 }

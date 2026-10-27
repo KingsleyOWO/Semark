@@ -2,7 +2,7 @@
 
 [English](README.md) | **繁體中文**
 
-這個目錄放的是以 `accurate` profile 成功執行後挑選出來的輸出快照。每個 demo 都把來源頁面的縮圖與產出的 RAG-ready Markdown 放在一起，讓讀者可以直接比對「視覺輸入」與「語意輸出」。兩個截圖 demo 另外附上只做解析／OCR 的原始輸出，因此不需要跑模型也看得出語意階段實際做了什麼。
+這個目錄放的是以 `accurate` profile 成功執行後挑選出來的輸出快照。`zh-screenshot-guide-01/` 以 v0.4.0 重新產生（含逐頁核對），其他三個是還沒有核對功能時的 v0.3 輸出。每個 demo 都把來源頁面的縮圖與產出的 RAG-ready Markdown 放在一起，讓讀者可以直接比對「視覺輸入」與「語意輸出」。兩個截圖 demo 另外附上只做解析／OCR 的原始輸出，因此不需要跑模型也看得出語意階段實際做了什麼。
 
 ## Demo 列表
 
@@ -21,6 +21,7 @@
 - `raw-parse.md`：解析／OCR 層自己的輸出，尚未經過任何語意階段。兩個截圖 demo 有附，作為語意輸出的對照基準。
 - `output.md`：最終產出的語意 Markdown（主文）。
 - `figure-example.md`：其中一份分檔的圖片語意文件，示範一張截圖如何成為可獨立檢索的語意檔案。
+- `delivery.md`：給人閱讀的版本，每張圖前標出核對狀態（只有 v0.4.0 的 demo 有）。
 - `chunks.jsonl`：產生的 chunks，供檢索匯入使用。
 - `quality_gate.json`：該次執行的品質閘門狀態、分數、issues 與修復 metadata。
 

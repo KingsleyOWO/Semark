@@ -2,7 +2,7 @@
 
 **English** | [繁體中文](DEMOS.zh-TW.md) · [Back to README](../README.md)
 
-These demos were produced with v0.3 (2026-07), before page-by-page verification and the verified / not verified labels existed; they show the shape of the semantic Markdown.
+The Treasury payment-slip screenshot guide was regenerated with v0.4.0, with page-by-page verification and the verified label. The other three demos are still v0.3 (2026-07) output, from before verification existed: rerun with v0.4.0, the flowchart put two branches under the wrong parent (and still passed verification), and the two English documents were laid out worse than before, so the old versions stay.
 
 ## Demo Comparisons
 
@@ -127,60 +127,69 @@ Grouped by meaning for completion:
 
 ### Traditional Chinese Screenshot Guide: Treasury Payment Slips
 
-**Pain point:** in screenshot-based manuals the facts that matter — which menu to click, which option is boxed in red, what to type into each field — live inside images, where OCR-only pipelines cannot retrieve them.
+**Pain point:** in a screenshot manual, what matters — which menu to click, which option is boxed in red, what each field expects — lives in the images, where a text-only pipeline cannot retrieve it.
 
-**Source page** (page 2 of 2, the data-entry screen)
+This demo was regenerated with v0.4.0 (with page-by-page verification); both pages were verified.
 
-![Treasury guide source page](../examples/demos/zh-screenshot-guide-01/source-page-2.png)
+**Source page** (page 2, the data-entry screen)
 
-**What a parse-only pipeline delivers** — this is the complete raw output of the parsing/OCR layer for both pages ([raw-parse.md](../examples/demos/zh-screenshot-guide-01/raw-parse.md)):
+![Treasury payment-slip guide source page](../examples/demos/zh-screenshot-guide-01/source-page-2.png)
+
+**What a parse/OCR-only pipeline gives you** — the parser's complete output for both pages ([raw-parse.md](../examples/demos/zh-screenshot-guide-01/raw-parse.md)):
 
 ```markdown
-列印國庫繳款書操作說明  
-![](images/3501ffcf4badafeb0891e3722c14444ba46ea14600b95ba58ebbf80e14e515ca.jpg)
+## 列印國庫繳款書操作說明
 
-版權所有©中華民國109年，財政部國庫署，建議解析度1024×768以上。客服電話:02-2395-7500#325,#32920160302-1517
+繳款書(01)條碼化作業
+
+歡迎使用 VEB 系統請點選上方功能清單進入作業功能
+
+版權所有 中華民國 109 年，財政部國庫署，建議解析度 1024×768 以上。客服電話:02-2395-7500#325,#329 20160302-1517
 
 【說明】
 
-請使用 Google chrome 瀏覽器，連結至「國庫收支書表條碼化 web 版」首頁」（http://veb.nta.gov.tw/），點選畫面左上角「繳款書(01)條碼化作業」，進入資料登打畫面。
+請使用 Google chrome 瀏覽器，連結至「國庫收支書表條碼化 web 版」首頁」(http://veb.nta.gov.tw/).  
+點選畫面左上角「繳款書(01)條碼化作業」進入資料登打畫面。
 
-![](images/f93289d3a314f46910d41d95a3175e6bea439cd6b9d11ce84166e60d877ac1b4.jpg)
+![](images/c7c6855453bb0af93c150dd568a74b2eeb459a72c5e811a36fae26a396f560f9.jpg)
 
 ## 【說明】
 
-1. 請依紅框說明文字輸入相關資訊後，點選右上角「列印」即可產製國庫繳款書（為利條碼讀取，請以雷射印表機列印）。
+1.請依紅框說明文字輸入相關資訊後，點選右上角「列印」即可產製國庫繳款書（為利條碼讀取，請以雷射印表機列印）。
 
-2. 備註欄案號，請填法院裁定遺管人之案號(如：台北地院108年度司繼字第0號)。
+2. 備註欄案號，請填法院裁定遺管人之案號(如：台北地院108年度司繼字第0號）。
 ```
 
-The entire data-entry screen — every field, every hint value, the red boxes — is that one dead image link. A retriever can answer nothing about the form from this.
+The whole data-entry screen — every field, every hint value, every red box — is that one dead image link. RAG over this output cannot answer any question about the form.
 
-**What Semark delivers** (main document, excerpt — [full main document](../examples/demos/zh-screenshot-guide-01/output.md))
+**Semark's output** (reading copy excerpt, [delivery.md](../examples/demos/zh-screenshot-guide-01/delivery.md); the [main document](../examples/demos/zh-screenshot-guide-01/output.md) imported into RAG has the same content without the verification labels)
 
 ```markdown
-# 列印國庫繳款書操作說明
+## 列印國庫繳款書操作說明
 
-頂部導航欄包含四個條碼化作業選項：繳款書(01)、支出收回書(02)、收入退還書(03) 和 轉正通知書(05/04)。
-「繳款書(01)條碼化作業」選項被紅框特別標示。
+繳款書(01)條碼化作業
+
+歡迎使用 VEB 系統請點選上方功能清單進入作業功能
+
+版權所有 中華民國 109 年，財政部國庫署，建議解析度 1024×768 以上。客服電話:02-2395-7500#325,#329 20160302-1517
 
 【說明】
-請使用 Google chrome 瀏覽器，連結至「國庫收支書表條碼化 web 版」首頁」（http://veb.nta.gov.tw/），點選畫面左上角「繳款書(01)條碼化作業」，進入資料登打畫面。
 
-頁面標題為 VEB001R 繳款書(01)條碼化作業。
-收入科目代號需輸入「12171002103」。
-收入科目名稱需輸入「其他雜項收入」。
-收入機關代號與對帳機關代號均需輸入「1710003」。
-填發機關、收入機關名稱及對帳機關名稱均需輸入「國庫署」。
-繳款人欄位提示格式為「遺管人○○○繳納被繼承人○○○賸餘現金」。
-備註欄位需輸入聯絡電話及案號。
+請使用 Google chrome 瀏覽器，連結至「國庫收支書表條碼化 web 版」首頁」(http://veb.nta.gov.tw/).  
+點選畫面左上角「繳款書(01)條碼化作業」進入資料登打畫面。
 
-## 【說明】
-1. 請依紅框說明文字輸入相關資訊後，點選右上角「列印」即可產製國庫繳款書（為利條碼讀取，請以雷射印表機列印）。
-2. 備註欄案號，請填法院裁定遺管人之案號(如：台北地院108年度司繼字第0號)。
+〔圖片內容：自動辨識，已核對〕
+此為國庫署「VEB001R 繳款書(01)條碼化作業」網頁表單截圖，畫面以紅框標示各必填欄位並附輸入說明文字（如會計年度、收入科目代號、繳款人、備註等），右上角「列印」按鈕亦以紅框強調，用於產製國庫繳款書條碼。
+畫面為國庫署「VEB001R 繳款書(01)條碼化作業」表單介面，頂部另有支出收回書(02)、收入退還書(03)、轉正通知書(05/04)等條碼化作業分頁。
+右上角功能按鈕包含「匯入」「匯出」「列印」「清除」，其中「列印」以紅框標示。
+紅框欄位說明：會計年度需輸入繳款年度；收入科目代號請輸入「12171002103」；收入科目名稱請輸入「其他雜項收入」。
+紅框欄位說明：收入機關代號與對帳機關代號皆請輸入「1710003」，收入機關名稱與對帳機關名稱皆請輸入「國庫署」。
+紅框欄位說明：填發機關請輸入「國庫署」；繳款人請輸入「遺管人○○○繳納被繼承人○○○賸餘現金」；備註請輸入聯絡電話及案號。
+填發日期與款項所屬年月欄位提示「請依下拉式表單選取」，並顯示空白日期格式（__/__/__ 與 __/__）。
+金額欄位預設值為「0」，並提示「請輸入繳款金額」。
 ```
 
-Every red-box callout and field hint from the screenshots is now plain, retrievable text — ask a RAG system 「收入科目代號要填什麼」 and it can answer 「12171002103」 with this page as the source.
+The red-box callouts and field hints all become retrievable text, checked against the source image — ask a RAG system "what goes in the revenue account code field" and it can cite this page for "12171002103".
 
 ### Traditional Chinese Flowchart: Sexual Harassment Complaint Workflow
 

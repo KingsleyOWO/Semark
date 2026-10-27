@@ -3,6 +3,8 @@
 **English** | [繁體中文](README.zh-TW.md)
 
 This directory contains curated output snapshots from successful `accurate`-profile runs.
+`zh-screenshot-guide-01/` was regenerated with v0.4.0 (page-by-page verification); the other
+three are v0.3 output from before verification existed.
 Each demo keeps a small source-page image beside the generated RAG-ready Markdown so
 readers can compare the visual input with the semantic output. The two screenshot demos
 additionally ship the raw parse-only baseline, so the difference the semantic stage makes
@@ -37,6 +39,8 @@ Each demo directory may include:
 - `output.md`: final generated semantic Markdown (the main document).
 - `figure-example.md`: one split figure document, showing how a screenshot is delivered as
   an independently retrievable semantic file.
+- `delivery.md`: the reading copy, with each picture's verification status in front of it
+  (v0.4.0 demos only).
 - `chunks.jsonl`: generated chunks intended for retrieval ingestion.
 - `quality_gate.json`: quality gate status, score, issues, and repair metadata for the run.
 

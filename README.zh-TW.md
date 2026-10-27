@@ -81,7 +81,7 @@ docker compose up --build
 
 - **逐頁核對很花時間。** 每份文件預設的處理時間上限是 6 小時（含初稿），時間到就停止核對。舉例：一份 97 頁、圖片很多的 Word 報告，在一台 DGX Spark 上用 27B 的本機視覺模型，初稿約 2 小時、核對約 4.3 小時。要更快，可以縮短時間上限，或在建立工作時把 `agentic.mode` 設成 `off`（見[說明](backend/docs/agentic-processing.md)）。
 - **不保證每頁都核對通過。** 同一份報告 97 頁中有 57 頁完整核對通過，其餘頁面記為待確認或未核對，不會算成通過；時間用完時沒輪到的頁面也一樣。
-- **結果受模型影響。** 圖片的描述句（例如把甜甜圈說成泡芙）不一定擋得下來；圖上的字和數字有比較嚴格的檢查。
+- **結果受模型影響。** 圖片的描述句（例如把甜甜圈說成泡芙）和流程圖的分支關係，讀錯時不一定擋得下來；圖上的字和數字有比較嚴格的檢查。
 - **OCR 證據是選配的。** 環境裡有 PaddleOCR 時（`SEMARK_OCR_PYTHON_PATH` 指向裝了 `paddleocr` 的 Python），修正圖片時會拿它當第二份證據；預設的 Docker 映像不含 PaddleOCR。
 - **截圖可能帶出個人資訊。** 「遮蔽個人資訊」預設開啟，但它是樣式比對的最後防線；最可靠的做法是上傳前先把個人內容蓋掉。詳見 [docs/DEMOS.zh-TW.md](docs/DEMOS.zh-TW.md#截圖文件與個人資訊)。
 
@@ -102,4 +102,4 @@ PDF、DOC／DOCX、PPT／PPTX、XLS／XLSX、ODT／ODP／ODS、HTML、PNG／JPG�
 - [安裝、設定與部署](docs/INSTALL.zh-TW.md)
 - [Demo 對照](docs/DEMOS.zh-TW.md)
 - [逐頁核對與修復流程](backend/docs/agentic-processing.md)
-- [Release Notes 2026-08-12（v0.3.1）](RELEASE_NOTES_20260812.zh-TW.md)
+- [Release Notes 2026-10-27（v0.4.0）](RELEASE_NOTES_20261027.zh-TW.md)

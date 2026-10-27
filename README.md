@@ -81,7 +81,7 @@ Traditional Chinese output uses the equivalent labels, such as 〔圖片內容�
 
 - **Verification takes time.** Each document has a default processing limit of 6 hours, drafting included; verification stops when it runs out. Example: a 97-page Word report full of pictures took about 2 hours to draft and 4.3 hours to verify on one DGX Spark with a local 27B vision model. To go faster, lower the limit or set `agentic.mode` to `off` when creating the run (see [the docs](backend/docs/agentic-processing.md)).
 - **Not every page is guaranteed to pass.** In that report, 57 of 97 pages were fully verified; the rest were recorded as pending or not verified, never counted as passed — the same goes for pages the time limit did not reach.
-- **Results depend on the model.** A wrong description of a picture (calling doughnuts cream puffs) may slip through; lettering and numbers on pictures face stricter checks.
+- **Results depend on the model.** A wrong description of a picture (calling doughnuts cream puffs) or a misread flowchart branch may slip through; lettering and numbers on pictures face stricter checks.
 - **OCR evidence is optional.** If PaddleOCR is available (`SEMARK_OCR_PYTHON_PATH` points at a Python with `paddleocr`), picture repairs use it as a second source of evidence; the default Docker image does not include it.
 - **Screenshots can carry personal data.** Personal-information masking is on by default, but it is a last line of pattern matching; the reliable way is to blank personal content before uploading. See [docs/DEMOS.md](docs/DEMOS.md#screenshots-and-personal-information).
 
@@ -102,4 +102,4 @@ Semark's own source code is released under the Apache License 2.0; see `LICENSE`
 - [Installation, configuration and deployment](docs/INSTALL.md)
 - [Demo comparisons](docs/DEMOS.md)
 - [Page-by-page verification and repair](backend/docs/agentic-processing.md) (Traditional Chinese)
-- [Release Notes 2026-08-12 (v0.3.1)](RELEASE_NOTES_20260812.md)
+- [Release Notes 2026-10-27 (v0.4.0)](RELEASE_NOTES_20261027.md)
